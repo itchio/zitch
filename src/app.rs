@@ -10,6 +10,7 @@ use crate::ui;
 
 pub struct App {
     backend: Backend,
+    covers: CoverLoader,
     status: String,
     profile: Option<Profile>,
     games: Loadable<Vec<Game>>,
@@ -79,6 +80,7 @@ impl App {
         ctx.set_zoom_factor(1.6);
         Self {
             backend,
+            covers,
             status: String::new(),
             profile: None,
             games: Loadable::Loading,
@@ -252,7 +254,7 @@ impl eframe::App for App {
                     Loadable::NotLoaded | Loadable::Loading => ui::centered_spinner(ui),
                     Loadable::Failed(_) => {}
                     Loadable::Loaded(games) => {
-                        ui::library(ui, games, &mut self.grid, &mut self.actions)
+                        ui::library(ui, games, &mut self.grid, &self.covers, &mut self.actions)
                     }
                 }
             });

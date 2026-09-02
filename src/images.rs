@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use std::time::Duration;
+
 use egui::ColorImage;
 use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
 
@@ -17,19 +19,45 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// is wasted texture memory and upload time.
 const MAX_DIMENSION: u32 = 630;
 
-enum Entry {
+/// Frames of an animated cover, with how long each stays up.
+pub struct Animation {
+    pub frames: Vec<Arc<ColorImage>>,
+    pub delays: Vec<Duration>,
+    pub total: Duration,
+}
+
+impl Animation {
+    /// The frame showing `elapsed` into a looping playback, and how long
+    /// until the next one.
+    pub fn frame_at(&self, elapsed: Duration) -> (usize, Duration) {
+        let mut t =
+            Duration::from_nanos((elapsed.as_nanos() % self.total.as_nanos().max(1)) as u64);
+        for (index, delay) in self.delays.iter().enumerate() {
+            if t < *delay {
+                return (index, *delay - t);
+            }
+            t -= *delay;
+        }
+        (self.frames.len() - 1, Duration::ZERO)
+    }
+}
+
+enum Entry<T> {
     Pending,
-    Ready(Arc<ColorImage>),
+    Ready(Arc<T>),
     Failed(String),
 }
 
-struct Job {
-    url: String,
-    ctx: egui::Context,
+enum Job {
+    Still { url: String, ctx: egui::Context },
+    Animation { url: String, ctx: egui::Context },
 }
 
 struct Inner {
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<HashMap<String, Entry<ColorImage>>>,
+    /// Only the focused tile animates, so this holds one finished
+    /// animation at a time plus whatever is being decoded.
+    animations: Mutex<HashMap<String, Entry<Animation>>>,
     queue: Mutex<mpsc::Sender<Job>>,
     cache_dir: PathBuf,
 }
@@ -51,6 +79,7 @@ impl CoverLoader {
         let loader = Self {
             inner: Arc::new(Inner {
                 entries: Mutex::default(),
+                animations: Mutex::default(),
                 queue: Mutex::new(tx),
                 cache_dir,
             }),
@@ -75,23 +104,83 @@ impl CoverLoader {
     pub fn install(&self, ctx: &egui::Context) {
         ctx.add_image_loader(Arc::new(self.clone()));
     }
+
+    /// All frames of `url`, once decoded. Asking starts the work and forgets
+    /// every other finished animation, since only one plays at a time.
+    pub fn animation(&self, ctx: &egui::Context, url: &str) -> Option<Arc<Animation>> {
+        let mut animations = self
+            .inner
+            .animations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        animations.retain(|key, entry| key == url || matches!(entry, Entry::Pending));
+        match animations.get(url) {
+            Some(Entry::Ready(animation)) => return Some(Arc::clone(animation)),
+            Some(_) => return None,
+            None => {}
+        }
+        animations.insert(url.to_string(), Entry::Pending);
+        drop(animations);
+        self.enqueue(Job::Animation {
+            url: url.to_string(),
+            ctx: ctx.clone(),
+        });
+        None
+    }
+
+    fn enqueue(&self, job: Job) {
+        let _ = self
+            .inner
+            .queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .send(job);
+    }
 }
 
 impl Inner {
     fn complete(&self, job: Job) {
-        let outcome = self.fetch(&job.url).and_then(|bytes| decode(&bytes));
-        let entry = match outcome {
-            Ok(image) => Entry::Ready(Arc::new(image)),
-            Err(error) => {
-                log::debug!("cover {}: {error}", job.url);
-                Entry::Failed(error)
+        match job {
+            Job::Still { url, ctx } => {
+                let outcome = self.fetch(&url).and_then(|bytes| decode(&bytes));
+                let entry = match outcome {
+                    Ok(image) => Entry::Ready(Arc::new(image)),
+                    Err(error) => {
+                        log::debug!("cover {url}: {error}");
+                        Entry::Failed(error)
+                    }
+                };
+                self.entries
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(url, entry);
+                ctx.request_repaint();
             }
-        };
-        self.entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(job.url, entry);
-        job.ctx.request_repaint();
+            Job::Animation { url, ctx } => {
+                let started = std::time::Instant::now();
+                let outcome = self.fetch(&url).and_then(|bytes| decode_animation(&bytes));
+                let entry = match outcome {
+                    Ok(animation) => {
+                        log::debug!(
+                            "decoded {} frames of {url} in {:?}",
+                            animation.frames.len(),
+                            started.elapsed()
+                        );
+                        Entry::Ready(Arc::new(animation))
+                    }
+                    Err(error) => {
+                        log::debug!("animated cover {url}: {error}");
+                        Entry::Failed(error)
+                    }
+                };
+                let mut animations = self.animations.lock().unwrap_or_else(|p| p.into_inner());
+                // Focus may have moved on; a forgotten request stays forgotten.
+                if let Some(slot) = animations.get_mut(&url) {
+                    *slot = entry;
+                    ctx.request_repaint();
+                }
+            }
+        }
     }
 
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
@@ -124,7 +213,7 @@ fn decode(bytes: &[u8]) -> Result<ColorImage, String> {
     let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
     let decoded = if format == image::ImageFormat::Gif {
         // Animated covers can run to megabytes and hundreds of frames; one
-        // frame is all a tile needs.
+        // frame is all a resting tile needs.
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
             .map_err(|e| e.to_string())?;
         let frame = decoder
@@ -136,6 +225,51 @@ fn decode(bytes: &[u8]) -> Result<ColorImage, String> {
     } else {
         image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?
     };
+    Ok(to_color_image(decoded))
+}
+
+/// Every frame of a gif, each scaled like a still. Other formats yield one
+/// frame that never changes.
+fn decode_animation(bytes: &[u8]) -> Result<Animation, String> {
+    use image::AnimationDecoder;
+    let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
+    if format != image::ImageFormat::Gif {
+        let frame = decode(bytes)?;
+        return Ok(Animation {
+            frames: vec![Arc::new(frame)],
+            delays: vec![Duration::from_secs(1)],
+            total: Duration::from_secs(1),
+        });
+    }
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|e| e.to_string())?;
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    let mut total = Duration::ZERO;
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(|e| e.to_string())?;
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        // Browsers treat very short delays as 100 ms, so do the same.
+        let ms = numer as f64 / denom.max(1) as f64;
+        let delay = if ms < 20.0 { 100.0 } else { ms };
+        let delay = Duration::from_secs_f64(delay / 1000.0);
+        frames.push(Arc::new(to_color_image(image::DynamicImage::ImageRgba8(
+            frame.into_buffer(),
+        ))));
+        delays.push(delay);
+        total += delay;
+    }
+    if frames.is_empty() {
+        return Err("gif has no frames".into());
+    }
+    Ok(Animation {
+        frames,
+        delays,
+        total,
+    })
+}
+
+fn to_color_image(decoded: image::DynamicImage) -> ColorImage {
     let decoded = if decoded.width() > MAX_DIMENSION || decoded.height() > MAX_DIMENSION {
         decoded.resize(
             MAX_DIMENSION,
@@ -147,7 +281,7 @@ fn decode(bytes: &[u8]) -> Result<ColorImage, String> {
     };
     let rgba = decoded.into_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+    ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
 }
 
 /// A filename for the cache that is unique to the URL and safe everywhere.
@@ -182,16 +316,10 @@ impl ImageLoader for CoverLoader {
             None => {
                 entries.insert(uri.to_string(), Entry::Pending);
                 drop(entries);
-                let job = Job {
+                self.enqueue(Job::Still {
                     url: uri.to_string(),
                     ctx: ctx.clone(),
-                };
-                let _ = self
-                    .inner
-                    .queue
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .send(job);
+                });
                 Ok(ImagePoll::Pending { size: None })
             }
         }

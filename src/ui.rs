@@ -1,7 +1,11 @@
 //! Drawing. Views read the app state and never mutate it.
 
-use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+use std::sync::Arc;
+use std::time::Instant;
 
+use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
+
+use crate::images::{Animation, CoverLoader};
 use crate::model::{Action, Game};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
@@ -19,7 +23,7 @@ const TITLE_HEIGHT: f32 = 26.0;
 
 /// Where the library grid is and what it points at. Drawing fills in
 /// `columns` and `scroll`; actions move `focus`.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Grid {
     pub focus: usize,
     /// Scroll so the focused tile is in view on the next frame.
@@ -27,9 +31,38 @@ pub struct Grid {
     pub columns: usize,
     scroll: f32,
     last_pointer: Option<egui::Pos2>,
+    /// The focused tile's animated cover, while it has one.
+    playing: Option<Playing>,
 }
 
-pub fn library(ui: &mut Ui, games: &[Game], grid: &mut Grid, actions: &mut Vec<Action>) {
+struct Playing {
+    url: String,
+    animation: Arc<Animation>,
+    started: Instant,
+    /// Uploaded the first time each frame is shown, so starting playback
+    /// never sends the whole gif to the GPU in one frame.
+    textures: Vec<Option<TextureHandle>>,
+}
+
+impl Game {
+    /// The animated cover, when the game has one distinct from its still.
+    fn animated_cover(&self) -> Option<&str> {
+        let cover = self.cover_url.as_deref()?;
+        let is_gif = cover
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
+        (is_gif && self.still_cover_url.as_deref() != Some(cover)).then_some(cover)
+    }
+}
+
+pub fn library(
+    ui: &mut Ui,
+    games: &[Game],
+    grid: &mut Grid,
+    covers: &CoverLoader,
+    actions: &mut Vec<Action>,
+) {
     let available = ui.available_width();
     let columns = ((available + GAP) / (TILE_WIDTH + GAP)).floor().max(1.0) as usize;
     let tile_width = (available - GAP * (columns as f32 - 1.0)) / columns as f32;
@@ -60,6 +93,26 @@ pub fn library(ui: &mut Ui, games: &[Game], grid: &mut Grid, actions: &mut Vec<A
     let pointer_moved = matches!((grid.last_pointer, pointer), (Some(a), Some(b)) if a != b);
     grid.last_pointer = pointer;
 
+    // Playback follows focus: the focused game's animation, or none.
+    let wanted = games.get(grid.focus).and_then(Game::animated_cover);
+    if grid.playing.as_ref().map(|p| p.url.as_str()) != wanted {
+        grid.playing = None;
+    }
+    if let Some(url) = wanted
+        && grid.playing.is_none()
+        && let Some(animation) = covers.animation(ui.ctx(), url)
+    {
+        let textures = vec![None; animation.frames.len()];
+        log::debug!("playing {} frames of {url}", animation.frames.len());
+        grid.playing = Some(Playing {
+            url: url.to_string(),
+            animation,
+            started: Instant::now(),
+            textures,
+        });
+    }
+    let mut playing = grid.playing.take();
+
     let output = area.show_rows(ui, row_height, rows, |ui, range| {
         for row in range {
             ui.horizontal(|ui| {
@@ -81,7 +134,9 @@ pub fn library(ui: &mut Ui, games: &[Game], grid: &mut Grid, actions: &mut Vec<A
                         actions.push(Action::Activate);
                     }
                     if ui.is_rect_visible(rect) {
-                        tile(ui, rect, cover_height, game, index == grid.focus);
+                        let focused = index == grid.focus;
+                        let animation = if focused { playing.as_mut() } else { None };
+                        tile(ui, rect, cover_height, game, focused, animation);
                     }
                 }
             });
@@ -89,18 +144,34 @@ pub fn library(ui: &mut Ui, games: &[Game], grid: &mut Grid, actions: &mut Vec<A
         }
     });
     grid.scroll = output.state.offset.y;
+    grid.playing = playing;
 }
 
-fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, focused: bool) {
+fn tile(
+    ui: &Ui,
+    rect: Rect,
+    cover_height: f32,
+    game: &Game,
+    focused: bool,
+    playing: Option<&mut Playing>,
+) {
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
-    // stillCoverUrl is the static frame of an animated cover; those gifs
-    // run to megabytes.
-    let url = game
-        .still_cover_url
-        .as_deref()
-        .or(game.cover_url.as_deref());
-    let painted = url.is_some_and(|url| paint_cover(ui, url, cover, radius));
+    let painted = match playing {
+        Some(playing) => {
+            paint_frame(ui, playing, cover, radius);
+            true
+        }
+        None => {
+            // stillCoverUrl is the static frame of an animated cover; those
+            // gifs run to megabytes and only play while focused.
+            let url = game
+                .still_cover_url
+                .as_deref()
+                .or(game.cover_url.as_deref());
+            url.is_some_and(|url| paint_cover(ui, url, cover, radius))
+        }
+    };
     if !painted {
         let fill = if focused { TILE_HOVER } else { TILE_BG };
         ui.painter().rect_filled(cover, radius, fill);
@@ -137,6 +208,27 @@ fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, focused: bool) {
         .galley(title_rect.left_top(), galley, DIM);
 }
 
+/// Paints the current frame of a playing animation and schedules the next.
+fn paint_frame(ui: &Ui, playing: &mut Playing, rect: Rect, radius: CornerRadius) {
+    let (index, until_next) = playing.animation.frame_at(playing.started.elapsed());
+    let texture = playing.textures[index].get_or_insert_with(|| {
+        ui.ctx().load_texture(
+            format!("{}#{index}", playing.url),
+            Arc::clone(&playing.animation.frames[index]),
+            egui::TextureOptions::LINEAR,
+        )
+    });
+    paint_texture(
+        ui,
+        egui::load::SizedTexture::from_handle(texture),
+        rect,
+        radius,
+    );
+    if playing.animation.frames.len() > 1 {
+        ui.ctx().request_repaint_after(until_next);
+    }
+}
+
 /// Paints the cover cropped to fill `rect`, or returns false while it is
 /// still loading or has failed.
 fn paint_cover(ui: &Ui, url: &str, rect: Rect, radius: CornerRadius) -> bool {
@@ -145,6 +237,11 @@ fn paint_cover(ui: &Ui, url: &str, rect: Rect, radius: CornerRadius) -> bool {
     else {
         return false;
     };
+    paint_texture(ui, texture, rect, radius);
+    true
+}
+
+fn paint_texture(ui: &Ui, texture: egui::load::SizedTexture, rect: Rect, radius: CornerRadius) {
     let image_aspect = texture.size.x / texture.size.y;
     let rect_aspect = rect.width() / rect.height();
     let uv = if image_aspect > rect_aspect {
@@ -160,7 +257,6 @@ fn paint_cover(ui: &Ui, url: &str, rect: Rect, radius: CornerRadius) -> bool {
         .uv(uv)
         .corner_radius(radius)
         .paint_at(ui, rect);
-    true
 }
 
 pub fn heading(ui: &mut Ui, text: &str) {
