@@ -7,8 +7,9 @@
 //! `Downloads.Discard` cancels. butler then owns staging folders, resume
 //! after a restart, and ordering.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,14 +17,16 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
-    AnyNotification, AnyServerRequest, DownloadReason, DownloadsClearFinishedParams,
-    DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
-    DownloadsRetryParams, FetchCavesParams, FetchGameUploadsParams, FetchProfileOwnedKeysParams,
-    InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, ProfileListParams,
-    ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, UninstallPerformParams,
+    AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
+    DownloadReason, DownloadsClearFinishedParams, DownloadsDiscardParams,
+    DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams, DownloadsRetryParams,
+    FetchCavesParams, FetchGameUploadsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
+    InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
+    PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
+    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, Download, DownloadProgress, Game, Profile, UserExt};
+use crate::model::{Cave, Download, DownloadProgress, Game, Profile, Prompt, UserExt};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -32,6 +35,8 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Where games go when the database has no install location yet.
     pub install_dir: PathBuf,
+    /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
+    pub prereqs_dir: PathBuf,
 }
 
 pub enum Command {
@@ -47,6 +52,14 @@ pub enum Command {
     },
     Uninstall {
         cave_id: String,
+    },
+    Launch {
+        cave_id: String,
+    },
+    /// The user's pick for a [`Event::Prompt`], or `None` when dismissed.
+    Answer {
+        prompt: u64,
+        choice: Option<usize>,
     },
     Shutdown,
 }
@@ -70,6 +83,18 @@ pub enum Event {
         cave_id: String,
         result: Result<(), String>,
     },
+    /// The game process is up.
+    LaunchRunning {
+        cave_id: String,
+    },
+    /// The `Launch` call returned; the game has exited or never started.
+    LaunchFinished {
+        cave_id: String,
+        result: Result<(), String>,
+    },
+    /// A question to show until [`Event::PromptClosed`] or an answer.
+    Prompt(Prompt),
+    PromptClosed(u64),
     Error(String),
 }
 
@@ -175,6 +200,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
 
     let stopping = Arc::new(AtomicBool::new(false));
     let driver = spawn_driver(Arc::clone(&daemon), emit.clone(), Arc::clone(&stopping));
+    let prompts = Prompts::default();
+    let config = Arc::new(config);
 
     loop {
         match commands.recv_timeout(Duration::from_millis(100)) {
@@ -217,6 +244,28 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     },
                 );
             }
+            Ok(Command::Launch { cave_id }) => {
+                let config = Arc::clone(&config);
+                let prompts = prompts.clone();
+                let profile_id = profile.id;
+                spawn_op(
+                    format!("launch-{cave_id}"),
+                    Arc::clone(&daemon),
+                    emit.clone(),
+                    move |client, emit| {
+                        let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
+                        emit.send(Event::LaunchFinished {
+                            cave_id,
+                            // The innermost error is butler's own words.
+                            result: result.map_err(|e| e.root_cause().to_string()),
+                        });
+                        // Play time and last-played change with every run.
+                        refresh_caves(client, emit);
+                        Ok(())
+                    },
+                );
+            }
+            Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         for incoming in client.poll() {
@@ -332,6 +381,174 @@ fn log_incoming(client: &Client, incoming: Incoming) {
                 Err(error) => log::warn!("bad {method} request: {error}"),
             }
             let _ = client.reply_error(&id, -32601, "not supported by this client");
+        }
+    }
+}
+
+/// Questions in flight between an op thread and the interface. The op
+/// thread blocks on its answer; the interface answers through a command.
+#[derive(Clone, Default)]
+struct Prompts {
+    next_id: Arc<AtomicU64>,
+    waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Option<usize>>>>>,
+}
+
+impl Prompts {
+    /// Shows a prompt and waits for the pick. `None` means dismissed, or the
+    /// interface went away.
+    fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = mpsc::channel();
+        self.waiting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, tx);
+        emit.send(Event::Prompt(Prompt {
+            id,
+            title: title.to_string(),
+            body: body.to_string(),
+            choices: choices.iter().map(|c| c.to_string()).collect(),
+            focus: 0,
+        }));
+        let choice = rx.recv().ok().flatten();
+        self.waiting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        emit.send(Event::PromptClosed(id));
+        choice
+    }
+
+    fn answer(&self, id: u64, choice: Option<usize>) {
+        let waiting = self.waiting.lock().unwrap_or_else(|p| p.into_inner());
+        match waiting.get(&id) {
+            Some(tx) => {
+                let _ = tx.send(choice);
+            }
+            None => log::debug!("answer to unknown prompt {id}"),
+        }
+    }
+}
+
+/// Runs a game and stays in the call until it exits, answering whatever
+/// butler asks along the way.
+fn launch(
+    client: &Client,
+    config: &Config,
+    prompts: &Prompts,
+    profile_id: i64,
+    cave_id: &str,
+    emit: &Emitter,
+) -> Result<()> {
+    std::fs::create_dir_all(&config.prereqs_dir)
+        .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
+    let params = LaunchParams {
+        cave_id: cave_id.to_string(),
+        prereqs_dir: Some(config.prereqs_dir.to_string_lossy().into_owned()),
+        profile_id: Some(profile_id),
+        ..Default::default()
+    };
+    client.call_streaming(params, |incoming| match incoming {
+        Incoming::Notification { method, params } => {
+            match AnyNotification::decode(&method, params) {
+                Ok(AnyNotification::LaunchRunning(_)) => emit.send(Event::LaunchRunning {
+                    cave_id: cave_id.to_string(),
+                }),
+                Ok(AnyNotification::LaunchExited(_)) => log::info!("game exited"),
+                Ok(AnyNotification::PrereqsStarted(n)) => {
+                    emit.status(format!("Installing {} prerequisites", n.tasks.len()))
+                }
+                Ok(AnyNotification::PrereqsTaskState(n)) => emit.status(format!(
+                    "{}: {:?} {:.0}%",
+                    n.name,
+                    n.status,
+                    n.progress * 100.0
+                )),
+                Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
+                Ok(other) => log::debug!("{other:?}"),
+                Err(error) => log::warn!("bad {method} notification: {error}"),
+            }
+        }
+        Incoming::Request { id, method, params } => {
+            let request = match AnyServerRequest::decode(&method, params) {
+                Ok(request) => request,
+                Err(error) => {
+                    log::warn!("bad {method} request: {error}");
+                    let _ = client.reply_error(&id, -32602, &error.to_string());
+                    return;
+                }
+            };
+            let outcome = answer_launch_request(client, prompts, emit, &id, request);
+            if let Err(error) = outcome {
+                log::warn!("answering {method}: {error:#}");
+                let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
+            }
+        }
+    })?;
+    Ok(())
+}
+
+fn answer_launch_request(
+    client: &Client,
+    prompts: &Prompts,
+    emit: &Emitter,
+    id: &serde_json::Value,
+    request: AnyServerRequest,
+) -> Result<()> {
+    match request {
+        AnyServerRequest::PickManifestAction(p) => {
+            let names: Vec<&str> = p.actions.iter().map(|a| a.name.as_str()).collect();
+            let picked = if names.len() == 1 {
+                Some(0)
+            } else {
+                prompts.ask(emit, "What do you want to launch?", "", &names)
+            };
+            match picked {
+                Some(index) => client.reply(
+                    id,
+                    PickManifestActionResult {
+                        index: index as i64,
+                    },
+                ),
+                None => client.reply_error(id, 499, "launch cancelled"),
+            }
+        }
+        AnyServerRequest::AcceptLicense(p) => {
+            let accept =
+                prompts.ask(emit, "License agreement", &p.text, &["Accept", "Decline"]) == Some(0);
+            client.reply(id, AcceptLicenseResult { accept })
+        }
+        AnyServerRequest::ShellLaunch(p) => {
+            log::info!("opening {}", p.item_path);
+            open::that_detached(&p.item_path)?;
+            client.reply(id, ShellLaunchResult {})
+        }
+        AnyServerRequest::URLLaunch(p) => {
+            log::info!("opening {}", p.url);
+            open::that_detached(&p.url)?;
+            client.reply(id, URLLaunchResult {})
+        }
+        AnyServerRequest::HTMLLaunch(_) => {
+            // TODO: serve the folder and open a window for it.
+            emit.send(Event::Error("HTML games are not supported yet".into()));
+            let _: Option<HTMLLaunchResult> = None;
+            client.reply_error(id, 501, "HTML games are not supported yet")
+        }
+        AnyServerRequest::AllowSandboxSetup(_) => {
+            client.reply(id, AllowSandboxSetupResult { allow: false })
+        }
+        AnyServerRequest::PrereqsFailed(p) => {
+            let go_on = prompts.ask(
+                emit,
+                "Prerequisites failed to install",
+                &p.error,
+                &["Launch anyway", "Cancel"],
+            ) == Some(0);
+            client.reply(id, PrereqsFailedResult { r#continue: go_on })
+        }
+        other => {
+            log::warn!("unhandled server request {other:?}");
+            client.reply_error(id, -32601, "not supported by this client")
         }
     }
 }

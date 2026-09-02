@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
 use crate::images::{Animation, CoverLoader};
-use crate::model::{Action, Cave, Game, InstallState, Page, UploadExt};
+use crate::model::{Action, Cave, Game, InstallState, Page, Prompt, UploadExt};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
 const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
@@ -336,7 +336,11 @@ pub fn game_buttons(
     game: &Game,
     caves: &[&Cave],
     install: Option<&InstallState>,
+    running: bool,
 ) -> Vec<(&'static str, Action)> {
+    if running {
+        return Vec::new();
+    }
     if let Some(install) = install {
         if install.cancelling {
             return Vec::new();
@@ -373,10 +377,11 @@ pub fn game_detail(
     game: &Game,
     caves: &[&Cave],
     install: Option<&InstallState>,
+    running: bool,
     focused_button: usize,
     actions: &mut Vec<Action>,
 ) {
-    let buttons = game_buttons(game, caves, install);
+    let buttons = game_buttons(game, caves, install, running);
     let width = ui.available_width();
     let cover_width = (width * 0.42).min(420.0);
     let cover_height = cover_width / COVER_ASPECT;
@@ -435,6 +440,13 @@ pub fn game_detail(
                         Sense::hover(),
                     );
                     progress_bar(ui, bar, install.progress as f32);
+                }
+                (None, Some(_)) if running => {
+                    ui.label(
+                        egui::RichText::new("Running")
+                            .font(FontId::proportional(13.0))
+                            .color(GREEN),
+                    );
                 }
                 (None, Some(cave)) => {
                     let mut line = String::from("Installed");
@@ -552,4 +564,68 @@ impl Page {
     pub fn is_library(&self) -> bool {
         matches!(self, Page::Library)
     }
+}
+
+/// A modal question over the whole window. Keyboard and controller focus
+/// go to it while it is up; the mouse can also pick a button.
+pub fn prompt(ctx: &egui::Context, prompt: &Prompt, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::new("prompt-dim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
+        });
+    let width = (screen.width() * 0.6).clamp(320.0, 560.0);
+    egui::Area::new(egui::Id::new("prompt"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(TILE_BG)
+                .corner_radius(CornerRadius::same(10))
+                .stroke(Stroke::new(1.0, TILE_HOVER))
+                .inner_margin(24.0)
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.label(
+                        egui::RichText::new(&prompt.title)
+                            .font(FontId::proportional(22.0))
+                            .color(TEXT),
+                    );
+                    if !prompt.body.is_empty() {
+                        ui.add_space(10.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(screen.height() * 0.4)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(&prompt.body)
+                                        .font(FontId::proportional(13.0))
+                                        .color(DIM),
+                                );
+                            });
+                    }
+                    ui.add_space(18.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        for (index, label) in prompt.choices.iter().enumerate() {
+                            let response = pill(ui, label, index == prompt.focus, index == 0);
+                            if response.hovered()
+                                && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                            {
+                                actions.push(Action::PromptFocus(index));
+                            }
+                            if response.clicked() {
+                                actions.push(Action::Answer {
+                                    prompt: prompt.id,
+                                    choice: Some(index),
+                                });
+                            }
+                        }
+                    });
+                });
+        });
 }

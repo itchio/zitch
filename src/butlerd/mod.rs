@@ -156,7 +156,7 @@ impl std::fmt::Display for RpcError {
             .filter(|joined| !joined.is_empty());
         match api_messages {
             Some(messages) => write!(f, "{messages}"),
-            None => write!(f, "{} (code {})", self.message, self.code),
+            None => write!(f, "{}", self.message),
         }
     }
 }

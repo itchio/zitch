@@ -8,7 +8,7 @@ use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, InstallState, Loadable,
-    Page, Profile, UserExt,
+    Page, Profile, Prompt, UserExt,
 };
 use crate::ui;
 
@@ -30,6 +30,10 @@ pub struct App {
     discarding: std::collections::HashSet<String>,
     /// What the interface shows per game, rebuilt from the fields above.
     pub installs: std::collections::HashMap<i64, InstallState>,
+    /// Caves with a Launch call in flight.
+    running: std::collections::HashSet<String>,
+    /// A question from the backend, shown over everything until answered.
+    prompt: Option<Prompt>,
     page: Page,
     error: Option<String>,
     /// Something the user just did, shown in the header.
@@ -94,6 +98,12 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
+            // A stand-in question, to look at the modal without a game that
+            // asks one.
+            "prompt" => Ok(Step::Act(Action::Answer {
+                prompt: 0,
+                choice: None,
+            })),
             other => {
                 if let Some(index) = other.strip_prefix("focus:").and_then(|n| n.parse().ok()) {
                     Ok(Step::Act(Action::FocusIndex(index)))
@@ -134,6 +144,8 @@ impl App {
             pending_installs: Default::default(),
             discarding: Default::default(),
             installs: Default::default(),
+            running: Default::default(),
+            prompt: None,
             page: Page::Library,
             error: None,
             notice: None,
@@ -180,6 +192,47 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         let count = self.games.get().map_or(0, Vec::len);
+        if let (None, Action::Answer { prompt: 0, .. }) = (&self.prompt, &action) {
+            self.prompt = Some(Prompt {
+                id: 0,
+                title: "License agreement".into(),
+                body: "This is a sample license shown by the screenshot script. ".repeat(12),
+                choices: vec!["Accept".into(), "Decline".into()],
+                focus: 0,
+            });
+            return;
+        }
+        if let Some(prompt) = self.prompt.as_mut() {
+            match action {
+                Action::MoveFocus(Direction::Left) => prompt.focus = prompt.focus.saturating_sub(1),
+                Action::MoveFocus(Direction::Right) => {
+                    prompt.focus = (prompt.focus + 1).min(prompt.choices.len().saturating_sub(1))
+                }
+                Action::PromptFocus(index) if index < prompt.choices.len() => prompt.focus = index,
+                Action::Activate => {
+                    let answer = Action::Answer {
+                        prompt: prompt.id,
+                        choice: Some(prompt.focus),
+                    };
+                    self.actions.push(answer);
+                }
+                Action::Back => {
+                    let answer = Action::Answer {
+                        prompt: prompt.id,
+                        choice: None,
+                    };
+                    self.actions.push(answer);
+                }
+                Action::Answer { prompt: id, choice } => {
+                    if id == prompt.id {
+                        self.prompt = None;
+                        self.backend.send(Command::Answer { prompt: id, choice });
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
                 Page::Library => self.move_grid_focus(direction, count),
@@ -191,6 +244,7 @@ impl App {
                         game,
                         &self.caves_for(game.id),
                         self.installs.get(&game.id),
+                        self.is_running(game.id),
                     )
                     .len()
                     .max(1);
@@ -229,6 +283,7 @@ impl App {
                         game,
                         &self.caves_for(game.id),
                         self.installs.get(&game.id),
+                        self.is_running(game.id),
                     );
                     if let Some((_, action)) = buttons.get(button) {
                         self.actions.push(action.clone());
@@ -247,11 +302,14 @@ impl App {
                 self.notice = None;
                 self.page = page;
             }
-            // Placeholder until the launch flow exists.
             Action::Play { cave_id } => {
-                log::info!("play cave {cave_id}");
-                self.notice = Some("Launching is not wired up yet".into());
+                if self.running.insert(cave_id.clone()) {
+                    self.notice = Some("Launching".into());
+                    self.backend.send(Command::Launch { cave_id });
+                }
             }
+            // Only meaningful while a prompt is open, handled above.
+            Action::Answer { .. } | Action::PromptFocus(_) => {}
             Action::Install { game_id } => {
                 let Some(game) = self
                     .games
@@ -291,6 +349,12 @@ impl App {
                 self.backend.send(Command::Uninstall { cave_id });
             }
         }
+    }
+
+    fn is_running(&self, game_id: i64) -> bool {
+        self.caves
+            .iter()
+            .any(|cave| cave.game_id() == Some(game_id) && self.running.contains(&cave.id))
     }
 
     fn download_for(&self, game_id: i64) -> Option<&Download> {
@@ -390,7 +454,7 @@ impl App {
             }
             shot.capture_pending = false;
             shot.captured = true;
-            if shot.script.is_empty() && self.installs.is_empty() {
+            if shot.script.is_empty() && self.installs.is_empty() && self.running.is_empty() {
                 self.shot = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -421,12 +485,13 @@ impl App {
 
         // An install the script started runs to the end before the window
         // closes; closing would kill the daemon under it.
-        let settled = loaded && self.installs.is_empty();
+        let settled = loaded && self.installs.is_empty() && self.running.is_empty();
         if settled && shot.settled_at.is_none() {
             shot.settled_at = Some(now);
         }
         let ready = shot.settled_at.is_some_and(|at| now >= at + COVER_GRACE);
-        if ready || (now >= shot.deadline && self.installs.is_empty()) {
+        let busy = !self.installs.is_empty() || !self.running.is_empty();
+        if ready || (now >= shot.deadline && !busy) {
             if shot.captured {
                 self.shot = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -484,6 +549,20 @@ impl App {
                         .or(download.error.as_deref())
                         .unwrap_or("unknown error");
                     self.notice = Some(format!("Install of {title} failed: {error}"));
+                }
+                Event::LaunchRunning { .. } => self.notice = Some("Running".into()),
+                Event::LaunchFinished { cave_id, result } => {
+                    self.running.remove(&cave_id);
+                    self.notice = Some(match result {
+                        Ok(()) => "Game exited".to_string(),
+                        Err(error) => format!("Couldn't launch: {error}"),
+                    });
+                }
+                Event::Prompt(prompt) => self.prompt = Some(prompt),
+                Event::PromptClosed(id) => {
+                    if self.prompt.as_ref().is_some_and(|p| p.id == id) {
+                        self.prompt = None;
+                    }
                 }
                 Event::UninstallFinished { result, .. } => {
                     self.notice = Some(match result {
@@ -561,11 +640,13 @@ impl eframe::App for App {
                                     .iter()
                                     .filter(|cave| cave.game_id() == Some(game.id))
                                     .collect();
+                                let running = self.is_running(game.id);
                                 ui::game_detail(
                                     ui,
                                     game,
                                     &caves,
                                     self.installs.get(&game.id),
+                                    running,
                                     button,
                                     &mut self.actions,
                                 );
@@ -575,6 +656,9 @@ impl eframe::App for App {
                     }
                 }
             });
+        if let Some(prompt) = &self.prompt {
+            ui::prompt(ui.ctx(), prompt, &mut self.actions);
+        }
         self.apply_actions();
         if !self.installs.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(250));

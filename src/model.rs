@@ -60,6 +60,17 @@ pub struct InstallState {
     pub error: Option<String>,
 }
 
+/// A question the backend needs answered before a call can go on, shown as
+/// a modal. The backend maps the chosen index back to the typed reply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prompt {
+    pub id: u64,
+    pub title: String,
+    pub body: String,
+    pub choices: Vec<String>,
+    pub focus: usize,
+}
+
 /// What the window is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
@@ -112,6 +123,13 @@ pub enum Action {
     Play {
         cave_id: String,
     },
+    /// Answer the open prompt with a choice, or dismiss it with `None`.
+    Answer {
+        prompt: u64,
+        choice: Option<usize>,
+    },
+    /// Focus a prompt button; the pointer is already there.
+    PromptFocus(usize),
     Install {
         game_id: i64,
     },
