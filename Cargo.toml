@@ -15,8 +15,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # glow keeps the binary small; a 2D launcher does not need wgpu.
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 egui = "0.36"
-# Only for writing --screenshot captures.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Decodes cover art into textures; the bytes come from src/images.rs.
+egui_extras = { version = "0.36", default-features = false, features = ["image", "gif", "webp"] }
+# Cover formats itch.io serves, plus png for --screenshot captures.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Cover downloads. Blocking on a few worker threads is all a launcher needs.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.dev.package."*"]
 opt-level = 2

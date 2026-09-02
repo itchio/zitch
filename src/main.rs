@@ -1,7 +1,9 @@
 mod app;
 mod backend;
 mod butlerd;
+mod images;
 mod model;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -51,10 +53,10 @@ fn main() -> eframe::Result<()> {
     )
     .init();
 
-    let config_dir = directories::BaseDirs::new()
-        .expect("a home directory")
-        .config_dir()
-        .join(&cli.app_name);
+    let base_dirs = directories::BaseDirs::new().expect("a home directory");
+    let config_dir = base_dirs.config_dir().join(&cli.app_name);
+    // Covers are the same whichever app's database is in use.
+    let covers = images::CoverLoader::new(base_dirs.cache_dir().join("zitch").join("covers"));
     let dbpath = cli
         .dbpath
         .unwrap_or_else(|| config_dir.join("db").join("butler.db"));
@@ -91,7 +93,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             waker.attach(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(backend, &cc.egui_ctx, shot)))
+            Ok(Box::new(app::App::new(backend, covers, &cc.egui_ctx, shot)))
         }),
     )
 }

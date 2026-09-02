@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use egui::{Color32, FontId, RichText};
-
 use crate::backend::{Backend, Event};
+use crate::images::CoverLoader;
 use crate::model::{Game, Loadable, Profile};
+use crate::ui;
 
 pub struct App {
     backend: Backend,
@@ -22,24 +22,35 @@ pub struct App {
 pub struct Shot {
     pub path: PathBuf,
     pub deadline: Instant,
+    /// When the library finished loading; covers get a moment after that.
+    pub settled_at: Option<Instant>,
     pub asked: bool,
 }
+
+const COVER_GRACE: Duration = Duration::from_secs(3);
 
 impl Shot {
     pub fn new(path: PathBuf, wait: Duration) -> Self {
         Self {
             path,
             deadline: Instant::now() + wait,
+            settled_at: None,
             asked: false,
         }
     }
 }
 
 impl App {
-    pub fn new(backend: Backend, ctx: &egui::Context, shot: Option<Shot>) -> Self {
+    pub fn new(
+        backend: Backend,
+        covers: CoverLoader,
+        ctx: &egui::Context,
+        shot: Option<Shot>,
+    ) -> Self {
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(0x14, 0x12, 0x1a);
+        visuals.panel_fill = ui::BG;
         ctx.set_visuals(visuals);
+        covers.install(ctx);
         // Big picture: read from across the room.
         ctx.set_zoom_factor(1.6);
         Self {
@@ -57,7 +68,12 @@ impl App {
             return;
         };
         let settled = !matches!(self.games, Loadable::Loading) || self.error.is_some();
-        if !shot.asked && (settled || Instant::now() >= shot.deadline) {
+        if settled && shot.settled_at.is_none() {
+            shot.settled_at = Some(Instant::now());
+        }
+        let now = Instant::now();
+        let ready = shot.settled_at.is_some_and(|at| now >= at + COVER_GRACE);
+        if !shot.asked && (ready || now >= shot.deadline) {
             shot.asked = true;
             // One more frame so the settled state is what gets captured.
             ctx.request_repaint();
@@ -116,51 +132,34 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("zitch")
-                        .font(FontId::proportional(32.0))
-                        .strong(),
-                );
-                if let Some(profile) = &self.profile {
-                    ui.add_space(16.0);
-                    ui.label(
-                        RichText::new(profile.user.name())
-                            .font(FontId::proportional(18.0))
-                            .color(Color32::from_gray(160)),
-                    );
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(ui::BG).inner_margin(24.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui::heading(ui, "Library");
+                    if let Some(profile) = &self.profile {
+                        ui.add_space(12.0);
+                        ui::subtle(ui, profile.user.name());
+                    }
+                    if let Loadable::Loaded(games) = &self.games {
+                        ui.add_space(12.0);
+                        ui::subtle(ui, &format!("{} games", games.len()));
+                    }
+                });
+                match &self.games {
+                    Loadable::Loaded(_) => {}
+                    _ => ui::subtle(ui, &self.status),
+                }
+                if let Some(error) = &self.error {
+                    ui::error(ui, error);
+                }
+                ui.add_space(16.0);
+                match &self.games {
+                    Loadable::NotLoaded | Loadable::Loading => ui::centered_spinner(ui),
+                    Loadable::Failed(_) => {}
+                    Loadable::Loaded(games) => ui::library(ui, games),
                 }
             });
-            ui.label(RichText::new(&self.status).color(Color32::from_gray(140)));
-            if let Some(error) = &self.error {
-                ui.colored_label(Color32::from_rgb(0xff, 0x6e, 0x6e), error);
-            }
-            ui.add_space(16.0);
-            match &self.games {
-                Loadable::NotLoaded | Loadable::Loading => {
-                    ui.spinner();
-                }
-                Loadable::Failed(_) => {}
-                Loadable::Loaded(games) => {
-                    ui.label(
-                        RichText::new(format!("{} games", games.len()))
-                            .font(FontId::proportional(20.0)),
-                    );
-                    ui.add_space(8.0);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for game in games {
-                                ui.label(
-                                    RichText::new(&game.title).font(FontId::proportional(18.0)),
-                                );
-                            }
-                        });
-                }
-            }
-        });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
