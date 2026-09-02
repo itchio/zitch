@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
 use crate::images::{Animation, CoverLoader};
-use crate::model::{Action, Cave, Game, InstallState, Page, Prompt, UploadExt};
+use crate::model::{Action, Cave, Game, GameUpdate, InstallState, Page, Prompt, UploadExt};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
 const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
@@ -15,6 +15,7 @@ const TEXT: Color32 = Color32::from_gray(0xee);
 const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0x99);
 const GREEN: Color32 = Color32::from_rgb(0x4c, 0xc9, 0x6b);
+const AMBER: Color32 = Color32::from_rgb(0xf5, 0xb8, 0x3d);
 
 /// itch.io covers are 315x250; tiles keep that shape.
 const COVER_ASPECT: f32 = 315.0 / 250.0;
@@ -62,6 +63,7 @@ pub fn library(
     games: &[Game],
     installed: &std::collections::HashSet<i64>,
     installs: &std::collections::HashMap<i64, InstallState>,
+    updatable: &std::collections::HashSet<i64>,
     grid: &mut Grid,
     covers: &CoverLoader,
     actions: &mut Vec<Action>,
@@ -144,6 +146,7 @@ pub fn library(
                             focused,
                             installed: installed.contains(&game.id),
                             install: installs.get(&game.id),
+                            updatable: updatable.contains(&game.id),
                         };
                         draw_tile(ui, rect, cover_height, tile, animation);
                     }
@@ -161,6 +164,7 @@ struct Tile<'a> {
     focused: bool,
     installed: bool,
     install: Option<&'a InstallState>,
+    updatable: bool,
 }
 
 fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option<&mut Playing>) {
@@ -169,6 +173,7 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
         focused,
         installed,
         install,
+        updatable,
     } = tile;
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
@@ -206,11 +211,19 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
             cover.right_bottom(),
         );
         progress_bar(ui, bar, install.progress as f32);
+    } else if updatable {
+        badge(
+            ui,
+            pos2(cover.left() + 8.0, cover.bottom() - 8.0),
+            "UPDATE",
+            AMBER,
+        );
     } else if installed {
         badge(
             ui,
             pos2(cover.left() + 8.0, cover.bottom() - 8.0),
             "INSTALLED",
+            GREEN,
         );
     }
     if focused {
@@ -321,13 +334,13 @@ pub fn centered_spinner(ui: &mut Ui) {
 }
 
 /// A small label anchored by its bottom-left corner.
-fn badge(ui: &Ui, bottom_left: egui::Pos2, text: &str) {
+fn badge(ui: &Ui, bottom_left: egui::Pos2, text: &str, fill: Color32) {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_string(), FontId::proportional(9.5), BG);
     let size = galley.size() + vec2(12.0, 6.0);
     let rect = Rect::from_min_size(bottom_left - vec2(0.0, size.y), size);
-    ui.painter().rect_filled(rect, CornerRadius::same(3), GREEN);
+    ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
     ui.painter().galley(rect.min + vec2(6.0, 3.0), galley, BG);
 }
 
@@ -337,6 +350,7 @@ pub fn game_buttons(
     caves: &[&Cave],
     install: Option<&InstallState>,
     running: bool,
+    update: Option<&GameUpdate>,
 ) -> Vec<(&'static str, Action)> {
     if running {
         return Vec::new();
@@ -354,20 +368,29 @@ pub fn game_buttons(
         return vec![("Cancel", Action::CancelInstall { game_id: game.id })];
     }
     match caves.first() {
-        Some(cave) => vec![
-            (
+        Some(cave) => {
+            let mut buttons = vec![(
                 "Play",
                 Action::Play {
                     cave_id: cave.id.clone(),
                 },
-            ),
-            (
+            )];
+            if update.is_some() {
+                buttons.push((
+                    "Update",
+                    Action::Update {
+                        cave_id: cave.id.clone(),
+                    },
+                ));
+            }
+            buttons.push((
                 "Uninstall",
                 Action::Uninstall {
                     cave_id: cave.id.clone(),
                 },
-            ),
-        ],
+            ));
+            buttons
+        }
         None => vec![("Install", Action::Install { game_id: game.id })],
     }
 }
@@ -378,10 +401,11 @@ pub fn game_detail(
     caves: &[&Cave],
     install: Option<&InstallState>,
     running: bool,
+    update: Option<&GameUpdate>,
     focused_button: usize,
     actions: &mut Vec<Action>,
 ) {
-    let buttons = game_buttons(game, caves, install, running);
+    let buttons = game_buttons(game, caves, install, running, update);
     let width = ui.available_width();
     let cover_width = (width * 0.42).min(420.0);
     let cover_height = cover_width / COVER_ASPECT;
@@ -465,6 +489,18 @@ pub fn game_detail(
                         && stats.seconds_run > 0
                     {
                         subtle(ui, &format!("Played {}", human_duration(stats.seconds_run)));
+                    }
+                    if let Some(update) = update {
+                        let name = update
+                            .choices
+                            .first()
+                            .and_then(|c| c.upload.as_ref())
+                            .map_or("newer version", UploadExt::name);
+                        ui.label(
+                            egui::RichText::new(format!("Update available: {name}"))
+                                .font(FontId::proportional(13.0))
+                                .color(AMBER),
+                        );
                     }
                 }
                 (None, None) => subtle(ui, "Not installed"),

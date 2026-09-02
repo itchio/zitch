@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
     AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
-    DownloadReason, DownloadsClearFinishedParams, DownloadsDiscardParams,
+    CheckUpdateParams, DownloadReason, DownloadsClearFinishedParams, DownloadsDiscardParams,
     DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams, DownloadsRetryParams,
     FetchCavesParams, FetchGameUploadsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
@@ -26,7 +26,7 @@ use crate::butlerd::types::{
     ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, Download, DownloadProgress, Game, Profile, Prompt, UserExt};
+use crate::model::{Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt, UserExt};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -55,6 +55,10 @@ pub enum Command {
     },
     Launch {
         cave_id: String,
+    },
+    /// Queue an update butler reported; the first choice is the one taken.
+    Update {
+        update: Box<GameUpdate>,
     },
     /// The user's pick for a [`Event::Prompt`], or `None` when dismissed.
     Answer {
@@ -92,6 +96,8 @@ pub enum Event {
         cave_id: String,
         result: Result<(), String>,
     },
+    /// Updates butler found for installed games, one per cave.
+    Updates(Vec<GameUpdate>),
     /// A question to show until [`Event::PromptClosed`] or an answer.
     Prompt(Prompt),
     PromptClosed(u64),
@@ -203,6 +209,29 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let prompts = Prompts::default();
     let config = Arc::new(config);
 
+    spawn_op(
+        "check-updates".into(),
+        Arc::clone(&daemon),
+        emit.clone(),
+        |client, emit| {
+            let result = client.call(CheckUpdateParams::default())?;
+            for warning in &result.warnings {
+                log::warn!("update check: {warning}");
+            }
+            log::info!("{} updates available", result.updates.len());
+            // Same-channel updates apply themselves, as in the itch app; the
+            // rest wait for the user to pick.
+            for update in result.updates.iter().filter(|u| u.direct) {
+                if let Err(error) = queue_update(client, update) {
+                    log::warn!("queueing update: {error:#}");
+                }
+            }
+            emit.send(Event::Updates(result.updates));
+            refresh_downloads(client, emit);
+            Ok(())
+        },
+    );
+
     loop {
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -264,6 +293,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         Ok(())
                     },
                 );
+            }
+            Ok(Command::Update { update }) => {
+                if let Err(error) = queue_update(&client, &update) {
+                    log::error!("{error:#}");
+                    emit.send(Event::Error(format!("{error:#}")));
+                }
+                refresh_downloads(&client, emit);
             }
             Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -622,6 +658,29 @@ fn queue_install(client: &Client, config: &Config, game: Game) -> Result<()> {
         ..Default::default()
     })?;
     log::info!("queued {} as download {}", game.title, queued.id);
+    Ok(())
+}
+
+fn queue_update(client: &Client, update: &GameUpdate) -> Result<()> {
+    let choice = update
+        .choices
+        .first()
+        .ok_or_else(|| anyhow!("update for cave {} has no choices", update.cave_id))?;
+    let queued = client.call(InstallQueueParams {
+        cave_id: Some(update.cave_id.clone()),
+        game: update.game.clone(),
+        upload: choice.upload.clone(),
+        build: choice.build.clone(),
+        reason: Some(DownloadReason::Update),
+        queue_download: Some(true),
+        fast_queue: Some(true),
+        ..Default::default()
+    })?;
+    log::info!(
+        "queued update for {} as download {}",
+        update.game.as_ref().map_or("?", |g| g.title.as_str()),
+        queued.id
+    );
     Ok(())
 }
 

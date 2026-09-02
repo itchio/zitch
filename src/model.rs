@@ -1,7 +1,9 @@
 //! Types shared between the backend and the interface. Wire types come from
 //! the generated butlerd bindings; these are the app's own.
 
-pub use crate::butlerd::types::{Cave, Download, DownloadProgress, Game, Profile, Upload, User};
+pub use crate::butlerd::types::{
+    Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Upload, User,
+};
 
 pub trait UserExt {
     /// The display name, or the username when none is set.
@@ -139,6 +141,10 @@ pub enum Action {
     },
     RetryInstall {
         game_id: i64,
+    },
+    /// Queue the update butler found for this cave.
+    Update {
+        cave_id: String,
     },
     Uninstall {
         cave_id: String,

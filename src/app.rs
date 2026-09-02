@@ -7,8 +7,8 @@ use crate::backend::{Backend, Command, Event};
 use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, InstallState, Loadable,
-    Page, Profile, Prompt, UserExt,
+    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, GameUpdate, InstallState,
+    Loadable, Page, Profile, Prompt, UserExt,
 };
 use crate::ui;
 
@@ -32,6 +32,8 @@ pub struct App {
     pub installs: std::collections::HashMap<i64, InstallState>,
     /// Caves with a Launch call in flight.
     running: std::collections::HashSet<String>,
+    /// Updates butler found, by cave.
+    updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
     prompt: Option<Prompt>,
     page: Page,
@@ -145,6 +147,7 @@ impl App {
             discarding: Default::default(),
             installs: Default::default(),
             running: Default::default(),
+            updates: Default::default(),
             prompt: None,
             page: Page::Library,
             error: None,
@@ -245,6 +248,7 @@ impl App {
                         &self.caves_for(game.id),
                         self.installs.get(&game.id),
                         self.is_running(game.id),
+                        self.update_for(game.id),
                     )
                     .len()
                     .max(1);
@@ -284,6 +288,7 @@ impl App {
                         &self.caves_for(game.id),
                         self.installs.get(&game.id),
                         self.is_running(game.id),
+                        self.update_for(game.id),
                     );
                     if let Some((_, action)) = buttons.get(button) {
                         self.actions.push(action.clone());
@@ -301,6 +306,15 @@ impl App {
             Action::Open(page) => {
                 self.notice = None;
                 self.page = page;
+            }
+            Action::Update { cave_id } => {
+                if let Some(update) = self.updates.get(&cave_id) {
+                    let title = update.game.as_ref().map_or("game", |g| g.title.as_str());
+                    self.notice = Some(format!("Updating {title}"));
+                    self.backend.send(Command::Update {
+                        update: Box::new(update.clone()),
+                    });
+                }
             }
             Action::Play { cave_id } => {
                 if self.running.insert(cave_id.clone()) {
@@ -349,6 +363,22 @@ impl App {
                 self.backend.send(Command::Uninstall { cave_id });
             }
         }
+    }
+
+    /// Games with an update waiting, for the grid's badges.
+    fn updatable(&self) -> std::collections::HashSet<i64> {
+        self.caves
+            .iter()
+            .filter(|cave| self.updates.contains_key(&cave.id))
+            .filter_map(CaveExt::game_id)
+            .collect()
+    }
+
+    fn update_for(&self, game_id: i64) -> Option<&GameUpdate> {
+        self.caves
+            .iter()
+            .filter(|cave| cave.game_id() == Some(game_id))
+            .find_map(|cave| self.updates.get(&cave.id))
     }
 
     fn is_running(&self, game_id: i64) -> bool {
@@ -539,7 +569,18 @@ impl App {
                 }
                 Event::DownloadFinished(download) => {
                     let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
-                    self.notice = Some(format!("Installed {title}"));
+                    let updated = self.updates.remove(&download.cave_id).is_some();
+                    self.notice = Some(if updated {
+                        format!("Updated {title}")
+                    } else {
+                        format!("Installed {title}")
+                    });
+                }
+                Event::Updates(updates) => {
+                    self.updates = updates
+                        .into_iter()
+                        .map(|u| (u.cave_id.clone(), u))
+                        .collect();
                 }
                 Event::DownloadErrored(download) => {
                     let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
@@ -628,6 +669,7 @@ impl eframe::App for App {
                         games,
                         &self.installed,
                         &self.installs,
+                        &self.updatable(),
                         &mut self.grid,
                         &self.covers,
                         &mut self.actions,
@@ -641,12 +683,14 @@ impl eframe::App for App {
                                     .filter(|cave| cave.game_id() == Some(game.id))
                                     .collect();
                                 let running = self.is_running(game.id);
+                                let update = self.update_for(game.id).cloned();
                                 ui::game_detail(
                                     ui,
                                     game,
                                     &caves,
                                     self.installs.get(&game.id),
                                     running,
+                                    update.as_ref(),
                                     button,
                                     &mut self.actions,
                                 );
