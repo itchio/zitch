@@ -6,12 +6,15 @@ ARGS ?=
 # for development; close kitch first. APP=zitch for a clean database.
 APP ?= kitch
 SHOT ?= /tmp/zitch.png
+# Input to play before the screenshot, e.g. SCRIPT="down,down,right,enter"
+SCRIPT ?=
 
 help:
 	@echo "make build        compile a debug binary"
 	@echo "make run          build and launch the app"
 	@echo "make run-verbose  same, logging every JSON-RPC message"
 	@echo "make shot         launch, write a screenshot to \$$SHOT ($(SHOT)), exit"
+	@echo "                  SCRIPT=\"down,right,enter\" plays input first"
 	@echo "make check        format, lint, and type-check without running"
 	@echo "make clean        remove build output"
 	@echo
@@ -30,7 +33,7 @@ run-verbose: build
 	./target/debug/zitch --app-name $(APP) --verbose $(ARGS)
 
 shot: build
-	./target/debug/zitch --app-name $(APP) --screenshot $(SHOT) $(ARGS)
+	./target/debug/zitch --app-name $(APP) --screenshot $(SHOT) $(if $(SCRIPT),--screenshot-script "$(SCRIPT)") $(ARGS)
 
 check:
 	cargo fmt

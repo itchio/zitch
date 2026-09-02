@@ -70,3 +70,22 @@ impl<T> Loadable<T> {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// What the interface asked for while drawing. Applied after the frame so
+/// views never mutate state they are reading.
+#[derive(Debug, Clone)]
+pub enum Action {
+    MoveFocus(Direction),
+    /// Focus a tile without scrolling to it; the pointer is already there.
+    FocusIndex(usize),
+    Activate,
+    Back,
+}

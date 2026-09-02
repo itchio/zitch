@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Event};
 use crate::images::CoverLoader;
-use crate::model::{Game, Loadable, Profile};
+use crate::model::{Action, Direction, Game, Loadable, Profile};
 use crate::ui;
 
 pub struct App {
@@ -14,6 +14,10 @@ pub struct App {
     profile: Option<Profile>,
     games: Loadable<Vec<Game>>,
     error: Option<String>,
+    /// Something the user just did, shown in the header.
+    notice: Option<String>,
+    pub actions: Vec<Action>,
+    pub grid: ui::Grid,
     shot: Option<Shot>,
 }
 
@@ -24,20 +28,40 @@ pub struct Shot {
     pub deadline: Instant,
     /// When the library finished loading; covers get a moment after that.
     pub settled_at: Option<Instant>,
+    /// Scripted input to play once the library is loaded, one per frame.
+    pub script: std::collections::VecDeque<Action>,
     pub asked: bool,
 }
 
 const COVER_GRACE: Duration = Duration::from_secs(3);
 
 impl Shot {
-    pub fn new(path: PathBuf, wait: Duration) -> Self {
+    pub fn new(path: PathBuf, wait: Duration, script: Vec<Action>) -> Self {
         Self {
             path,
             deadline: Instant::now() + wait,
             settled_at: None,
+            script: script.into(),
             asked: false,
         }
     }
+}
+
+/// Parses `down,down,right,enter` into actions for `--screenshot-script`.
+pub fn parse_script(text: &str) -> Result<Vec<Action>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .map(|word| match word {
+            "up" => Ok(Action::MoveFocus(Direction::Up)),
+            "down" => Ok(Action::MoveFocus(Direction::Down)),
+            "left" => Ok(Action::MoveFocus(Direction::Left)),
+            "right" => Ok(Action::MoveFocus(Direction::Right)),
+            "enter" => Ok(Action::Activate),
+            "back" => Ok(Action::Back),
+            other => Err(format!("unknown script step {other:?}")),
+        })
+        .collect()
 }
 
 impl App {
@@ -59,7 +83,70 @@ impl App {
             profile: None,
             games: Loadable::Loading,
             error: None,
+            notice: None,
+            actions: Vec::new(),
+            grid: ui::Grid::default(),
             shot,
+        }
+    }
+
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        ctx.input_mut(|input| {
+            let mut key = |key: Key, action: Action| {
+                if input.consume_key(Modifiers::NONE, key) {
+                    self.actions.push(action);
+                }
+            };
+            key(Key::ArrowUp, Action::MoveFocus(Direction::Up));
+            key(Key::ArrowDown, Action::MoveFocus(Direction::Down));
+            key(Key::ArrowLeft, Action::MoveFocus(Direction::Left));
+            key(Key::ArrowRight, Action::MoveFocus(Direction::Right));
+            key(Key::Enter, Action::Activate);
+            key(Key::Escape, Action::Back);
+        });
+    }
+
+    fn apply_actions(&mut self) {
+        let actions = std::mem::take(&mut self.actions);
+        for action in actions {
+            self.apply(action);
+        }
+    }
+
+    fn apply(&mut self, action: Action) {
+        let count = self.games.get().map_or(0, Vec::len);
+        match action {
+            Action::MoveFocus(direction) => {
+                if count == 0 {
+                    return;
+                }
+                let columns = self.grid.columns.max(1);
+                let focus = self.grid.focus;
+                let next = match direction {
+                    Direction::Left => focus.saturating_sub(1),
+                    Direction::Right => (focus + 1).min(count - 1),
+                    Direction::Up => focus.checked_sub(columns).unwrap_or(focus),
+                    // Stop at the last row, on the last tile if the row is short.
+                    Direction::Down if focus + columns < count => focus + columns,
+                    Direction::Down if focus / columns < (count - 1) / columns => count - 1,
+                    Direction::Down => focus,
+                };
+                self.grid.focus = next;
+                self.grid.follow = true;
+            }
+            Action::FocusIndex(index) => {
+                if index < count {
+                    self.grid.focus = index;
+                }
+            }
+            Action::Activate => {
+                if let Some(game) = self.games.get().and_then(|g| g.get(self.grid.focus)) {
+                    log::info!("activate {} ({})", game.title, game.id);
+                    self.notice = Some(format!("Selected {}", game.title));
+                }
+            }
+            Action::Back => self.notice = None,
         }
     }
 
@@ -68,6 +155,11 @@ impl App {
             return;
         };
         let settled = !matches!(self.games, Loadable::Loading) || self.error.is_some();
+        if settled && let Some(action) = shot.script.pop_front() {
+            self.actions.push(action);
+            ctx.request_repaint();
+            return;
+        }
         if settled && shot.settled_at.is_none() {
             shot.settled_at = Some(Instant::now());
         }
@@ -128,6 +220,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
+        self.handle_keys(ctx);
         self.drive_shot(ctx);
     }
 
@@ -146,8 +239,9 @@ impl eframe::App for App {
                         ui::subtle(ui, &format!("{} games", games.len()));
                     }
                 });
-                match &self.games {
-                    Loadable::Loaded(_) => {}
+                match (&self.games, &self.notice) {
+                    (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, notice),
+                    (Loadable::Loaded(_), None) => ui::subtle(ui, ""),
                     _ => ui::subtle(ui, &self.status),
                 }
                 if let Some(error) = &self.error {
@@ -157,9 +251,12 @@ impl eframe::App for App {
                 match &self.games {
                     Loadable::NotLoaded | Loadable::Loading => ui::centered_spinner(ui),
                     Loadable::Failed(_) => {}
-                    Loadable::Loaded(games) => ui::library(ui, games),
+                    Loadable::Loaded(games) => {
+                        ui::library(ui, games, &mut self.grid, &mut self.actions)
+                    }
                 }
             });
+        self.apply_actions();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

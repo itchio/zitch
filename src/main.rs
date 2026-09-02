@@ -37,6 +37,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
 
+    /// Input to play before the screenshot, e.g. `down,down,right,enter`.
+    #[arg(long, value_name = "STEPS", requires = "screenshot")]
+    screenshot_script: Option<String>,
+
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
@@ -77,9 +81,17 @@ fn main() -> eframe::Result<()> {
         api_key,
     };
 
+    let script = match cli.screenshot_script.as_deref().map(app::parse_script) {
+        Some(Ok(script)) => script,
+        Some(Err(error)) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        None => Vec::new(),
+    };
     let shot = cli
         .screenshot
-        .map(|path| app::Shot::new(path, std::time::Duration::from_secs(8)));
+        .map(|path| app::Shot::new(path, std::time::Duration::from_secs(8), script));
     let waker = backend::Waker::default();
     let backend = backend::Backend::spawn(config, waker.clone());
     let options = eframe::NativeOptions {

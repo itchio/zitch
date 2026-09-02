@@ -2,12 +2,13 @@
 
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 
-use crate::model::Game;
+use crate::model::{Action, Game};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
 const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
 const TILE_HOVER: Color32 = Color32::from_rgb(0x34, 0x30, 0x42);
 const TEXT: Color32 = Color32::from_gray(0xee);
+const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0x99);
 
 /// itch.io covers are 315x250; tiles keep that shape.
@@ -16,39 +17,81 @@ const TILE_WIDTH: f32 = 170.0;
 const GAP: f32 = 14.0;
 const TITLE_HEIGHT: f32 = 26.0;
 
-pub fn library(ui: &mut Ui, games: &[Game]) {
+/// Where the library grid is and what it points at. Drawing fills in
+/// `columns` and `scroll`; actions move `focus`.
+#[derive(Debug, Default)]
+pub struct Grid {
+    pub focus: usize,
+    /// Scroll so the focused tile is in view on the next frame.
+    pub follow: bool,
+    pub columns: usize,
+    scroll: f32,
+    last_pointer: Option<egui::Pos2>,
+}
+
+pub fn library(ui: &mut Ui, games: &[Game], grid: &mut Grid, actions: &mut Vec<Action>) {
     let available = ui.available_width();
     let columns = ((available + GAP) / (TILE_WIDTH + GAP)).floor().max(1.0) as usize;
     let tile_width = (available - GAP * (columns as f32 - 1.0)) / columns as f32;
     let cover_height = tile_width / COVER_ASPECT;
     let row_height = cover_height + TITLE_HEIGHT + GAP;
     let rows = games.len().div_ceil(columns);
+    grid.columns = columns;
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show_rows(ui, row_height, rows, |ui, range| {
-            for row in range {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = GAP;
-                    for column in 0..columns {
-                        let Some(game) = games.get(row * columns + column) else {
-                            break;
-                        };
-                        let (rect, response) = ui.allocate_exact_size(
-                            vec2(tile_width, cover_height + TITLE_HEIGHT),
-                            Sense::click(),
-                        );
-                        if ui.is_rect_visible(rect) {
-                            tile(ui, rect, cover_height, game, response.hovered());
-                        }
+    let viewport = ui.available_height();
+    let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    if std::mem::take(&mut grid.follow) {
+        let row = grid.focus / columns;
+        let top = row as f32 * row_height;
+        let bottom = top + row_height;
+        let margin = GAP;
+        let mut offset = grid.scroll;
+        if top - margin < offset {
+            offset = top - margin;
+        } else if bottom + margin > offset + viewport {
+            offset = bottom + margin - viewport;
+        }
+        area = area.vertical_scroll_offset(offset.max(0.0));
+    }
+    // Only a pointer that moved between two frames takes focus, so the
+    // keyboard keeps it while the mouse rests on a tile, and a window that
+    // opens under the cursor does not start focused on whatever is beneath.
+    let pointer = ui.input(|input| input.pointer.latest_pos());
+    let pointer_moved = matches!((grid.last_pointer, pointer), (Some(a), Some(b)) if a != b);
+    grid.last_pointer = pointer;
+
+    let output = area.show_rows(ui, row_height, rows, |ui, range| {
+        for row in range {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for column in 0..columns {
+                    let index = row * columns + column;
+                    let Some(game) = games.get(index) else {
+                        break;
+                    };
+                    let (rect, response) = ui.allocate_exact_size(
+                        vec2(tile_width, cover_height + TITLE_HEIGHT),
+                        Sense::click(),
+                    );
+                    if response.hovered() && pointer_moved {
+                        actions.push(Action::FocusIndex(index));
                     }
-                });
-                ui.add_space(GAP - ui.spacing().item_spacing.y);
-            }
-        });
+                    if response.clicked() {
+                        actions.push(Action::FocusIndex(index));
+                        actions.push(Action::Activate);
+                    }
+                    if ui.is_rect_visible(rect) {
+                        tile(ui, rect, cover_height, game, index == grid.focus);
+                    }
+                }
+            });
+            ui.add_space(GAP - ui.spacing().item_spacing.y);
+        }
+    });
+    grid.scroll = output.state.offset.y;
 }
 
-fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, hovered: bool) {
+fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, focused: bool) {
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
     // stillCoverUrl is the static frame of an animated cover; those gifs
@@ -59,7 +102,7 @@ fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, hovered: bool) {
         .or(game.cover_url.as_deref());
     let painted = url.is_some_and(|url| paint_cover(ui, url, cover, radius));
     if !painted {
-        let fill = if hovered { TILE_HOVER } else { TILE_BG };
+        let fill = if focused { TILE_HOVER } else { TILE_BG };
         ui.painter().rect_filled(cover, radius, fill);
         // No art: the title stands in for it, wrapped inside the cover.
         let galley = ui.painter().layout(
@@ -71,11 +114,11 @@ fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, hovered: bool) {
         let pos = cover.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, DIM);
     }
-    if hovered {
+    if focused {
         ui.painter().rect_stroke(
-            cover,
-            radius,
-            Stroke::new(2.0, TEXT),
+            cover.expand(2.0),
+            CornerRadius::same(8),
+            Stroke::new(3.0, ACCENT),
             egui::StrokeKind::Outside,
         );
     }
@@ -86,7 +129,7 @@ fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, hovered: bool) {
     let galley = ui.painter().layout(
         game.title.clone(),
         FontId::proportional(13.5),
-        if hovered { TEXT } else { DIM },
+        if focused { TEXT } else { DIM },
         f32::INFINITY,
     );
     ui.painter()
