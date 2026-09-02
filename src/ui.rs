@@ -341,6 +341,12 @@ pub fn game_buttons(
         if install.cancelling {
             return Vec::new();
         }
+        if install.error.is_some() {
+            return vec![
+                ("Retry", Action::RetryInstall { game_id: game.id }),
+                ("Dismiss", Action::CancelInstall { game_id: game.id }),
+            ];
+        }
         return vec![("Cancel", Action::CancelInstall { game_id: game.id })];
     }
     match caves.first() {
@@ -403,7 +409,9 @@ pub fn game_detail(
             ui.add_space(12.0);
             match (install, caves.first()) {
                 (Some(install), _) => {
-                    let line = if install.cancelling {
+                    let line = if let Some(error) = &install.error {
+                        format!("Failed: {error}")
+                    } else if install.cancelling {
                         "Cancelling".to_string()
                     } else if install.bps > 0.0 {
                         format!(

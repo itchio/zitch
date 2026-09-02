@@ -230,6 +230,42 @@ impl Client {
         self.call_raw(R::METHOD, params)
     }
 
+    /// Like [`Self::call`], but hands every notification and server request
+    /// that arrives before the reply to `on_incoming` as it comes. For
+    /// long calls such as `Downloads.Drive` or `Launch`, whose progress is
+    /// the point.
+    pub fn call_streaming<R: Request>(
+        &self,
+        params: R,
+        mut on_incoming: impl FnMut(Incoming),
+    ) -> Result<R::Result> {
+        let method = R::METHOD;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, tx);
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        log::trace!("-> {method} {}", message["params"]);
+        self.send(&message)?;
+        let result = loop {
+            match rx.try_recv() {
+                Ok(result) => break result,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    bail!("butlerd connection closed while waiting for {method}")
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            for incoming in self.poll_timeout(Duration::from_millis(50)) {
+                on_incoming(incoming);
+            }
+        };
+        let result = result.with_context(|| format!("{method} failed"))?;
+        log::trace!("<- {method} {result}");
+        serde_json::from_value(result).with_context(|| format!("decoding {method} result"))
+    }
+
     /// [`Self::call`] for a method these bindings do not know.
     pub fn call_raw<P: Serialize, R: DeserializeOwned>(
         &self,

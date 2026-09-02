@@ -7,7 +7,8 @@ use crate::backend::{Backend, Command, Event};
 use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, Direction, Game, InstallState, Loadable, Page, Profile, UserExt,
+    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, InstallState, Loadable,
+    Page, Profile, UserExt,
 };
 use crate::ui;
 
@@ -20,7 +21,14 @@ pub struct App {
     games: Loadable<Vec<Game>>,
     caves: Vec<Cave>,
     installed: std::collections::HashSet<i64>,
-    /// Installs in flight, by game.
+    /// butler's download queue and the latest progress per download.
+    downloads: Vec<Download>,
+    progress: std::collections::HashMap<String, DownloadProgress>,
+    /// Games the user asked to install that the queue has not listed yet.
+    pending_installs: std::collections::HashSet<i64>,
+    /// Downloads the user asked to discard that the queue still lists.
+    discarding: std::collections::HashSet<String>,
+    /// What the interface shows per game, rebuilt from the fields above.
     pub installs: std::collections::HashMap<i64, InstallState>,
     page: Page,
     error: Option<String>,
@@ -121,6 +129,10 @@ impl App {
             games: Loadable::Loading,
             caves: Vec::new(),
             installed: Default::default(),
+            downloads: Vec::new(),
+            progress: Default::default(),
+            pending_installs: Default::default(),
+            discarding: Default::default(),
             installs: Default::default(),
             page: Page::Library,
             error: None,
@@ -251,31 +263,81 @@ impl App {
                 if self.installs.contains_key(&game_id) {
                     return;
                 }
-                // Shown as installing from this instant; the backend's first
-                // progress event replaces it.
-                self.installs.insert(
-                    game_id,
-                    InstallState {
-                        stage: "Starting".into(),
-                        ..Default::default()
-                    },
-                );
+                // Shown as installing from this instant; the queue listing
+                // that follows replaces it.
+                self.pending_installs.insert(game_id);
                 self.notice = Some(format!("Installing {}", game.title));
                 self.backend.send(Command::Install {
                     game: Box::new(game.clone()),
                 });
+                self.rebuild_installs();
             }
             Action::CancelInstall { game_id } => {
-                if let Some(state) = self.installs.get_mut(&game_id) {
-                    state.cancelling = true;
-                }
-                self.backend.send(Command::CancelInstall { game_id });
+                let Some(download_id) = self.download_for(game_id).map(|d| d.id.clone()) else {
+                    return;
+                };
+                self.discarding.insert(download_id.clone());
+                self.backend.send(Command::Discard { download_id });
+                self.rebuild_installs();
+            }
+            Action::RetryInstall { game_id } => {
+                let Some(download_id) = self.download_for(game_id).map(|d| d.id.clone()) else {
+                    return;
+                };
+                self.backend.send(Command::Retry { download_id });
             }
             Action::Uninstall { cave_id } => {
                 self.notice = Some("Uninstalling".into());
                 self.backend.send(Command::Uninstall { cave_id });
             }
         }
+    }
+
+    fn download_for(&self, game_id: i64) -> Option<&Download> {
+        self.downloads
+            .iter()
+            .find(|d| d.game.as_ref().is_some_and(|g| g.id == game_id))
+    }
+
+    /// Derives what each game's tile and page show from the queue.
+    fn rebuild_installs(&mut self) {
+        let mut installs = std::collections::HashMap::new();
+        for download in &self.downloads {
+            let Some(game_id) = download.game.as_ref().map(|g| g.id) else {
+                continue;
+            };
+            if download.finished_at.is_some() && download.error.is_none() {
+                continue;
+            }
+            let progress = self.progress.get(&download.id);
+            let error = download
+                .error_message
+                .clone()
+                .or_else(|| download.error.clone());
+            installs.insert(
+                game_id,
+                InstallState {
+                    download_id: download.id.clone(),
+                    progress: progress.map_or(0.0, |p| p.progress),
+                    bps: progress.map_or(0.0, |p| p.bps),
+                    eta_seconds: progress.map_or(0.0, |p| p.eta),
+                    stage: match progress {
+                        Some(p) if !p.stage.is_empty() => capitalize(&p.stage),
+                        _ if download.started_at.is_some() => "Starting".to_string(),
+                        _ => "Queued".to_string(),
+                    },
+                    cancelling: self.discarding.contains(&download.id),
+                    error,
+                },
+            );
+        }
+        for game_id in &self.pending_installs {
+            installs.entry(*game_id).or_insert_with(|| InstallState {
+                stage: "Queueing".into(),
+                ..Default::default()
+            });
+        }
+        self.installs = installs;
     }
 
     fn move_grid_focus(&mut self, direction: Direction, count: usize) {
@@ -386,29 +448,42 @@ impl App {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
                 }
-                Event::InstallProgress { game_id, state } => {
-                    // A cancel the user asked for stays shown until the
-                    // backend reports the end.
-                    let cancelling = self.installs.get(&game_id).is_some_and(|s| s.cancelling);
-                    self.installs.insert(
-                        game_id,
-                        InstallState {
-                            cancelling,
-                            ..state
-                        },
-                    );
+                Event::Downloads(downloads) => {
+                    let listed: std::collections::HashSet<String> =
+                        downloads.iter().map(|d| d.id.clone()).collect();
+                    self.progress.retain(|id, _| listed.contains(id));
+                    self.discarding.retain(|id| listed.contains(id));
+                    for download in &downloads {
+                        if let Some(game) = &download.game {
+                            self.pending_installs.remove(&game.id);
+                        }
+                    }
+                    // A queue attempt that produced no download is over.
+                    if downloads.is_empty() {
+                        self.pending_installs.clear();
+                    }
+                    self.downloads = downloads;
+                    self.rebuild_installs();
                 }
-                Event::InstallFinished { game_id, result } => {
-                    self.installs.remove(&game_id);
-                    let title = self
-                        .games
-                        .get()
-                        .and_then(|g| g.iter().find(|g| g.id == game_id))
-                        .map_or_else(|| game_id.to_string(), |g| g.title.clone());
-                    self.notice = Some(match result {
-                        Ok(()) => format!("Installed {title}"),
-                        Err(error) => format!("Install of {title} failed: {error}"),
-                    });
+                Event::DownloadProgress {
+                    download_id,
+                    progress,
+                } => {
+                    self.progress.insert(download_id, progress);
+                    self.rebuild_installs();
+                }
+                Event::DownloadFinished(download) => {
+                    let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
+                    self.notice = Some(format!("Installed {title}"));
+                }
+                Event::DownloadErrored(download) => {
+                    let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
+                    let error = download
+                        .error_message
+                        .as_deref()
+                        .or(download.error.as_deref())
+                        .unwrap_or("unknown error");
+                    self.notice = Some(format!("Install of {title} failed: {error}"));
                 }
                 Event::UninstallFinished { result, .. } => {
                     self.notice = Some(match result {
@@ -417,6 +492,9 @@ impl App {
                     });
                 }
                 Event::Error(message) => {
+                    // A failed queue attempt has no download to report on.
+                    self.pending_installs.clear();
+                    self.rebuild_installs();
                     if self.games.get().is_none() {
                         self.games = Loadable::Failed(message.clone());
                     }
@@ -505,5 +583,13 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.backend.shutdown();
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }

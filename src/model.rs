@@ -1,7 +1,7 @@
 //! Types shared between the backend and the interface. Wire types come from
 //! the generated butlerd bindings; these are the app's own.
 
-pub use crate::butlerd::types::{Cave, Game, Profile, Upload, User};
+pub use crate::butlerd::types::{Cave, Download, DownloadProgress, Game, Profile, Upload, User};
 
 pub trait UserExt {
     /// The display name, or the username when none is set.
@@ -44,9 +44,11 @@ impl CaveExt for Cave {
     }
 }
 
-/// An install in flight, as last reported by the backend.
+/// A queued or running download for a game, as the interface sees it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InstallState {
+    /// butlerd's download id; empty until the queue has answered.
+    pub download_id: String,
     /// 0 to 1.
     pub progress: f64,
     pub bps: f64,
@@ -54,6 +56,8 @@ pub struct InstallState {
     /// What butler is doing right now: downloading, installing, and so on.
     pub stage: String,
     pub cancelling: bool,
+    /// Set when the download stopped with an error; Retry or Dismiss apply.
+    pub error: Option<String>,
 }
 
 /// What the window is showing.
@@ -111,7 +115,11 @@ pub enum Action {
     Install {
         game_id: i64,
     },
+    /// Discard the game's download, whether running or failed.
     CancelInstall {
+        game_id: i64,
+    },
+    RetryInstall {
         game_id: i64,
     },
     Uninstall {

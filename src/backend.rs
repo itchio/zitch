@@ -1,8 +1,14 @@
-//! The butlerd conversation, on its own thread. The interface sends
+//! The butlerd conversation, on its own threads. The interface sends
 //! [`Command`]s and polls [`Event`]s; nothing here blocks a frame.
+//!
+//! Installs go through butler's download queue the way the itch app does
+//! it: `Install.Queue` records the download, one long-lived
+//! `Downloads.Drive` call works the queue and reports progress, and
+//! `Downloads.Discard` cancels. butler then owns staging folders, resume
+//! after a restart, and ordering.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,13 +16,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
-    AnyNotification, AnyServerRequest, DownloadReason, FetchCavesParams, FetchGameUploadsParams,
-    FetchProfileOwnedKeysParams, InstallCancelParams, InstallLocationsAddParams,
-    InstallLocationsListParams, InstallPerformParams, InstallQueueParams, ProfileListParams,
+    AnyNotification, AnyServerRequest, DownloadReason, DownloadsClearFinishedParams,
+    DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
+    DownloadsRetryParams, FetchCavesParams, FetchGameUploadsParams, FetchProfileOwnedKeysParams,
+    InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, ProfileListParams,
     ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, Game, InstallState, Profile, UserExt};
+use crate::model::{Cave, Download, DownloadProgress, Game, Profile, UserExt};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -28,9 +35,19 @@ pub struct Config {
 }
 
 pub enum Command {
-    Install { game: Box<Game> },
-    CancelInstall { game_id: i64 },
-    Uninstall { cave_id: String },
+    Install {
+        game: Box<Game>,
+    },
+    /// Discard a queued, running, or failed download.
+    Discard {
+        download_id: String,
+    },
+    Retry {
+        download_id: String,
+    },
+    Uninstall {
+        cave_id: String,
+    },
     Shutdown,
 }
 
@@ -41,14 +58,14 @@ pub enum Event {
     OwnedGames(Vec<Game>),
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
-    InstallProgress {
-        game_id: i64,
-        state: InstallState,
+    /// The whole download queue, after anything changed it.
+    Downloads(Vec<Download>),
+    DownloadProgress {
+        download_id: String,
+        progress: DownloadProgress,
     },
-    InstallFinished {
-        game_id: i64,
-        result: Result<(), String>,
-    },
+    DownloadFinished(Download),
+    DownloadErrored(Download),
     UninstallFinished {
         cave_id: String,
         result: Result<(), String>,
@@ -56,7 +73,7 @@ pub enum Event {
     Error(String),
 }
 
-/// Repaints the window when the backend has news. egui only redraws on
+/// Repaints the window when the backend has news. egui only repaints on
 /// input, so without this a reply would sit unseen until the mouse moved.
 #[derive(Clone, Default)]
 pub struct Waker(Arc<Mutex<Option<egui::Context>>>);
@@ -138,10 +155,6 @@ impl Emitter {
     }
 }
 
-/// butlerd ids of the installs in flight, by game, so a cancel from the
-/// interface can find them.
-type Running = Arc<Mutex<HashMap<i64, String>>>;
-
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
     let daemon = Arc::new(Daemon::spawn(&config.butler, &config.dbpath)?);
@@ -157,50 +170,33 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let games = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
-    let caves = all_caves(&client)?;
-    log::info!("{} installed games", caves.len());
-    emit.send(Event::Caves(caves));
+    refresh_caves(&client, emit);
+    refresh_downloads(&client, emit);
 
-    let config = Arc::new(config);
-    let running: Running = Arc::default();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let driver = spawn_driver(Arc::clone(&daemon), emit.clone(), Arc::clone(&stopping));
+
     loop {
-        match commands.try_recv() {
-            Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => break,
+        match commands.recv_timeout(Duration::from_millis(100)) {
+            Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Command::Install { game }) => {
-                if running
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .contains_key(&game.id)
-                {
-                    continue;
+                if let Err(error) = queue_install(&client, &config, *game) {
+                    log::error!("{error:#}");
+                    emit.send(Event::Error(format!("{error:#}")));
                 }
-                spawn_op(
-                    format!("install-{}", game.id),
-                    Arc::clone(&daemon),
-                    emit.clone(),
-                    {
-                        let config = Arc::clone(&config);
-                        let running = Arc::clone(&running);
-                        move |client, emit| install(client, &config, &running, *game, emit)
-                    },
-                );
+                refresh_downloads(&client, emit);
             }
-            Ok(Command::CancelInstall { game_id }) => {
-                let id = running
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get(&game_id)
-                    .cloned();
-                match id {
-                    // Perform returns with an error on its own connection,
-                    // which is where the finish is reported.
-                    Some(id) => {
-                        if let Err(error) = client.call(InstallCancelParams { id }) {
-                            log::warn!("cancel: {error:#}");
-                        }
-                    }
-                    None => log::info!("nothing to cancel for game {game_id}"),
+            Ok(Command::Discard { download_id }) => {
+                if let Err(error) = client.call(DownloadsDiscardParams { download_id }) {
+                    log::warn!("discard: {error:#}");
                 }
+                refresh_downloads(&client, emit);
+            }
+            Ok(Command::Retry { download_id }) => {
+                if let Err(error) = client.call(DownloadsRetryParams { download_id }) {
+                    log::warn!("retry: {error:#}");
+                }
+                refresh_downloads(&client, emit);
             }
             Ok(Command::Uninstall { cave_id }) => {
                 spawn_op(
@@ -221,34 +217,130 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     },
                 );
             }
-            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        for incoming in client.poll_timeout(Duration::from_millis(100)) {
-            match incoming {
-                Incoming::Notification { method, params } => {
-                    match AnyNotification::decode(&method, params) {
-                        Ok(notification) => log::debug!("{notification:?}"),
-                        Err(error) => log::warn!("bad {method} notification: {error}"),
-                    }
-                }
-                Incoming::Request { id, method, params } => {
-                    match AnyServerRequest::decode(&method, params) {
-                        Ok(request) => log::warn!("unhandled server request {request:?}"),
-                        Err(error) => log::warn!("bad {method} request: {error}"),
-                    }
-                    let _ = client.reply_error(&id, -32601, "not supported by this client");
-                }
-            }
+        for incoming in client.poll() {
+            log_incoming(&client, incoming);
         }
     }
+
+    stopping.store(true, Ordering::Relaxed);
+    if let Err(error) = client.call(DownloadsDriveCancelParams {}) {
+        log::debug!("stopping the download driver: {error:#}");
+    }
+    let _ = driver.join();
     Ok(())
 }
 
-/// Runs a long butlerd call on its own connection and thread, so its
-/// notifications are unambiguously its own and the main loop keeps turning.
+/// Keeps one `Downloads.Drive` call up for the life of the process, on its
+/// own connection so its notifications are unambiguous. butler works the
+/// queue inside that call and idles when it is empty.
+fn spawn_driver(
+    daemon: Arc<Daemon>,
+    emit: Emitter,
+    stopping: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("downloads-driver".into())
+        .spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                let client = match Client::connect(&daemon) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        log::warn!("download driver: {error:#}");
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                };
+                let result = client.call_streaming(DownloadsDriveParams {}, |incoming| {
+                    drive_incoming(&client, &emit, incoming);
+                });
+                if stopping.load(Ordering::Relaxed) {
+                    break;
+                }
+                match result {
+                    Ok(_) => log::info!("download driver returned; restarting"),
+                    Err(error) => log::warn!("download driver: {error:#}; restarting"),
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        })
+        .expect("spawning download driver")
+}
+
+fn drive_incoming(client: &Client, emit: &Emitter, incoming: Incoming) {
+    let (method, params) = match incoming {
+        Incoming::Notification { method, params } => (method, params),
+        Incoming::Request { id, method, params } => {
+            match AnyServerRequest::decode(&method, params) {
+                Ok(request) => log::warn!("download driver asked {request:?}; not supported yet"),
+                Err(error) => log::warn!("bad {method} request: {error}"),
+            }
+            let _ = client.reply_error(&id, -32601, "not supported by this client");
+            return;
+        }
+    };
+    match AnyNotification::decode(&method, params) {
+        Ok(AnyNotification::DownloadsDriveProgress(n)) => {
+            if let (Some(download), Some(progress)) = (n.download, n.progress) {
+                emit.send(Event::DownloadProgress {
+                    download_id: download.id,
+                    progress,
+                });
+            }
+        }
+        Ok(AnyNotification::DownloadsDriveStarted(_))
+        | Ok(AnyNotification::DownloadsDriveDiscarded(_)) => {
+            refresh_downloads(client, emit);
+        }
+        Ok(AnyNotification::DownloadsDriveErrored(n)) => {
+            if let Some(download) = n.download {
+                emit.send(Event::DownloadErrored(download));
+            }
+            refresh_downloads(client, emit);
+        }
+        Ok(AnyNotification::DownloadsDriveFinished(n)) => {
+            refresh_caves(client, emit);
+            if let Some(download) = n.download {
+                emit.send(Event::DownloadFinished(download));
+            }
+            // Finished entries only clutter the queue; the cave is the
+            // record of the install now.
+            if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
+                log::warn!("clearing finished downloads: {error:#}");
+            }
+            refresh_downloads(client, emit);
+        }
+        Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
+        Ok(other) => log::debug!("{other:?}"),
+        Err(error) => log::warn!("bad {method} notification: {error}"),
+    }
+}
+
+fn log_incoming(client: &Client, incoming: Incoming) {
+    match incoming {
+        Incoming::Notification { method, params } => {
+            match AnyNotification::decode(&method, params) {
+                Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
+                Ok(notification) => log::debug!("{notification:?}"),
+                Err(error) => log::warn!("bad {method} notification: {error}"),
+            }
+        }
+        Incoming::Request { id, method, params } => {
+            match AnyServerRequest::decode(&method, params) {
+                Ok(request) => log::warn!("unhandled server request {request:?}"),
+                Err(error) => log::warn!("bad {method} request: {error}"),
+            }
+            let _ = client.reply_error(&id, -32601, "not supported by this client");
+        }
+    }
+}
+
+/// Runs a butlerd call on its own connection and thread, so the main loop
+/// keeps turning while it works.
 fn spawn_op<F>(name: String, daemon: Arc<Daemon>, emit: Emitter, op: F)
 where
-    F: FnOnce(&Arc<Client>, &Emitter) -> Result<()> + Send + 'static,
+    F: FnOnce(&Client, &Emitter) -> Result<()> + Send + 'static,
 {
     let outer_emit = emit.clone();
     let outer_name = name.clone();
@@ -256,7 +348,7 @@ where
         .name(name.clone())
         .spawn(move || {
             let client = match Client::connect(&daemon) {
-                Ok(client) => Arc::new(client),
+                Ok(client) => client,
                 Err(error) => {
                     emit.send(Event::Error(format!("{error:#}")));
                     return;
@@ -274,114 +366,45 @@ where
 
 fn refresh_caves(client: &Client, emit: &Emitter) {
     match all_caves(client) {
-        Ok(caves) => emit.send(Event::Caves(caves)),
+        Ok(caves) => {
+            log::info!("{} installed games", caves.len());
+            emit.send(Event::Caves(caves));
+        }
         Err(error) => log::warn!("refreshing caves: {error:#}"),
     }
 }
 
-fn install(
-    client: &Arc<Client>,
-    config: &Config,
-    running: &Running,
-    game: Game,
-    emit: &Emitter,
-) -> Result<()> {
-    let game_id = game.id;
-    let progress = |state: InstallState| {
-        emit.send(Event::InstallProgress { game_id, state });
-    };
-    progress(InstallState {
-        stage: "Preparing".into(),
+fn refresh_downloads(client: &Client, emit: &Emitter) {
+    match client.call(DownloadsListParams {}) {
+        Ok(list) => emit.send(Event::Downloads(list.downloads)),
+        Err(error) => log::warn!("listing downloads: {error:#}"),
+    }
+}
+
+/// Puts a game on the download queue; the driver takes it from there.
+fn queue_install(client: &Client, config: &Config, game: Game) -> Result<()> {
+    let location = install_location(client, config)?;
+    let uploads = client
+        .call(FetchGameUploadsParams {
+            game_id: game.id,
+            compatible: true,
+            fresh: Some(true),
+        })?
+        .uploads;
+    // TODO: let the user pick when there is more than one.
+    let upload = uploads
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("{} has no download for this computer", game.title))?;
+    let queued = client.call(InstallQueueParams {
+        game: Some(game.clone()),
+        upload: Some(upload),
+        install_location_id: Some(location),
+        reason: Some(DownloadReason::Install),
+        queue_download: Some(true),
         ..Default::default()
-    });
-
-    let outcome = (|| -> Result<()> {
-        let location = install_location(client, config)?;
-        let uploads = client
-            .call(FetchGameUploadsParams {
-                game_id,
-                compatible: true,
-                fresh: Some(true),
-            })?
-            .uploads;
-        // TODO: let the user pick when there is more than one.
-        let upload = uploads
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("{} has no download for this computer", game.title))?;
-        let queued = client.call(InstallQueueParams {
-            game: Some(game.clone()),
-            upload: Some(upload),
-            install_location_id: Some(location),
-            reason: Some(DownloadReason::Install),
-            ..Default::default()
-        })?;
-        running
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(game_id, queued.id.clone());
-
-        // Perform blocks this thread for the whole install; a second thread
-        // turns the connection's notifications into progress events.
-        let pump = {
-            let client = Arc::clone(client);
-            let emit = emit.clone();
-            let (stop_tx, stop_rx) = mpsc::channel::<()>();
-            let handle = std::thread::spawn(move || {
-                let mut state = InstallState {
-                    stage: "Starting".into(),
-                    ..Default::default()
-                };
-                while stop_rx.try_recv().is_err() {
-                    for incoming in client.poll_timeout(Duration::from_millis(100)) {
-                        match incoming {
-                            Incoming::Notification { method, params } => {
-                                match AnyNotification::decode(&method, params) {
-                                    Ok(AnyNotification::Progress(p)) => {
-                                        state.progress = p.progress;
-                                        state.bps = p.bps;
-                                        state.eta_seconds = p.eta;
-                                    }
-                                    Ok(AnyNotification::TaskStarted(t)) => {
-                                        state.stage = format!("{:?}", t.r#type);
-                                        state.progress = 0.0;
-                                    }
-                                    Ok(other) => log::debug!("{other:?}"),
-                                    Err(error) => log::warn!("bad {method}: {error}"),
-                                }
-                                emit.send(Event::InstallProgress {
-                                    game_id,
-                                    state: state.clone(),
-                                });
-                            }
-                            Incoming::Request { id, method, .. } => {
-                                log::warn!("install asked {method}; not supported yet");
-                                let _ = client.reply_error(&id, -32601, "not supported");
-                            }
-                        }
-                    }
-                }
-            });
-            (stop_tx, handle)
-        };
-        let result = client.call(InstallPerformParams {
-            id: queued.id,
-            staging_folder: queued.staging_folder,
-        });
-        let _ = pump.0.send(());
-        let _ = pump.1.join();
-        result.map(|_| ())
-    })();
-
-    running
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(&game_id);
-    emit.send(Event::InstallFinished {
-        game_id,
-        result: outcome.map_err(|e| format!("{e:#}")),
-    });
-    refresh_caves(client, emit);
+    })?;
+    log::info!("queued {} as download {}", game.title, queued.id);
     Ok(())
 }
 
@@ -416,7 +439,7 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         })?;
         return result
             .profile
-            .ok_or_else(|| anyhow::anyhow!("saved login returned no profile"));
+            .ok_or_else(|| anyhow!("saved login returned no profile"));
     }
     let Some(api_key) = &config.api_key else {
         bail!(
@@ -432,7 +455,7 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         .context("API key login")?;
     result
         .profile
-        .ok_or_else(|| anyhow::anyhow!("login returned no profile"))
+        .ok_or_else(|| anyhow!("login returned no profile"))
 }
 
 fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game>> {
