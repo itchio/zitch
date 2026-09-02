@@ -41,7 +41,7 @@ pub struct App {
     /// Something the user just did, shown in the header.
     notice: Option<String>,
     pub actions: Vec<Action>,
-    pub grid: ui::Grid,
+    pub rows: ui::Rows,
     shot: Option<Shot>,
 }
 
@@ -153,7 +153,7 @@ impl App {
             error: None,
             notice: None,
             actions: Vec::new(),
-            grid: ui::Grid::default(),
+            rows: ui::Rows::default(),
             shot,
         }
     }
@@ -238,7 +238,7 @@ impl App {
         }
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
-                Page::Library => self.move_grid_focus(direction, count),
+                Page::Library => self.rows.move_focus(direction),
                 Page::Game { index, button } => {
                     let Some(game) = self.game_at(index) else {
                         return;
@@ -262,9 +262,10 @@ impl App {
             },
             Action::FocusIndex(index) => {
                 if index < count {
-                    self.grid.focus = index;
+                    self.rows.focus_game(index);
                 }
             }
+            Action::FocusTile { row, col } => self.rows.focus_tile(row, col),
             Action::FocusButton(button) => {
                 if let Page::Game { index, .. } = self.page {
                     self.page = Page::Game { index, button };
@@ -272,11 +273,9 @@ impl App {
             }
             Action::Activate => match self.page.clone() {
                 Page::Library => {
-                    if self.grid.focus < count {
-                        self.actions.push(Action::Open(Page::Game {
-                            index: self.grid.focus,
-                            button: 0,
-                        }));
+                    if let Some(index) = self.rows.focused_game().filter(|&i| i < count) {
+                        self.actions
+                            .push(Action::Open(Page::Game { index, button: 0 }));
                     }
                 }
                 Page::Game { index, button } => {
@@ -298,8 +297,7 @@ impl App {
             Action::Back => match self.page {
                 Page::Library => self.notice = None,
                 Page::Game { index, .. } => {
-                    self.grid.focus = index;
-                    self.grid.follow = true;
+                    self.rows.focus_game(index);
                     self.page = Page::Library;
                 }
             },
@@ -387,6 +385,87 @@ impl App {
             .any(|cave| cave.game_id() == Some(game_id) && self.running.contains(&cave.id))
     }
 
+    /// Lays the home screen out as carousels: what you can play now first,
+    /// then what you played last, then anything with an update, then all.
+    fn rebuild_sections(&mut self) {
+        let Some(games) = self.games.get() else {
+            return;
+        };
+        let index_of: std::collections::HashMap<i64, usize> =
+            games.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
+        let mut sections = Vec::new();
+
+        let mut installed: Vec<(&Cave, usize)> = self
+            .caves
+            .iter()
+            .filter_map(|cave| Some((cave, *index_of.get(&cave.game_id()?)?)))
+            .collect();
+        // Newest install first.
+        installed.sort_by(|a, b| {
+            let at = |c: &Cave| c.stats.as_ref().and_then(|s| s.installed_at.clone());
+            at(b.0).cmp(&at(a.0))
+        });
+        let mut seen = std::collections::HashSet::new();
+        let installed_games: Vec<usize> = installed
+            .iter()
+            .map(|(_, i)| *i)
+            .filter(|i| seen.insert(*i))
+            .collect();
+        if !installed_games.is_empty() {
+            sections.push(ui::Section {
+                title: "Installed".into(),
+                games: installed_games,
+            });
+        }
+
+        let mut played: Vec<(&Cave, usize)> = installed
+            .iter()
+            .copied()
+            .filter(|(cave, _)| {
+                cave.stats
+                    .as_ref()
+                    .is_some_and(|s| s.last_touched_at.is_some() && s.seconds_run > 0)
+            })
+            .collect();
+        played.sort_by(|a, b| {
+            let at = |c: &Cave| c.stats.as_ref().and_then(|s| s.last_touched_at.clone());
+            at(b.0).cmp(&at(a.0))
+        });
+        let mut seen = std::collections::HashSet::new();
+        let played_games: Vec<usize> = played
+            .iter()
+            .map(|(_, i)| *i)
+            .filter(|i| seen.insert(*i))
+            .take(12)
+            .collect();
+        if !played_games.is_empty() {
+            sections.push(ui::Section {
+                title: "Recently played".into(),
+                games: played_games,
+            });
+        }
+
+        let updatable = self.updatable();
+        let update_games: Vec<usize> = games
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| updatable.contains(&g.id))
+            .map(|(i, _)| i)
+            .collect();
+        if !update_games.is_empty() {
+            sections.push(ui::Section {
+                title: "Updates".into(),
+                games: update_games,
+            });
+        }
+
+        sections.push(ui::Section {
+            title: "All games".into(),
+            games: (0..games.len()).collect(),
+        });
+        self.rows.set_sections(sections);
+    }
+
     fn download_for(&self, game_id: i64) -> Option<&Download> {
         self.downloads
             .iter()
@@ -432,25 +511,6 @@ impl App {
             });
         }
         self.installs = installs;
-    }
-
-    fn move_grid_focus(&mut self, direction: Direction, count: usize) {
-        if count == 0 {
-            return;
-        }
-        let columns = self.grid.columns.max(1);
-        let focus = self.grid.focus;
-        let next = match direction {
-            Direction::Left => focus.saturating_sub(1),
-            Direction::Right => (focus + 1).min(count - 1),
-            Direction::Up => focus.checked_sub(columns).unwrap_or(focus),
-            // Stop at the last row, on the last tile if the row is short.
-            Direction::Down if focus + columns < count => focus + columns,
-            Direction::Down if focus / columns < (count - 1) / columns => count - 1,
-            Direction::Down => focus,
-        };
-        self.grid.focus = next;
-        self.grid.follow = true;
     }
 
     fn drive_shot(&mut self, ctx: &egui::Context) {
@@ -538,10 +598,14 @@ impl App {
             match event {
                 Event::Status(text) => self.status = text,
                 Event::SignedIn(profile) => self.profile = Some(profile),
-                Event::OwnedGames(games) => self.games = Loadable::Loaded(games),
+                Event::OwnedGames(games) => {
+                    self.games = Loadable::Loaded(games);
+                    self.rebuild_sections();
+                }
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
+                    self.rebuild_sections();
                 }
                 Event::Downloads(downloads) => {
                     let listed: std::collections::HashSet<String> =
@@ -581,6 +645,7 @@ impl App {
                         .into_iter()
                         .map(|u| (u.cave_id.clone(), u))
                         .collect();
+                    self.rebuild_sections();
                 }
                 Event::DownloadErrored(download) => {
                     let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
@@ -670,7 +735,7 @@ impl eframe::App for App {
                         &self.installed,
                         &self.installs,
                         &self.updatable(),
-                        &mut self.grid,
+                        &mut self.rows,
                         &self.covers,
                         &mut self.actions,
                     ),

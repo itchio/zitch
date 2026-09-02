@@ -115,8 +115,13 @@ pub enum Direction {
 #[derive(Debug, Clone)]
 pub enum Action {
     MoveFocus(Direction),
-    /// Focus a tile without scrolling to it; the pointer is already there.
+    /// Focus a game by library index, scrolling to it.
     FocusIndex(usize),
+    /// Focus a tile without scrolling to it; the pointer is already there.
+    FocusTile {
+        row: usize,
+        col: usize,
+    },
     /// Focus a detail-page button; the pointer is already there.
     FocusButton(usize),
     Activate,
