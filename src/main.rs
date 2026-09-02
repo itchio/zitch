@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod butlerd;
+mod gamepad;
 mod images;
 mod model;
 mod ui;

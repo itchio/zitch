@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Event};
+use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
 use crate::model::{Action, Direction, Game, Loadable, Profile};
 use crate::ui;
@@ -11,6 +12,7 @@ use crate::ui;
 pub struct App {
     backend: Backend,
     covers: CoverLoader,
+    gamepad: Gamepad,
     status: String,
     profile: Option<Profile>,
     games: Loadable<Vec<Game>>,
@@ -81,6 +83,7 @@ impl App {
         Self {
             backend,
             covers,
+            gamepad: Gamepad::new(),
             status: String::new(),
             profile: None,
             games: Loadable::Loading,
@@ -223,6 +226,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
         self.handle_keys(ctx);
+        self.gamepad.poll(ctx, &mut self.actions);
         self.drive_shot(ctx);
     }
 
