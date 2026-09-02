@@ -1,28 +1,36 @@
 //! The butlerd conversation, on its own thread. The interface sends
 //! [`Command`]s and polls [`Event`]s; nothing here blocks a frame.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
-    AnyNotification, AnyServerRequest, FetchCavesParams, FetchProfileOwnedKeysParams,
-    ProfileListParams, ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams,
+    AnyNotification, AnyServerRequest, DownloadReason, FetchCavesParams, FetchGameUploadsParams,
+    FetchProfileOwnedKeysParams, InstallCancelParams, InstallLocationsAddParams,
+    InstallLocationsListParams, InstallPerformParams, InstallQueueParams, ProfileListParams,
+    ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, Game, Profile, UserExt};
+use crate::model::{Cave, Game, InstallState, Profile, UserExt};
 
 pub struct Config {
     pub butler: PathBuf,
     pub dbpath: PathBuf,
     /// Used for `Profile.LoginWithAPIKey` when no saved profile exists.
     pub api_key: Option<String>,
+    /// Where games go when the database has no install location yet.
+    pub install_dir: PathBuf,
 }
 
 pub enum Command {
+    Install { game: Box<Game> },
+    CancelInstall { game_id: i64 },
+    Uninstall { cave_id: String },
     Shutdown,
 }
 
@@ -33,6 +41,18 @@ pub enum Event {
     OwnedGames(Vec<Game>),
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
+    InstallProgress {
+        game_id: i64,
+        state: InstallState,
+    },
+    InstallFinished {
+        game_id: i64,
+        result: Result<(), String>,
+    },
+    UninstallFinished {
+        cave_id: String,
+        result: Result<(), String>,
+    },
     Error(String),
 }
 
@@ -87,6 +107,10 @@ impl Backend {
         self.events.try_iter().collect()
     }
 
+    pub fn send(&self, command: Command) {
+        let _ = self.commands.send(command);
+    }
+
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
         if let Some(thread) = self.thread.take() {
@@ -95,6 +119,7 @@ impl Backend {
     }
 }
 
+#[derive(Clone)]
 struct Emitter {
     events: mpsc::Sender<Event>,
     waker: Waker,
@@ -113,9 +138,13 @@ impl Emitter {
     }
 }
 
+/// butlerd ids of the installs in flight, by game, so a cancel from the
+/// interface can find them.
+type Running = Arc<Mutex<HashMap<i64, String>>>;
+
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
-    let daemon = Daemon::spawn(&config.butler, &config.dbpath)?;
+    let daemon = Arc::new(Daemon::spawn(&config.butler, &config.dbpath)?);
     let client = Client::connect(&daemon)?;
     emit.status(format!("Connected to butlerd at {}", daemon.address));
 
@@ -132,9 +161,66 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     log::info!("{} installed games", caves.len());
     emit.send(Event::Caves(caves));
 
+    let config = Arc::new(config);
+    let running: Running = Arc::default();
     loop {
         match commands.try_recv() {
             Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => break,
+            Ok(Command::Install { game }) => {
+                if running
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .contains_key(&game.id)
+                {
+                    continue;
+                }
+                spawn_op(
+                    format!("install-{}", game.id),
+                    Arc::clone(&daemon),
+                    emit.clone(),
+                    {
+                        let config = Arc::clone(&config);
+                        let running = Arc::clone(&running);
+                        move |client, emit| install(client, &config, &running, *game, emit)
+                    },
+                );
+            }
+            Ok(Command::CancelInstall { game_id }) => {
+                let id = running
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&game_id)
+                    .cloned();
+                match id {
+                    // Perform returns with an error on its own connection,
+                    // which is where the finish is reported.
+                    Some(id) => {
+                        if let Err(error) = client.call(InstallCancelParams { id }) {
+                            log::warn!("cancel: {error:#}");
+                        }
+                    }
+                    None => log::info!("nothing to cancel for game {game_id}"),
+                }
+            }
+            Ok(Command::Uninstall { cave_id }) => {
+                spawn_op(
+                    format!("uninstall-{cave_id}"),
+                    Arc::clone(&daemon),
+                    emit.clone(),
+                    move |client, emit| {
+                        let result = client
+                            .call(UninstallPerformParams {
+                                cave_id: cave_id.clone(),
+                                hard: None,
+                            })
+                            .map(|_| ())
+                            .map_err(|e| format!("{e:#}"));
+                        emit.send(Event::UninstallFinished { cave_id, result });
+                        refresh_caves(client, emit);
+                        Ok(())
+                    },
+                );
+            }
             Err(mpsc::TryRecvError::Empty) => {}
         }
         for incoming in client.poll_timeout(Duration::from_millis(100)) {
@@ -156,6 +242,168 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         }
     }
     Ok(())
+}
+
+/// Runs a long butlerd call on its own connection and thread, so its
+/// notifications are unambiguously its own and the main loop keeps turning.
+fn spawn_op<F>(name: String, daemon: Arc<Daemon>, emit: Emitter, op: F)
+where
+    F: FnOnce(&Arc<Client>, &Emitter) -> Result<()> + Send + 'static,
+{
+    let outer_emit = emit.clone();
+    let outer_name = name.clone();
+    let result = std::thread::Builder::new()
+        .name(name.clone())
+        .spawn(move || {
+            let client = match Client::connect(&daemon) {
+                Ok(client) => Arc::new(client),
+                Err(error) => {
+                    emit.send(Event::Error(format!("{error:#}")));
+                    return;
+                }
+            };
+            if let Err(error) = op(&client, &emit) {
+                log::error!("{name}: {error:#}");
+                emit.send(Event::Error(format!("{error:#}")));
+            }
+        });
+    if let Err(error) = result {
+        outer_emit.send(Event::Error(format!("spawning {outer_name}: {error}")));
+    }
+}
+
+fn refresh_caves(client: &Client, emit: &Emitter) {
+    match all_caves(client) {
+        Ok(caves) => emit.send(Event::Caves(caves)),
+        Err(error) => log::warn!("refreshing caves: {error:#}"),
+    }
+}
+
+fn install(
+    client: &Arc<Client>,
+    config: &Config,
+    running: &Running,
+    game: Game,
+    emit: &Emitter,
+) -> Result<()> {
+    let game_id = game.id;
+    let progress = |state: InstallState| {
+        emit.send(Event::InstallProgress { game_id, state });
+    };
+    progress(InstallState {
+        stage: "Preparing".into(),
+        ..Default::default()
+    });
+
+    let outcome = (|| -> Result<()> {
+        let location = install_location(client, config)?;
+        let uploads = client
+            .call(FetchGameUploadsParams {
+                game_id,
+                compatible: true,
+                fresh: Some(true),
+            })?
+            .uploads;
+        // TODO: let the user pick when there is more than one.
+        let upload = uploads
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("{} has no download for this computer", game.title))?;
+        let queued = client.call(InstallQueueParams {
+            game: Some(game.clone()),
+            upload: Some(upload),
+            install_location_id: Some(location),
+            reason: Some(DownloadReason::Install),
+            ..Default::default()
+        })?;
+        running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(game_id, queued.id.clone());
+
+        // Perform blocks this thread for the whole install; a second thread
+        // turns the connection's notifications into progress events.
+        let pump = {
+            let client = Arc::clone(client);
+            let emit = emit.clone();
+            let (stop_tx, stop_rx) = mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                let mut state = InstallState {
+                    stage: "Starting".into(),
+                    ..Default::default()
+                };
+                while stop_rx.try_recv().is_err() {
+                    for incoming in client.poll_timeout(Duration::from_millis(100)) {
+                        match incoming {
+                            Incoming::Notification { method, params } => {
+                                match AnyNotification::decode(&method, params) {
+                                    Ok(AnyNotification::Progress(p)) => {
+                                        state.progress = p.progress;
+                                        state.bps = p.bps;
+                                        state.eta_seconds = p.eta;
+                                    }
+                                    Ok(AnyNotification::TaskStarted(t)) => {
+                                        state.stage = format!("{:?}", t.r#type);
+                                        state.progress = 0.0;
+                                    }
+                                    Ok(other) => log::debug!("{other:?}"),
+                                    Err(error) => log::warn!("bad {method}: {error}"),
+                                }
+                                emit.send(Event::InstallProgress {
+                                    game_id,
+                                    state: state.clone(),
+                                });
+                            }
+                            Incoming::Request { id, method, .. } => {
+                                log::warn!("install asked {method}; not supported yet");
+                                let _ = client.reply_error(&id, -32601, "not supported");
+                            }
+                        }
+                    }
+                }
+            });
+            (stop_tx, handle)
+        };
+        let result = client.call(InstallPerformParams {
+            id: queued.id,
+            staging_folder: queued.staging_folder,
+        });
+        let _ = pump.0.send(());
+        let _ = pump.1.join();
+        result.map(|_| ())
+    })();
+
+    running
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&game_id);
+    emit.send(Event::InstallFinished {
+        game_id,
+        result: outcome.map_err(|e| format!("{e:#}")),
+    });
+    refresh_caves(client, emit);
+    Ok(())
+}
+
+/// The first install location, created from the config when there is none.
+fn install_location(client: &Client, config: &Config) -> Result<String> {
+    let locations = client
+        .call(InstallLocationsListParams {})?
+        .install_locations;
+    if let Some(first) = locations.into_iter().next() {
+        return Ok(first.id);
+    }
+    std::fs::create_dir_all(&config.install_dir)
+        .with_context(|| format!("creating {}", config.install_dir.display()))?;
+    let added = client.call(InstallLocationsAddParams {
+        id: None,
+        path: config.install_dir.to_string_lossy().into_owned(),
+    })?;
+    log::info!("added install location {}", config.install_dir.display());
+    added
+        .install_location
+        .map(|location| location.id)
+        .ok_or_else(|| anyhow!("Install.Locations.Add returned no location"))
 }
 
 fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> {

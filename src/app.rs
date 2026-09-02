@@ -3,10 +3,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::backend::{Backend, Event};
+use crate::backend::{Backend, Command, Event};
 use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
-use crate::model::{Action, Cave, CaveExt, Direction, Game, Loadable, Page, Profile, UserExt};
+use crate::model::{
+    Action, Cave, CaveExt, Direction, Game, InstallState, Loadable, Page, Profile, UserExt,
+};
 use crate::ui;
 
 pub struct App {
@@ -18,6 +20,8 @@ pub struct App {
     games: Loadable<Vec<Game>>,
     caves: Vec<Cave>,
     installed: std::collections::HashSet<i64>,
+    /// Installs in flight, by game.
+    pub installs: std::collections::HashMap<i64, InstallState>,
     page: Page,
     error: Option<String>,
     /// Something the user just did, shown in the header.
@@ -34,38 +38,63 @@ pub struct Shot {
     pub deadline: Instant,
     /// When the library finished loading; covers get a moment after that.
     pub settled_at: Option<Instant>,
-    /// Scripted input to play once the library is loaded, one per frame.
-    pub script: std::collections::VecDeque<Action>,
-    pub asked: bool,
+    /// Scripted steps to play once the library is loaded, one per frame.
+    pub script: std::collections::VecDeque<Step>,
+    wait_until: Option<Instant>,
+    /// A screenshot was requested and its pixels have not arrived yet.
+    capture_pending: bool,
+    /// Whether a `capture` step already wrote the file, so the run ends
+    /// without a second capture.
+    captured: bool,
+}
+
+/// One step of `--screenshot-script`.
+#[derive(Debug, Clone)]
+pub enum Step {
+    Act(Action),
+    Wait(Duration),
+    /// Write the screenshot now, mid-script, instead of at the end.
+    Capture,
 }
 
 const COVER_GRACE: Duration = Duration::from_secs(3);
 
 impl Shot {
-    pub fn new(path: PathBuf, wait: Duration, script: Vec<Action>) -> Self {
+    pub fn new(path: PathBuf, wait: Duration, script: Vec<Step>) -> Self {
         Self {
             path,
             deadline: Instant::now() + wait,
             settled_at: None,
             script: script.into(),
-            asked: false,
+            wait_until: None,
+            capture_pending: false,
+            captured: false,
         }
     }
 }
 
-/// Parses `down,down,right,enter` into actions for `--screenshot-script`.
-pub fn parse_script(text: &str) -> Result<Vec<Action>, String> {
+/// Parses `focus:12,enter,wait:2000,capture` for `--screenshot-script`.
+pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
     text.split(',')
         .map(str::trim)
         .filter(|word| !word.is_empty())
         .map(|word| match word {
-            "up" => Ok(Action::MoveFocus(Direction::Up)),
-            "down" => Ok(Action::MoveFocus(Direction::Down)),
-            "left" => Ok(Action::MoveFocus(Direction::Left)),
-            "right" => Ok(Action::MoveFocus(Direction::Right)),
-            "enter" => Ok(Action::Activate),
-            "back" => Ok(Action::Back),
-            other => Err(format!("unknown script step {other:?}")),
+            "up" => Ok(Step::Act(Action::MoveFocus(Direction::Up))),
+            "down" => Ok(Step::Act(Action::MoveFocus(Direction::Down))),
+            "left" => Ok(Step::Act(Action::MoveFocus(Direction::Left))),
+            "right" => Ok(Step::Act(Action::MoveFocus(Direction::Right))),
+            "enter" => Ok(Step::Act(Action::Activate)),
+            "back" => Ok(Step::Act(Action::Back)),
+            "capture" => Ok(Step::Capture),
+            other => {
+                if let Some(index) = other.strip_prefix("focus:").and_then(|n| n.parse().ok()) {
+                    Ok(Step::Act(Action::FocusIndex(index)))
+                } else if let Some(ms) = other.strip_prefix("wait:").and_then(|n| n.parse().ok()) {
+                    Ok(Step::Wait(Duration::from_millis(ms)))
+                } else {
+                    Err(format!("unknown script step {other:?}"))
+                }
+            }
         })
         .collect()
 }
@@ -92,6 +121,7 @@ impl App {
             games: Loadable::Loading,
             caves: Vec::new(),
             installed: Default::default(),
+            installs: Default::default(),
             page: Page::Library,
             error: None,
             notice: None,
@@ -145,10 +175,13 @@ impl App {
                     let Some(game) = self.game_at(index) else {
                         return;
                     };
-                    let mut buttons = ui::game_buttons(&self.caves_for(game.id)).len();
-                    if buttons == 0 {
-                        buttons = 1;
-                    }
+                    let buttons = ui::game_buttons(
+                        game,
+                        &self.caves_for(game.id),
+                        self.installs.get(&game.id),
+                    )
+                    .len()
+                    .max(1);
                     let button = match direction {
                         Direction::Left => button.saturating_sub(1),
                         Direction::Right => (button + 1).min(buttons - 1),
@@ -180,10 +213,11 @@ impl App {
                     let Some(game) = self.game_at(index) else {
                         return;
                     };
-                    let mut buttons = ui::game_buttons(&self.caves_for(game.id));
-                    if buttons.is_empty() {
-                        buttons.push(("Install", Action::Install { game_id: game.id }));
-                    }
+                    let buttons = ui::game_buttons(
+                        game,
+                        &self.caves_for(game.id),
+                        self.installs.get(&game.id),
+                    );
                     if let Some((_, action)) = buttons.get(button) {
                         self.actions.push(action.clone());
                     }
@@ -201,18 +235,45 @@ impl App {
                 self.notice = None;
                 self.page = page;
             }
-            // Placeholders until the install and launch flows exist.
+            // Placeholder until the launch flow exists.
             Action::Play { cave_id } => {
                 log::info!("play cave {cave_id}");
                 self.notice = Some("Launching is not wired up yet".into());
             }
             Action::Install { game_id } => {
-                log::info!("install game {game_id}");
-                self.notice = Some("Installing is not wired up yet".into());
+                let Some(game) = self
+                    .games
+                    .get()
+                    .and_then(|g| g.iter().find(|g| g.id == game_id))
+                else {
+                    return;
+                };
+                if self.installs.contains_key(&game_id) {
+                    return;
+                }
+                // Shown as installing from this instant; the backend's first
+                // progress event replaces it.
+                self.installs.insert(
+                    game_id,
+                    InstallState {
+                        stage: "Starting".into(),
+                        ..Default::default()
+                    },
+                );
+                self.notice = Some(format!("Installing {}", game.title));
+                self.backend.send(Command::Install {
+                    game: Box::new(game.clone()),
+                });
+            }
+            Action::CancelInstall { game_id } => {
+                if let Some(state) = self.installs.get_mut(&game_id) {
+                    state.cancelling = true;
+                }
+                self.backend.send(Command::CancelInstall { game_id });
             }
             Action::Uninstall { cave_id } => {
-                log::info!("uninstall cave {cave_id}");
-                self.notice = Some("Uninstalling is not wired up yet".into());
+                self.notice = Some("Uninstalling".into());
+                self.backend.send(Command::Uninstall { cave_id });
             }
         }
     }
@@ -240,50 +301,79 @@ impl App {
         let Some(shot) = self.shot.as_mut() else {
             return;
         };
-        let settled = !matches!(self.games, Loadable::Loading) || self.error.is_some();
-        if settled && let Some(action) = shot.script.pop_front() {
-            self.actions.push(action);
-            ctx.request_repaint();
-            return;
-        }
-        if settled && shot.settled_at.is_none() {
-            shot.settled_at = Some(Instant::now());
-        }
         let now = Instant::now();
-        let ready = shot.settled_at.is_some_and(|at| now >= at + COVER_GRACE);
-        if !shot.asked && (ready || now >= shot.deadline) {
-            shot.asked = true;
-            // One more frame so the settled state is what gets captured.
+        ctx.request_repaint_after(Duration::from_millis(100));
+
+        if shot.capture_pending {
+            let image = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            let Some(image) = image else {
+                return;
+            };
+            let [width, height] = image.size;
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match image::save_buffer(
+                &shot.path,
+                &rgba,
+                width as u32,
+                height as u32,
+                image::ColorType::Rgba8,
+            ) {
+                Ok(()) => log::info!("wrote {width}x{height} to {}", shot.path.display()),
+                Err(error) => log::error!("writing {}: {error}", shot.path.display()),
+            }
+            shot.capture_pending = false;
+            shot.captured = true;
+            if shot.script.is_empty() && self.installs.is_empty() {
+                self.shot = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+
+        let loaded = !matches!(self.games, Loadable::Loading) || self.error.is_some();
+        if let Some(until) = shot.wait_until {
+            if now < until {
+                return;
+            }
+            shot.wait_until = None;
+        }
+        if loaded && let Some(step) = shot.script.pop_front() {
+            match step {
+                Step::Act(action) => self.actions.push(action),
+                Step::Wait(duration) => shot.wait_until = Some(now + duration),
+                Step::Capture => {
+                    shot.capture_pending = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                }
+            }
             ctx.request_repaint();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-        }
-        if !shot.asked {
-            ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
-        let image = ctx.input(|input| {
-            input.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        let Some(image) = image else {
-            return;
-        };
-        let [width, height] = image.size;
-        let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-        match image::save_buffer(
-            &shot.path,
-            &rgba,
-            width as u32,
-            height as u32,
-            image::ColorType::Rgba8,
-        ) {
-            Ok(()) => log::info!("wrote {width}x{height} to {}", shot.path.display()),
-            Err(error) => log::error!("writing {}: {error}", shot.path.display()),
+
+        // An install the script started runs to the end before the window
+        // closes; closing would kill the daemon under it.
+        let settled = loaded && self.installs.is_empty();
+        if settled && shot.settled_at.is_none() {
+            shot.settled_at = Some(now);
         }
-        self.shot = None;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        let ready = shot.settled_at.is_some_and(|at| now >= at + COVER_GRACE);
+        if ready || (now >= shot.deadline && self.installs.is_empty()) {
+            if shot.captured {
+                self.shot = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                shot.capture_pending = true;
+                ctx.request_repaint();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+        }
     }
 
     fn handle_events(&mut self) {
@@ -295,6 +385,36 @@ impl App {
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
+                }
+                Event::InstallProgress { game_id, state } => {
+                    // A cancel the user asked for stays shown until the
+                    // backend reports the end.
+                    let cancelling = self.installs.get(&game_id).is_some_and(|s| s.cancelling);
+                    self.installs.insert(
+                        game_id,
+                        InstallState {
+                            cancelling,
+                            ..state
+                        },
+                    );
+                }
+                Event::InstallFinished { game_id, result } => {
+                    self.installs.remove(&game_id);
+                    let title = self
+                        .games
+                        .get()
+                        .and_then(|g| g.iter().find(|g| g.id == game_id))
+                        .map_or_else(|| game_id.to_string(), |g| g.title.clone());
+                    self.notice = Some(match result {
+                        Ok(()) => format!("Installed {title}"),
+                        Err(error) => format!("Install of {title} failed: {error}"),
+                    });
+                }
+                Event::UninstallFinished { result, .. } => {
+                    self.notice = Some(match result {
+                        Ok(()) => "Uninstalled".to_string(),
+                        Err(error) => format!("Uninstall failed: {error}"),
+                    });
                 }
                 Event::Error(message) => {
                     if self.games.get().is_none() {
@@ -350,6 +470,7 @@ impl eframe::App for App {
                         ui,
                         games,
                         &self.installed,
+                        &self.installs,
                         &mut self.grid,
                         &self.covers,
                         &mut self.actions,
@@ -362,7 +483,14 @@ impl eframe::App for App {
                                     .iter()
                                     .filter(|cave| cave.game_id() == Some(game.id))
                                     .collect();
-                                ui::game_detail(ui, game, &caves, button, &mut self.actions);
+                                ui::game_detail(
+                                    ui,
+                                    game,
+                                    &caves,
+                                    self.installs.get(&game.id),
+                                    button,
+                                    &mut self.actions,
+                                );
                             }
                             None => self.actions.push(Action::Back),
                         }
@@ -370,6 +498,9 @@ impl eframe::App for App {
                 }
             });
         self.apply_actions();
+        if !self.installs.is_empty() {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

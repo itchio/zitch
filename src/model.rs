@@ -44,6 +44,18 @@ impl CaveExt for Cave {
     }
 }
 
+/// An install in flight, as last reported by the backend.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InstallState {
+    /// 0 to 1.
+    pub progress: f64,
+    pub bps: f64,
+    pub eta_seconds: f64,
+    /// What butler is doing right now: downloading, installing, and so on.
+    pub stage: String,
+    pub cancelling: bool,
+}
+
 /// What the window is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
@@ -97,6 +109,9 @@ pub enum Action {
         cave_id: String,
     },
     Install {
+        game_id: i64,
+    },
+    CancelInstall {
         game_id: i64,
     },
     Uninstall {

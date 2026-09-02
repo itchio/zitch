@@ -80,6 +80,8 @@ fn main() -> eframe::Result<()> {
         butler: cli.butler,
         dbpath,
         api_key,
+        // Same layout as the itch app, so a shared config dir shares games.
+        install_dir: config_dir.join("apps"),
     };
 
     let script = match cli.screenshot_script.as_deref().map(app::parse_script) {

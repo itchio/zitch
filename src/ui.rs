@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
 use crate::images::{Animation, CoverLoader};
-use crate::model::{Action, Cave, Game, Page, UploadExt};
+use crate::model::{Action, Cave, Game, InstallState, Page, UploadExt};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
 const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
@@ -61,6 +61,7 @@ pub fn library(
     ui: &mut Ui,
     games: &[Game],
     installed: &std::collections::HashSet<i64>,
+    installs: &std::collections::HashMap<i64, InstallState>,
     grid: &mut Grid,
     covers: &CoverLoader,
     actions: &mut Vec<Action>,
@@ -142,6 +143,7 @@ pub fn library(
                             game,
                             focused,
                             installed: installed.contains(&game.id),
+                            install: installs.get(&game.id),
                         };
                         draw_tile(ui, rect, cover_height, tile, animation);
                     }
@@ -158,6 +160,7 @@ struct Tile<'a> {
     game: &'a Game,
     focused: bool,
     installed: bool,
+    install: Option<&'a InstallState>,
 }
 
 fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option<&mut Playing>) {
@@ -165,6 +168,7 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
         game,
         focused,
         installed,
+        install,
     } = tile;
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
@@ -196,7 +200,13 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
         let pos = cover.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, DIM);
     }
-    if installed {
+    if let Some(install) = install {
+        let bar = Rect::from_min_max(
+            pos2(cover.left(), cover.bottom() - 6.0),
+            cover.right_bottom(),
+        );
+        progress_bar(ui, bar, install.progress as f32);
+    } else if installed {
         badge(
             ui,
             pos2(cover.left() + 8.0, cover.bottom() - 8.0),
@@ -322,7 +332,17 @@ fn badge(ui: &Ui, bottom_left: egui::Pos2, text: &str) {
 }
 
 /// What the detail page offers for a game, in button order.
-pub fn game_buttons(caves: &[&Cave]) -> Vec<(&'static str, Action)> {
+pub fn game_buttons(
+    game: &Game,
+    caves: &[&Cave],
+    install: Option<&InstallState>,
+) -> Vec<(&'static str, Action)> {
+    if let Some(install) = install {
+        if install.cancelling {
+            return Vec::new();
+        }
+        return vec![("Cancel", Action::CancelInstall { game_id: game.id })];
+    }
     match caves.first() {
         Some(cave) => vec![
             (
@@ -338,7 +358,7 @@ pub fn game_buttons(caves: &[&Cave]) -> Vec<(&'static str, Action)> {
                 },
             ),
         ],
-        None => Vec::new(),
+        None => vec![("Install", Action::Install { game_id: game.id })],
     }
 }
 
@@ -346,13 +366,11 @@ pub fn game_detail(
     ui: &mut Ui,
     game: &Game,
     caves: &[&Cave],
+    install: Option<&InstallState>,
     focused_button: usize,
     actions: &mut Vec<Action>,
 ) {
-    let mut buttons = game_buttons(caves);
-    if caves.is_empty() {
-        buttons.push(("Install", Action::Install { game_id: game.id }));
-    }
+    let buttons = game_buttons(game, caves, install);
     let width = ui.available_width();
     let cover_width = (width * 0.42).min(420.0);
     let cover_height = cover_width / COVER_ASPECT;
@@ -383,8 +401,34 @@ pub fn game_detail(
                 );
             }
             ui.add_space(12.0);
-            match caves.first() {
-                Some(cave) => {
+            match (install, caves.first()) {
+                (Some(install), _) => {
+                    let line = if install.cancelling {
+                        "Cancelling".to_string()
+                    } else if install.bps > 0.0 {
+                        format!(
+                            "{}, {:.0}%, {}/s, {} left",
+                            install.stage,
+                            install.progress * 100.0,
+                            human_size(install.bps as i64),
+                            human_duration_seconds(install.eta_seconds as i64),
+                        )
+                    } else {
+                        format!("{}, {:.0}%", install.stage, install.progress * 100.0)
+                    };
+                    ui.label(
+                        egui::RichText::new(line)
+                            .font(FontId::proportional(13.0))
+                            .color(ACCENT),
+                    );
+                    ui.add_space(8.0);
+                    let (bar, _) = ui.allocate_exact_size(
+                        vec2(ui.available_width().min(420.0), 8.0),
+                        Sense::hover(),
+                    );
+                    progress_bar(ui, bar, install.progress as f32);
+                }
+                (None, Some(cave)) => {
                     let mut line = String::from("Installed");
                     if let Some(info) = &cave.install_info {
                         line.push_str(&format!(", {}", human_size(info.installed_size)));
@@ -403,7 +447,7 @@ pub fn game_detail(
                         subtle(ui, &format!("Played {}", human_duration(stats.seconds_run)));
                     }
                 }
-                None => subtle(ui, "Not installed"),
+                (None, None) => subtle(ui, "Not installed"),
             }
             ui.add_space(20.0);
             ui.horizontal(|ui| {
@@ -463,6 +507,27 @@ pub fn human_size(bytes: i64) -> String {
         format!("{value:.0} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Short remaining-time text for progress lines.
+pub fn human_duration_seconds(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+fn progress_bar(ui: &Ui, rect: Rect, fraction: f32) {
+    let radius = CornerRadius::same(3);
+    ui.painter().rect_filled(rect, radius, TILE_HOVER);
+    let filled = Rect::from_min_size(
+        rect.min,
+        vec2(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
+    );
+    if filled.width() > 0.0 {
+        ui.painter().rect_filled(filled, radius, ACCENT);
     }
 }
 
