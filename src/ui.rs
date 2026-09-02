@@ -51,10 +51,12 @@ pub fn library(ui: &mut Ui, games: &[Game]) {
 fn tile(ui: &Ui, rect: Rect, cover_height: f32, game: &Game, hovered: bool) {
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
+    // stillCoverUrl is the static frame of an animated cover; those gifs
+    // run to megabytes.
     let url = game
-        .cover_url
+        .still_cover_url
         .as_deref()
-        .or(game.still_cover_url.as_deref());
+        .or(game.cover_url.as_deref());
     let painted = url.is_some_and(|url| paint_cover(ui, url, cover, radius));
     if !painted {
         let fill = if hovered { TILE_HOVER } else { TILE_BG };

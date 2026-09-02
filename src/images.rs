@@ -1,20 +1,25 @@
 //! Cover art for egui's image pipeline: `egui::Image::new("https://...")`
-//! asks this loader for bytes, which come from memory, the disk cache, or a
-//! download on one of a few worker threads.
+//! asks this loader for pixels. Downloading, decoding, and scaling all
+//! happen on a few worker threads; the interface thread only ever receives a
+//! finished `ColorImage`, so a slow cover can never hold up a frame.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
+use egui::ColorImage;
+use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
 
 const WORKERS: usize = 4;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Covers are shown at most a couple of hundred points wide; anything larger
+/// is wasted texture memory and upload time.
+const MAX_DIMENSION: u32 = 630;
 
 enum Entry {
     Pending,
-    Ready(Arc<[u8]>),
+    Ready(Arc<ColorImage>),
     Failed(String),
 }
 
@@ -68,16 +73,15 @@ impl CoverLoader {
     }
 
     pub fn install(&self, ctx: &egui::Context) {
-        ctx.add_bytes_loader(Arc::new(self.clone()));
-        egui_extras::install_image_loaders(ctx);
+        ctx.add_image_loader(Arc::new(self.clone()));
     }
 }
 
 impl Inner {
     fn complete(&self, job: Job) {
-        let outcome = self.fetch(&job.url);
+        let outcome = self.fetch(&job.url).and_then(|bytes| decode(&bytes));
         let entry = match outcome {
-            Ok(bytes) => Entry::Ready(bytes),
+            Ok(image) => Entry::Ready(Arc::new(image)),
             Err(error) => {
                 log::debug!("cover {}: {error}", job.url);
                 Entry::Failed(error)
@@ -90,10 +94,10 @@ impl Inner {
         job.ctx.request_repaint();
     }
 
-    fn fetch(&self, url: &str) -> Result<Arc<[u8]>, String> {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
         let path = self.cache_dir.join(cache_name(url));
         if let Ok(bytes) = std::fs::read(&path) {
-            return Ok(bytes.into());
+            return Ok(bytes);
         }
         let response = ureq::get(url).call().map_err(|e| e.to_string())?;
         let bytes = response
@@ -110,8 +114,40 @@ impl Inner {
         {
             let _ = std::fs::remove_file(&tmp);
         }
-        Ok(bytes.into())
+        Ok(bytes)
     }
+}
+
+/// The first frame, scaled down to at most `MAX_DIMENSION`, as egui pixels.
+fn decode(bytes: &[u8]) -> Result<ColorImage, String> {
+    use image::AnimationDecoder;
+    let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
+    let decoded = if format == image::ImageFormat::Gif {
+        // Animated covers can run to megabytes and hundreds of frames; one
+        // frame is all a tile needs.
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+            .map_err(|e| e.to_string())?;
+        let frame = decoder
+            .into_frames()
+            .next()
+            .ok_or("gif has no frames")?
+            .map_err(|e| e.to_string())?;
+        image::DynamicImage::ImageRgba8(frame.into_buffer())
+    } else {
+        image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?
+    };
+    let decoded = if decoded.width() > MAX_DIMENSION || decoded.height() > MAX_DIMENSION {
+        decoded.resize(
+            MAX_DIMENSION,
+            MAX_DIMENSION,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        decoded
+    };
+    let rgba = decoded.into_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
 /// A filename for the cache that is unique to the URL and safe everywhere.
@@ -127,23 +163,21 @@ fn cache_name(url: &str) -> String {
     format!("{:016x}.{ext}", hasher.finish())
 }
 
-impl BytesLoader for CoverLoader {
+impl ImageLoader for CoverLoader {
     fn id(&self) -> &'static str {
         Self::ID
     }
 
-    fn load(&self, ctx: &egui::Context, uri: &str) -> BytesLoadResult {
+    fn load(&self, ctx: &egui::Context, uri: &str, _size_hint: SizeHint) -> ImageLoadResult {
         if !(uri.starts_with("https://") || uri.starts_with("http://")) {
             return Err(LoadError::NotSupported);
         }
         let mut entries = self.inner.entries.lock().unwrap_or_else(|p| p.into_inner());
         match entries.get(uri) {
-            Some(Entry::Ready(bytes)) => Ok(BytesPoll::Ready {
-                size: None,
-                bytes: Bytes::Shared(Arc::clone(bytes)),
-                mime: None,
+            Some(Entry::Ready(image)) => Ok(ImagePoll::Ready {
+                image: Arc::clone(image),
             }),
-            Some(Entry::Pending) => Ok(BytesPoll::Pending { size: None }),
+            Some(Entry::Pending) => Ok(ImagePoll::Pending { size: None }),
             Some(Entry::Failed(error)) => Err(LoadError::Loading(error.clone())),
             None => {
                 entries.insert(uri.to_string(), Entry::Pending);
@@ -158,7 +192,7 @@ impl BytesLoader for CoverLoader {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .send(job);
-                Ok(BytesPoll::Pending { size: None })
+                Ok(ImagePoll::Pending { size: None })
             }
         }
     }
@@ -186,7 +220,7 @@ impl BytesLoader for CoverLoader {
             .unwrap_or_else(|p| p.into_inner())
             .values()
             .map(|entry| match entry {
-                Entry::Ready(bytes) => bytes.len(),
+                Entry::Ready(image) => image.pixels.len() * 4,
                 _ => 0,
             })
             .sum()

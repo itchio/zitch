@@ -705,21 +705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_extras"
-version = "0.36.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e651e08ddf6bb8bfd964ad70e33bc721c093f2b77ab59580e7140c008dab68c"
-dependencies = [
- "ahash",
- "egui",
- "enum-map",
- "image",
- "itertools",
- "log",
- "profiling",
-]
-
-[[package]]
 name = "egui_glow"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -746,26 +731,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dce03cf1604f74515830012c29991beb0b58f69e4e43f5afe22fa7afed65ccd5"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "enum-map"
-version = "2.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
-dependencies = [
- "enum-map-derive",
-]
-
-[[package]]
-name = "enum-map-derive"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -3482,7 +3447,6 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
- "egui_extras",
  "env_logger",
  "image",
  "log",
