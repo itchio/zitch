@@ -1,112 +1,47 @@
-//! Types shared between the backend and the interface.
+//! Types shared between the backend and the interface. Wire types come from
+//! the generated butlerd bindings; these are the app's own.
 
-use serde::Deserialize;
+pub use crate::butlerd::types::{Cave, Game, Profile, Upload, User};
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct User {
-    pub id: i64,
-    pub username: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub cover_url: Option<String>,
+pub trait UserExt {
+    /// The display name, or the username when none is set.
+    fn name(&self) -> &str;
 }
 
-impl User {
-    pub fn name(&self) -> &str {
-        self.display_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&self.username)
+impl UserExt for User {
+    fn name(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Profile {
-    pub id: i64,
-    pub user: User,
+pub trait UploadExt {
+    fn name(&self) -> &str;
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Game {
-    pub id: i64,
-    pub title: String,
-    #[serde(default)]
-    pub short_text: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub cover_url: Option<String>,
-    #[serde(default)]
-    pub still_cover_url: Option<String>,
-    #[serde(default)]
-    pub classification: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadKey {
-    pub id: i64,
-    pub game: Game,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Upload {
-    pub id: i64,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub filename: Option<String>,
-    #[serde(default)]
-    pub size: i64,
-}
-
-impl Upload {
-    pub fn name(&self) -> &str {
-        self.display_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .or(self.filename.as_deref())
-            .unwrap_or("upload")
+impl UploadExt for Upload {
+    fn name(&self) -> &str {
+        if !self.display_name.is_empty() {
+            &self.display_name
+        } else if !self.filename.is_empty() {
+            &self.filename
+        } else {
+            "upload"
+        }
     }
 }
 
-/// One installed copy of a game, in butlerd's terms.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Cave {
-    pub id: String,
-    pub game: Game,
-    #[serde(default)]
-    pub upload: Option<Upload>,
-    #[serde(default)]
-    pub stats: Option<CaveStats>,
-    #[serde(default)]
-    pub install_info: Option<CaveInstallInfo>,
+pub trait CaveExt {
+    fn game_id(&self) -> Option<i64>;
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CaveStats {
-    #[serde(default)]
-    pub installed_at: Option<String>,
-    #[serde(default)]
-    pub last_touched_at: Option<String>,
-    #[serde(default)]
-    pub seconds_run: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CaveInstallInfo {
-    #[serde(default)]
-    pub installed_size: i64,
-    #[serde(default)]
-    pub install_folder: String,
+impl CaveExt for Cave {
+    fn game_id(&self) -> Option<i64> {
+        self.game.as_ref().map(|game| game.id)
+    }
 }
 
 /// What the window is showing.

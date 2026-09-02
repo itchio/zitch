@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::backend::{Backend, Event};
 use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
-use crate::model::{Action, Cave, Direction, Game, Loadable, Page, Profile};
+use crate::model::{Action, Cave, CaveExt, Direction, Game, Loadable, Page, Profile, UserExt};
 use crate::ui;
 
 pub struct App {
@@ -128,7 +128,7 @@ impl App {
     fn caves_for(&self, game_id: i64) -> Vec<&Cave> {
         self.caves
             .iter()
-            .filter(|cave| cave.game.id == game_id)
+            .filter(|cave| cave.game_id() == Some(game_id))
             .collect()
     }
 
@@ -293,7 +293,7 @@ impl App {
                 Event::SignedIn(profile) => self.profile = Some(profile),
                 Event::OwnedGames(games) => self.games = Loadable::Loaded(games),
                 Event::Caves(caves) => {
-                    self.installed = caves.iter().map(|cave| cave.game.id).collect();
+                    self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
                 }
                 Event::Error(message) => {
@@ -325,9 +325,9 @@ impl eframe::App for App {
                     } else {
                         ui::heading(ui, "‹ Library");
                     }
-                    if let Some(profile) = &self.profile {
+                    if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
                         ui.add_space(12.0);
-                        ui::subtle(ui, profile.user.name());
+                        ui::subtle(ui, user.name());
                     }
                     if let Loadable::Loaded(games) = &self.games {
                         ui.add_space(12.0);
@@ -360,7 +360,7 @@ impl eframe::App for App {
                                 let caves: Vec<&Cave> = self
                                     .caves
                                     .iter()
-                                    .filter(|cave| cave.game.id == game.id)
+                                    .filter(|cave| cave.game_id() == Some(game.id))
                                     .collect();
                                 ui::game_detail(ui, game, &caves, button, &mut self.actions);
                             }

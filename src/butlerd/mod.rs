@@ -2,7 +2,11 @@
 //! JSON-RPC 2.0 to it over TCP.
 //!
 //! See https://itch.io/docs/butler/launcher-integration.html and the full
-//! protocol reference at https://itchio.github.io/butler/butlerd/.
+//! protocol reference at https://itchio.github.io/butler/butlerd/. The
+//! message types in [`types`] are generated from butler's sources by
+//! `make sync-butler`.
+
+pub mod types;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -18,6 +22,21 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// A message the client sends and the daemon answers.
+pub trait Request: Serialize {
+    const METHOD: &'static str;
+    type Result: DeserializeOwned;
+}
+
+/// A message the daemon sends on its own, with no reply expected.
+pub trait Notification: DeserializeOwned {
+    const METHOD: &'static str;
+}
+
+/// A [`Request`] the daemon makes of the client in the middle of one of the
+/// client's own calls; the client answers with the request's `Result`.
+pub trait ServerRequest: Request {}
 
 /// A running `butler daemon` process. Killed when dropped; `--destiny-pid`
 /// also reaps it if this process dies first.
@@ -196,16 +215,27 @@ impl Client {
             next_id: AtomicU64::new(1),
             incoming: Mutex::new(incoming_rx),
         };
-        let ok: Value = client.call("Meta.Authenticate", json!({ "secret": daemon.secret }))?;
-        if ok.get("ok") != Some(&Value::Bool(true)) {
-            bail!("butlerd refused the secret: {ok}");
+        let ok = client.call(types::MetaAuthenticateParams {
+            secret: daemon.secret.clone(),
+        })?;
+        if !ok.ok {
+            bail!("butlerd refused the secret");
         }
         Ok(client)
     }
 
     /// Sends a request and blocks until its reply arrives. Notifications and
     /// server requests that arrive meanwhile queue up for [`Self::poll`].
-    pub fn call<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
+    pub fn call<R: Request>(&self, params: R) -> Result<R::Result> {
+        self.call_raw(R::METHOD, params)
+    }
+
+    /// [`Self::call`] for a method these bindings do not know.
+    pub fn call_raw<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.pending
@@ -323,4 +353,48 @@ fn read_loop(stream: TcpStream, pending: Pending, incoming: mpsc::Sender<Incomin
     }
     // Wake every caller still waiting so they fail instead of hanging.
     pending.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::types::{FetchCavesResult, ProfileListResult, SearchGamesResult};
+
+    #[test]
+    fn null_collections_decode_as_empty() {
+        let result: FetchCavesResult = serde_json::from_str(r#"{"items":null}"#).unwrap();
+        assert!(result.items.is_empty());
+        let result: ProfileListResult = serde_json::from_str(r#"{"profiles":null}"#).unwrap();
+        assert!(result.profiles.is_empty());
+        // Search.Games answers an empty query with a nil slice.
+        let result: SearchGamesResult = serde_json::from_str(r#"{"games":null}"#).unwrap();
+        assert!(result.games.is_empty());
+    }
+
+    #[test]
+    fn missing_fields_decode_as_default() {
+        let result: FetchCavesResult = serde_json::from_str("{}").unwrap();
+        assert!(result.items.is_empty());
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[test]
+    fn catch_all_variant_has_no_wire_form() {
+        use super::types::{GameClassification, LaunchStrategy};
+        assert!(serde_json::to_string(&GameClassification::Unknown).is_err());
+        // A Go zero value is the default where the enum declares one.
+        assert_eq!(LaunchStrategy::default(), LaunchStrategy::Unknown);
+        assert_eq!(
+            serde_json::to_string(&LaunchStrategy::Unknown).unwrap(),
+            r#""""#
+        );
+        assert!(serde_json::to_string(&LaunchStrategy::Other).is_err());
+    }
+
+    #[test]
+    fn unknown_enum_values_decode() {
+        use super::types::{Game, GameClassification};
+        let game: Game =
+            serde_json::from_str(r#"{"id":1,"title":"x","classification":"hologram"}"#).unwrap();
+        assert_eq!(game.classification, GameClassification::Unknown);
+    }
 }

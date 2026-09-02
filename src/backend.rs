@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-use serde_json::json;
 
+use crate::butlerd::types::{
+    AnyNotification, AnyServerRequest, FetchCavesParams, FetchProfileOwnedKeysParams,
+    ProfileListParams, ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams,
+};
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, DownloadKey, Game, Profile};
+use crate::model::{Cave, Game, Profile, UserExt};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -111,44 +113,6 @@ impl Emitter {
     }
 }
 
-#[derive(Deserialize)]
-struct ProfileList {
-    profiles: Vec<ProfileEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileEntry {
-    id: i64,
-    #[serde(default)]
-    last_connected: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ProfileResult {
-    profile: Profile,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CavesPage {
-    #[serde(default)]
-    items: Vec<Cave>,
-    #[serde(default)]
-    next_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OwnedKeysPage {
-    #[serde(default)]
-    items: Vec<DownloadKey>,
-    #[serde(default)]
-    next_cursor: Option<String>,
-    #[serde(default)]
-    stale: bool,
-}
-
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
     let daemon = Daemon::spawn(&config.butler, &config.dbpath)?;
@@ -156,7 +120,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     emit.status(format!("Connected to butlerd at {}", daemon.address));
 
     let profile = sign_in(&client, &config, emit)?;
-    emit.status(format!("Signed in as {}", profile.user.name()));
+    let name = profile.user.as_ref().map_or("?", UserExt::name);
+    emit.status(format!("Signed in as {name}"));
     emit.send(Event::SignedIn(profile.clone()));
 
     emit.status("Loading library");
@@ -175,10 +140,16 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         for incoming in client.poll_timeout(Duration::from_millis(100)) {
             match incoming {
                 Incoming::Notification { method, params } => {
-                    log::debug!("notification {method}: {params}");
+                    match AnyNotification::decode(&method, params) {
+                        Ok(notification) => log::debug!("{notification:?}"),
+                        Err(error) => log::warn!("bad {method} notification: {error}"),
+                    }
                 }
-                Incoming::Request { id, method, .. } => {
-                    log::warn!("unhandled server request {method}");
+                Incoming::Request { id, method, params } => {
+                    match AnyServerRequest::decode(&method, params) {
+                        Ok(request) => log::warn!("unhandled server request {request:?}"),
+                        Err(error) => log::warn!("bad {method} request: {error}"),
+                    }
                     let _ = client.reply_error(&id, -32601, "not supported by this client");
                 }
             }
@@ -188,14 +159,16 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
 }
 
 fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> {
-    let list: ProfileList = client.call("Profile.List", json!({}))?;
-    let mut saved = list.profiles;
+    let mut saved = client.call(ProfileListParams {})?.profiles;
     saved.sort_by(|a, b| b.last_connected.cmp(&a.last_connected));
     if let Some(entry) = saved.first() {
         emit.status("Using saved login");
-        let result: ProfileResult =
-            client.call("Profile.UseSavedLogin", json!({ "profileId": entry.id }))?;
-        return Ok(result.profile);
+        let result = client.call(ProfileUseSavedLoginParams {
+            profile_id: entry.id,
+        })?;
+        return result
+            .profile
+            .ok_or_else(|| anyhow::anyhow!("saved login returned no profile"));
     }
     let Some(api_key) = &config.api_key else {
         bail!(
@@ -204,31 +177,33 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         );
     };
     emit.status("Signing in with API key");
-    let result: ProfileResult = client
-        .call("Profile.LoginWithAPIKey", json!({ "apiKey": api_key }))
+    let result = client
+        .call(ProfileLoginWithAPIKeyParams {
+            api_key: api_key.clone(),
+        })
         .context("API key login")?;
-    Ok(result.profile)
+    result
+        .profile
+        .ok_or_else(|| anyhow::anyhow!("login returned no profile"))
 }
 
 fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game>> {
     let mut games = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut cursor = None;
     loop {
-        let page: OwnedKeysPage = client.call(
-            "Fetch.ProfileOwnedKeys",
-            json!({
-                "profileId": profile_id,
-                "limit": 100,
-                "cursor": cursor,
-                "fresh": fresh,
-            }),
-        )?;
+        let page = client.call(FetchProfileOwnedKeysParams {
+            profile_id,
+            limit: Some(100),
+            cursor: cursor.take(),
+            fresh: Some(fresh),
+            ..Default::default()
+        })?;
         // The cache is empty on first run and answers stale with no items;
         // a fresh fetch fills it.
-        if page.stale && !fresh && games.is_empty() && page.items.is_empty() {
+        if page.stale == Some(true) && !fresh && games.is_empty() && page.items.is_empty() {
             return owned_games(client, profile_id, true);
         }
-        games.extend(page.items.into_iter().map(|key| key.game));
+        games.extend(page.items.into_iter().filter_map(|key| key.game));
         match page.next_cursor {
             Some(next) if !next.is_empty() => cursor = Some(next),
             _ => break,
@@ -239,10 +214,13 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game
 
 fn all_caves(client: &Client) -> Result<Vec<Cave>> {
     let mut caves = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut cursor = None;
     loop {
-        let page: CavesPage =
-            client.call("Fetch.Caves", json!({ "limit": 100, "cursor": cursor }))?;
+        let page = client.call(FetchCavesParams {
+            limit: Some(100),
+            cursor: cursor.take(),
+            ..Default::default()
+        })?;
         caves.extend(page.items);
         match page.next_cursor {
             Some(next) if !next.is_empty() => cursor = Some(next),
