@@ -15,7 +15,13 @@ struct Cli {
     #[arg(long, env = "ZITCH_BUTLER", default_value = "butler")]
     butler: PathBuf,
 
-    /// Where butler keeps its database. Separate from the itch app's.
+    /// Which config directory to use: `~/.config/<name>`, laid out like the
+    /// itch app's. `itch` or `kitch` reuses that app's butler database and
+    /// saved login. Do not run both against one database at the same time.
+    #[arg(long, env = "ZITCH_APP_NAME", default_value = "zitch")]
+    app_name: String,
+
+    /// Butler database path. Overrides the one derived from --app-name.
     #[arg(long)]
     dbpath: Option<PathBuf>,
 
@@ -45,10 +51,14 @@ fn main() -> eframe::Result<()> {
     )
     .init();
 
-    let dirs = directories::ProjectDirs::from("", "", "zitch").expect("a home directory");
+    let config_dir = directories::BaseDirs::new()
+        .expect("a home directory")
+        .config_dir()
+        .join(&cli.app_name);
     let dbpath = cli
         .dbpath
-        .unwrap_or_else(|| dirs.data_dir().join("butler.db"));
+        .unwrap_or_else(|| config_dir.join("db").join("butler.db"));
+    log::info!("using {}", dbpath.display());
     let api_key = std::env::var("ZITCH_API_KEY").ok().or_else(|| {
         let path = cli.api_key_file.as_ref()?;
         match std::fs::read_to_string(path) {

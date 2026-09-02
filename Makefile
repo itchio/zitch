@@ -2,6 +2,9 @@
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
+# Config dir under ~/.config to use. kitch borrows that app's saved login
+# for development; close kitch first. APP=zitch for a clean database.
+APP ?= kitch
 SHOT ?= /tmp/zitch.png
 
 help:
@@ -12,22 +15,22 @@ help:
 	@echo "make check        format, lint, and type-check without running"
 	@echo "make clean        remove build output"
 	@echo
-	@echo "Pass flags to the app with ARGS, e.g."
+	@echo "APP picks the config dir under ~/.config (default $(APP)):"
+	@echo "  make run APP=zitch     use a separate database instead of kitch's"
+	@echo "Pass other flags with ARGS, e.g."
 	@echo "  make run ARGS=\"--api-key-file ~/.itch-key\""
-	@echo "The first sign-in needs an API key from https://itch.io/user/settings/api-keys;"
-	@echo "after that the saved profile is reused."
 
 build:
 	cargo build
 
 run: build
-	./target/debug/zitch $(ARGS)
+	./target/debug/zitch --app-name $(APP) $(ARGS)
 
 run-verbose: build
-	./target/debug/zitch --verbose $(ARGS)
+	./target/debug/zitch --app-name $(APP) --verbose $(ARGS)
 
 shot: build
-	./target/debug/zitch --screenshot $(SHOT) $(ARGS)
+	./target/debug/zitch --app-name $(APP) --screenshot $(SHOT) $(ARGS)
 
 check:
 	cargo fmt
