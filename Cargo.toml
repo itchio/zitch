@@ -1,0 +1,22 @@
+[package]
+name = "zitch"
+version = "0.1.0"
+edition = "2024"
+description = "A controller-friendly big picture itch.io client"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+directories = "6"
+clap = { version = "4.5", features = ["derive", "env"] }
+# glow keeps the binary small; a 2D launcher does not need wgpu.
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.36"
+# Only for writing --screenshot captures.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.dev.package."*"]
+opt-level = 2
