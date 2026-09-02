@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::backend::{Backend, Event};
 use crate::gamepad::Gamepad;
 use crate::images::CoverLoader;
-use crate::model::{Action, Direction, Game, Loadable, Profile};
+use crate::model::{Action, Cave, Direction, Game, Loadable, Page, Profile};
 use crate::ui;
 
 pub struct App {
@@ -16,6 +16,9 @@ pub struct App {
     status: String,
     profile: Option<Profile>,
     games: Loadable<Vec<Game>>,
+    caves: Vec<Cave>,
+    installed: std::collections::HashSet<i64>,
+    page: Page,
     error: Option<String>,
     /// Something the user just did, shown in the header.
     notice: Option<String>,
@@ -87,6 +90,9 @@ impl App {
             status: String::new(),
             profile: None,
             games: Loadable::Loading,
+            caves: Vec::new(),
+            installed: Default::default(),
+            page: Page::Library,
             error: None,
             notice: None,
             actions: Vec::new(),
@@ -119,40 +125,115 @@ impl App {
         }
     }
 
+    fn caves_for(&self, game_id: i64) -> Vec<&Cave> {
+        self.caves
+            .iter()
+            .filter(|cave| cave.game.id == game_id)
+            .collect()
+    }
+
+    fn game_at(&self, index: usize) -> Option<&Game> {
+        self.games.get().and_then(|games| games.get(index))
+    }
+
     fn apply(&mut self, action: Action) {
         let count = self.games.get().map_or(0, Vec::len);
         match action {
-            Action::MoveFocus(direction) => {
-                if count == 0 {
-                    return;
+            Action::MoveFocus(direction) => match self.page.clone() {
+                Page::Library => self.move_grid_focus(direction, count),
+                Page::Game { index, button } => {
+                    let Some(game) = self.game_at(index) else {
+                        return;
+                    };
+                    let mut buttons = ui::game_buttons(&self.caves_for(game.id)).len();
+                    if buttons == 0 {
+                        buttons = 1;
+                    }
+                    let button = match direction {
+                        Direction::Left => button.saturating_sub(1),
+                        Direction::Right => (button + 1).min(buttons - 1),
+                        _ => button,
+                    };
+                    self.page = Page::Game { index, button };
                 }
-                let columns = self.grid.columns.max(1);
-                let focus = self.grid.focus;
-                let next = match direction {
-                    Direction::Left => focus.saturating_sub(1),
-                    Direction::Right => (focus + 1).min(count - 1),
-                    Direction::Up => focus.checked_sub(columns).unwrap_or(focus),
-                    // Stop at the last row, on the last tile if the row is short.
-                    Direction::Down if focus + columns < count => focus + columns,
-                    Direction::Down if focus / columns < (count - 1) / columns => count - 1,
-                    Direction::Down => focus,
-                };
-                self.grid.focus = next;
-                self.grid.follow = true;
-            }
+            },
             Action::FocusIndex(index) => {
                 if index < count {
                     self.grid.focus = index;
                 }
             }
-            Action::Activate => {
-                if let Some(game) = self.games.get().and_then(|g| g.get(self.grid.focus)) {
-                    log::info!("activate {} ({})", game.title, game.id);
-                    self.notice = Some(format!("Selected {}", game.title));
+            Action::FocusButton(button) => {
+                if let Page::Game { index, .. } = self.page {
+                    self.page = Page::Game { index, button };
                 }
             }
-            Action::Back => self.notice = None,
+            Action::Activate => match self.page.clone() {
+                Page::Library => {
+                    if self.grid.focus < count {
+                        self.actions.push(Action::Open(Page::Game {
+                            index: self.grid.focus,
+                            button: 0,
+                        }));
+                    }
+                }
+                Page::Game { index, button } => {
+                    let Some(game) = self.game_at(index) else {
+                        return;
+                    };
+                    let mut buttons = ui::game_buttons(&self.caves_for(game.id));
+                    if buttons.is_empty() {
+                        buttons.push(("Install", Action::Install { game_id: game.id }));
+                    }
+                    if let Some((_, action)) = buttons.get(button) {
+                        self.actions.push(action.clone());
+                    }
+                }
+            },
+            Action::Back => match self.page {
+                Page::Library => self.notice = None,
+                Page::Game { index, .. } => {
+                    self.grid.focus = index;
+                    self.grid.follow = true;
+                    self.page = Page::Library;
+                }
+            },
+            Action::Open(page) => {
+                self.notice = None;
+                self.page = page;
+            }
+            // Placeholders until the install and launch flows exist.
+            Action::Play { cave_id } => {
+                log::info!("play cave {cave_id}");
+                self.notice = Some("Launching is not wired up yet".into());
+            }
+            Action::Install { game_id } => {
+                log::info!("install game {game_id}");
+                self.notice = Some("Installing is not wired up yet".into());
+            }
+            Action::Uninstall { cave_id } => {
+                log::info!("uninstall cave {cave_id}");
+                self.notice = Some("Uninstalling is not wired up yet".into());
+            }
         }
+    }
+
+    fn move_grid_focus(&mut self, direction: Direction, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let columns = self.grid.columns.max(1);
+        let focus = self.grid.focus;
+        let next = match direction {
+            Direction::Left => focus.saturating_sub(1),
+            Direction::Right => (focus + 1).min(count - 1),
+            Direction::Up => focus.checked_sub(columns).unwrap_or(focus),
+            // Stop at the last row, on the last tile if the row is short.
+            Direction::Down if focus + columns < count => focus + columns,
+            Direction::Down if focus / columns < (count - 1) / columns => count - 1,
+            Direction::Down => focus,
+        };
+        self.grid.focus = next;
+        self.grid.follow = true;
     }
 
     fn drive_shot(&mut self, ctx: &egui::Context) {
@@ -211,6 +292,10 @@ impl App {
                 Event::Status(text) => self.status = text,
                 Event::SignedIn(profile) => self.profile = Some(profile),
                 Event::OwnedGames(games) => self.games = Loadable::Loaded(games),
+                Event::Caves(caves) => {
+                    self.installed = caves.iter().map(|cave| cave.game.id).collect();
+                    self.caves = caves;
+                }
                 Event::Error(message) => {
                     if self.games.get().is_none() {
                         self.games = Loadable::Failed(message.clone());
@@ -235,7 +320,11 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(ui::BG).inner_margin(24.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui::heading(ui, "Library");
+                    if self.page.is_library() {
+                        ui::heading(ui, "Library");
+                    } else {
+                        ui::heading(ui, "‹ Library");
+                    }
                     if let Some(profile) = &self.profile {
                         ui.add_space(12.0);
                         ui::subtle(ui, profile.user.name());
@@ -254,11 +343,29 @@ impl eframe::App for App {
                     ui::error(ui, error);
                 }
                 ui.add_space(16.0);
-                match &self.games {
-                    Loadable::NotLoaded | Loadable::Loading => ui::centered_spinner(ui),
-                    Loadable::Failed(_) => {}
-                    Loadable::Loaded(games) => {
-                        ui::library(ui, games, &mut self.grid, &self.covers, &mut self.actions)
+                match (&self.games, self.page.clone()) {
+                    (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui),
+                    (Loadable::Failed(_), _) => {}
+                    (Loadable::Loaded(games), Page::Library) => ui::library(
+                        ui,
+                        games,
+                        &self.installed,
+                        &mut self.grid,
+                        &self.covers,
+                        &mut self.actions,
+                    ),
+                    (Loadable::Loaded(games), Page::Game { index, button }) => {
+                        match games.get(index) {
+                            Some(game) => {
+                                let caves: Vec<&Cave> = self
+                                    .caves
+                                    .iter()
+                                    .filter(|cave| cave.game.id == game.id)
+                                    .collect();
+                                ui::game_detail(ui, game, &caves, button, &mut self.actions);
+                            }
+                            None => self.actions.push(Action::Back),
+                        }
                     }
                 }
             });

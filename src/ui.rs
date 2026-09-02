@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
 use crate::images::{Animation, CoverLoader};
-use crate::model::{Action, Game};
+use crate::model::{Action, Cave, Game, Page};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
 const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
@@ -14,6 +14,7 @@ const TILE_HOVER: Color32 = Color32::from_rgb(0x34, 0x30, 0x42);
 const TEXT: Color32 = Color32::from_gray(0xee);
 const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0x99);
+const GREEN: Color32 = Color32::from_rgb(0x4c, 0xc9, 0x6b);
 
 /// itch.io covers are 315x250; tiles keep that shape.
 const COVER_ASPECT: f32 = 315.0 / 250.0;
@@ -59,6 +60,7 @@ impl Game {
 pub fn library(
     ui: &mut Ui,
     games: &[Game],
+    installed: &std::collections::HashSet<i64>,
     grid: &mut Grid,
     covers: &CoverLoader,
     actions: &mut Vec<Action>,
@@ -136,7 +138,12 @@ pub fn library(
                     if ui.is_rect_visible(rect) {
                         let focused = index == grid.focus;
                         let animation = if focused { playing.as_mut() } else { None };
-                        tile(ui, rect, cover_height, game, focused, animation);
+                        let tile = Tile {
+                            game,
+                            focused,
+                            installed: installed.contains(&game.id),
+                        };
+                        draw_tile(ui, rect, cover_height, tile, animation);
                     }
                 }
             });
@@ -147,14 +154,18 @@ pub fn library(
     grid.playing = playing;
 }
 
-fn tile(
-    ui: &Ui,
-    rect: Rect,
-    cover_height: f32,
-    game: &Game,
+struct Tile<'a> {
+    game: &'a Game,
     focused: bool,
-    playing: Option<&mut Playing>,
-) {
+    installed: bool,
+}
+
+fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option<&mut Playing>) {
+    let Tile {
+        game,
+        focused,
+        installed,
+    } = tile;
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
     let painted = match playing {
@@ -184,6 +195,13 @@ fn tile(
         );
         let pos = cover.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, DIM);
+    }
+    if installed {
+        badge(
+            ui,
+            pos2(cover.left() + 8.0, cover.bottom() - 8.0),
+            "INSTALLED",
+        );
     }
     if focused {
         ui.painter().rect_stroke(
@@ -290,4 +308,175 @@ pub fn centered_spinner(ui: &mut Ui) {
         egui::UiBuilder::new().max_rect(Rect::from_center_size(center, vec2(40.0, 40.0))),
     );
     child.add(egui::Spinner::new().size(32.0).color(DIM));
+}
+
+/// A small label anchored by its bottom-left corner.
+fn badge(ui: &Ui, bottom_left: egui::Pos2, text: &str) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), FontId::proportional(9.5), BG);
+    let size = galley.size() + vec2(12.0, 6.0);
+    let rect = Rect::from_min_size(bottom_left - vec2(0.0, size.y), size);
+    ui.painter().rect_filled(rect, CornerRadius::same(3), GREEN);
+    ui.painter().galley(rect.min + vec2(6.0, 3.0), galley, BG);
+}
+
+/// What the detail page offers for a game, in button order.
+pub fn game_buttons(caves: &[&Cave]) -> Vec<(&'static str, Action)> {
+    match caves.first() {
+        Some(cave) => vec![
+            (
+                "Play",
+                Action::Play {
+                    cave_id: cave.id.clone(),
+                },
+            ),
+            (
+                "Uninstall",
+                Action::Uninstall {
+                    cave_id: cave.id.clone(),
+                },
+            ),
+        ],
+        None => Vec::new(),
+    }
+}
+
+pub fn game_detail(
+    ui: &mut Ui,
+    game: &Game,
+    caves: &[&Cave],
+    focused_button: usize,
+    actions: &mut Vec<Action>,
+) {
+    let mut buttons = game_buttons(caves);
+    if caves.is_empty() {
+        buttons.push(("Install", Action::Install { game_id: game.id }));
+    }
+    let width = ui.available_width();
+    let cover_width = (width * 0.42).min(420.0);
+    let cover_height = cover_width / COVER_ASPECT;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 28.0;
+        let (cover, _) = ui.allocate_exact_size(vec2(cover_width, cover_height), Sense::hover());
+        let radius = CornerRadius::same(8);
+        let url = game
+            .still_cover_url
+            .as_deref()
+            .or(game.cover_url.as_deref());
+        if !url.is_some_and(|url| paint_cover(ui, url, cover, radius)) {
+            ui.painter().rect_filled(cover, radius, TILE_BG);
+        }
+        ui.vertical(|ui| {
+            ui.set_max_width(width - cover_width - 28.0);
+            ui.label(
+                egui::RichText::new(&game.title)
+                    .font(FontId::proportional(26.0))
+                    .color(TEXT),
+            );
+            if let Some(text) = game.short_text.as_deref().filter(|t| !t.is_empty()) {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(text)
+                        .font(FontId::proportional(14.0))
+                        .color(DIM),
+                );
+            }
+            ui.add_space(12.0);
+            match caves.first() {
+                Some(cave) => {
+                    let mut line = String::from("Installed");
+                    if let Some(info) = &cave.install_info {
+                        line.push_str(&format!(", {}", human_size(info.installed_size)));
+                    }
+                    if let Some(upload) = &cave.upload {
+                        line.push_str(&format!(", {}", upload.name()));
+                    }
+                    ui.label(
+                        egui::RichText::new(line)
+                            .font(FontId::proportional(13.0))
+                            .color(GREEN),
+                    );
+                    if let Some(stats) = &cave.stats
+                        && stats.seconds_run > 0
+                    {
+                        subtle(ui, &format!("Played {}", human_duration(stats.seconds_run)));
+                    }
+                }
+                None => subtle(ui, "Not installed"),
+            }
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                for (index, (label, action)) in buttons.iter().enumerate() {
+                    let response = pill(ui, label, index == focused_button, index == 0);
+                    if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                        actions.push(Action::FocusButton(index));
+                    }
+                    if response.clicked() {
+                        actions.push(action.clone());
+                    }
+                }
+            });
+            ui.add_space(16.0);
+            subtle(ui, "Esc or B to go back");
+        });
+    });
+}
+
+fn pill(ui: &mut Ui, label: &str, focused: bool, primary: bool) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(16.0), TEXT);
+    let size = galley.size() + vec2(40.0, 18.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = match (primary, focused) {
+        (true, _) => ACCENT,
+        (false, true) => TILE_HOVER,
+        (false, false) => TILE_BG,
+    };
+    let radius = CornerRadius::same(6);
+    ui.painter().rect_filled(rect, radius, fill);
+    if focused {
+        ui.painter().rect_stroke(
+            rect.expand(3.0),
+            CornerRadius::same(9),
+            Stroke::new(2.5, TEXT),
+            egui::StrokeKind::Outside,
+        );
+    }
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, TEXT);
+    response
+}
+
+pub fn human_size(bytes: i64) -> String {
+    let bytes = bytes.max(0) as f64;
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{value:.0} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+pub fn human_duration(seconds: i64) -> String {
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{}h {:02}m", minutes / 60, minutes % 60)
+    }
+}
+
+impl Page {
+    pub fn is_library(&self) -> bool {
+        matches!(self, Page::Library)
+    }
 }

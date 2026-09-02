@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{DownloadKey, Game, Profile};
+use crate::model::{Cave, DownloadKey, Game, Profile};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -29,6 +29,8 @@ pub enum Event {
     Status(String),
     SignedIn(Profile),
     OwnedGames(Vec<Game>),
+    /// Every installed game known to this database.
+    Caves(Vec<Cave>),
     Error(String),
 }
 
@@ -129,6 +131,15 @@ struct ProfileResult {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CavesPage {
+    #[serde(default)]
+    items: Vec<Cave>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OwnedKeysPage {
     #[serde(default)]
     items: Vec<DownloadKey>,
@@ -152,6 +163,9 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let games = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
+    let caves = all_caves(&client)?;
+    log::info!("{} installed games", caves.len());
+    emit.send(Event::Caves(caves));
 
     loop {
         match commands.try_recv() {
@@ -221,4 +235,19 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game
         }
     }
     Ok(games)
+}
+
+fn all_caves(client: &Client) -> Result<Vec<Cave>> {
+    let mut caves = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page: CavesPage =
+            client.call("Fetch.Caves", json!({ "limit": 100, "cursor": cursor }))?;
+        caves.extend(page.items);
+        match page.next_cursor {
+            Some(next) if !next.is_empty() => cursor = Some(next),
+            _ => break,
+        }
+    }
+    Ok(caves)
 }

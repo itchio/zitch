@@ -53,6 +53,73 @@ pub struct DownloadKey {
     pub game: Game,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Upload {
+    pub id: i64,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub size: i64,
+}
+
+impl Upload {
+    pub fn name(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .or(self.filename.as_deref())
+            .unwrap_or("upload")
+    }
+}
+
+/// One installed copy of a game, in butlerd's terms.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cave {
+    pub id: String,
+    pub game: Game,
+    #[serde(default)]
+    pub upload: Option<Upload>,
+    #[serde(default)]
+    pub stats: Option<CaveStats>,
+    #[serde(default)]
+    pub install_info: Option<CaveInstallInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaveStats {
+    #[serde(default)]
+    pub installed_at: Option<String>,
+    #[serde(default)]
+    pub last_touched_at: Option<String>,
+    #[serde(default)]
+    pub seconds_run: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaveInstallInfo {
+    #[serde(default)]
+    pub installed_size: i64,
+    #[serde(default)]
+    pub install_folder: String,
+}
+
+/// What the window is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Page {
+    Library,
+    /// One game from the library, with one of its buttons focused.
+    Game {
+        index: usize,
+        button: usize,
+    },
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Loadable<T> {
     #[default]
@@ -86,6 +153,18 @@ pub enum Action {
     MoveFocus(Direction),
     /// Focus a tile without scrolling to it; the pointer is already there.
     FocusIndex(usize),
+    /// Focus a detail-page button; the pointer is already there.
+    FocusButton(usize),
     Activate,
     Back,
+    Open(Page),
+    Play {
+        cave_id: String,
+    },
+    Install {
+        game_id: i64,
+    },
+    Uninstall {
+        cave_id: String,
+    },
 }
