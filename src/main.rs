@@ -50,9 +50,33 @@ struct Cli {
     #[arg(long, value_name = "STEPS", requires = "screenshot")]
     screenshot_script: Option<String>,
 
+    /// Window size in points, e.g. `640x480` to preview a handheld screen.
+    /// On a HiDPI display the window covers more pixels than this.
+    #[arg(long, value_name = "WxH", value_parser = parse_size, default_value = "1280x720")]
+    window: (f32, f32),
+
+    /// Interface scale. 1.6 reads from across the room; 1.0 suits a small
+    /// screen held in the hands. Ignored with --emulate.
+    #[arg(long, default_value_t = 1.6)]
+    zoom: f32,
+
+    /// Lay the interface out for a display of this many pixels, e.g.
+    /// `640x480`, and scale it to fit the window with black bars. Resizing
+    /// the window changes the magnification, not the layout.
+    #[arg(long, value_name = "WxH", value_parser = parse_size)]
+    emulate: Option<(f32, f32)>,
+
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
+}
+
+fn parse_size(text: &str) -> Result<(f32, f32), String> {
+    let (w, h) = text
+        .split_once('x')
+        .ok_or_else(|| format!("expected WIDTHxHEIGHT, got {text:?}"))?;
+    let parse = |s: &str| s.trim().parse::<f32>().map_err(|e| format!("{s:?}: {e}"));
+    Ok((parse(w)?, parse(h)?))
 }
 
 fn main() -> eframe::Result<()> {
@@ -118,7 +142,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("zitch")
-            .with_inner_size([1280.0, 720.0]),
+            .with_inner_size([cli.window.0, cli.window.1]),
         ..Default::default()
     };
     eframe::run_native(
@@ -126,7 +150,14 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             waker.attach(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(backend, covers, &cc.egui_ctx, shot)))
+            Ok(Box::new(app::App::new(
+                backend,
+                covers,
+                &cc.egui_ctx,
+                cli.zoom,
+                cli.emulate,
+                shot,
+            )))
         }),
     )
 }

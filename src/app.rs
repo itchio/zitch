@@ -56,6 +56,8 @@ pub struct App {
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
     shot: Option<Shot>,
+    /// Pretend the display is this many points, whatever the window size.
+    emulate: Option<(f32, f32)>,
 }
 
 /// A debugging capture: write the window to a PNG once the library has
@@ -142,14 +144,15 @@ impl App {
         backend: Backend,
         covers: CoverLoader,
         ctx: &egui::Context,
+        zoom: f32,
+        emulate: Option<(f32, f32)>,
         shot: Option<Shot>,
     ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = ui::BG;
         ctx.set_visuals(visuals);
         covers.install(ctx);
-        // Big picture: read from across the room.
-        ctx.set_zoom_factor(1.6);
+        ctx.set_zoom_factor(zoom);
         Self {
             backend,
             covers,
@@ -180,6 +183,7 @@ impl App {
             actions: Vec::new(),
             rows: ui::Rows::default(),
             shot,
+            emulate,
         }
     }
 
@@ -877,6 +881,17 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some((width, height)) = self.emulate {
+            // Pick the density that fits the emulated display in the window,
+            // so the layout always sees that many points and resizing only
+            // changes how many pixels each point gets.
+            let ppp = ctx.pixels_per_point();
+            let physical = ctx.content_rect().size() * ppp;
+            let scale = (physical.x / width).min(physical.y / height);
+            if scale.is_finite() && scale > 0.0 && (scale - ppp).abs() > 1e-3 {
+                ctx.set_pixels_per_point(scale);
+            }
+        }
         self.handle_events();
         let (keys, touches) = ctx.input(|i| {
             (
@@ -899,6 +914,26 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let Some((width, height)) = self.emulate else {
+            self.draw(ui);
+            return;
+        };
+        // Letterbox: the emulated display sits centered in the window.
+        let window = ui.max_rect();
+        let screen = egui::Rect::from_center_size(window.center(), egui::vec2(width, height));
+        ui.painter().rect_filled(window, 0.0, egui::Color32::BLACK);
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+        inner.set_clip_rect(screen);
+        self.draw(&mut inner);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.backend.shutdown();
+    }
+}
+
+impl App {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
             ui::footer(ui, &self.glyphs, self.input_mode, &hints);
@@ -1023,16 +1058,12 @@ impl eframe::App for App {
                 }
             });
         if let Some(prompt) = &self.prompt {
-            ui::prompt(ui.ctx(), prompt, &mut self.actions);
+            ui::prompt(ui.ctx(), ui.max_rect(), prompt, &mut self.actions);
         }
         self.apply_actions();
         if !self.installs.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.backend.shutdown();
     }
 }
 

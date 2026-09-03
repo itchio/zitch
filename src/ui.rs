@@ -917,8 +917,9 @@ impl Page {
 
 /// A modal question over the whole window. Keyboard and controller focus
 /// go to it while it is up; the mouse can also pick a button.
-pub fn prompt(ctx: &egui::Context, prompt: &Prompt, actions: &mut Vec<Action>) {
-    let screen = ctx.content_rect();
+/// Draws the modal over `screen`, which is the whole window unless a
+/// smaller display is being emulated.
+pub fn prompt(ctx: &egui::Context, screen: Rect, prompt: &Prompt, actions: &mut Vec<Action>) {
     egui::Area::new(egui::Id::new("prompt-dim"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
@@ -931,7 +932,10 @@ pub fn prompt(ctx: &egui::Context, prompt: &Prompt, actions: &mut Vec<Action>) {
     let width = (screen.width() * 0.6).clamp(320.0, 560.0);
     egui::Area::new(egui::Id::new("prompt"))
         .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .anchor(
+            egui::Align2::CENTER_CENTER,
+            screen.center() - ctx.content_rect().center(),
+        )
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(TILE_BG)
