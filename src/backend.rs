@@ -202,11 +202,17 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     emit.send(Event::SignedIn(profile.clone()));
 
     emit.status("Loading library");
-    let games = owned_games(&client, profile.id, false)?;
+    let (games, stale) = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
     refresh_caves(&client, emit);
     refresh_downloads(&client, emit);
+    if stale {
+        // The cached list is shown already; the itch app also refetches
+        // when butler flags it stale, so new purchases appear.
+        let (games, _) = owned_games(&client, profile.id, true)?;
+        emit.send(Event::OwnedGames(games));
+    }
 
     let stopping = Arc::new(AtomicBool::new(false));
     let driver = spawn_driver(Arc::clone(&daemon), emit.clone(), Arc::clone(&stopping));
@@ -808,8 +814,10 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         .ok_or_else(|| anyhow!("login returned no profile"))
 }
 
-fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game>> {
+/// The games the profile owns and whether butler's cache of them is stale.
+fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Game>, bool)> {
     let mut games = Vec::new();
+    let mut stale = false;
     let mut cursor = None;
     loop {
         let page = client.call(FetchProfileOwnedKeysParams {
@@ -819,18 +827,14 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<Vec<Game
             fresh: Some(fresh),
             ..Default::default()
         })?;
-        // The cache is empty on first run and answers stale with no items;
-        // a fresh fetch fills it.
-        if page.stale == Some(true) && !fresh && games.is_empty() && page.items.is_empty() {
-            return owned_games(client, profile_id, true);
-        }
+        stale |= page.stale == Some(true);
         games.extend(page.items.into_iter().filter_map(|key| key.game));
         match page.next_cursor {
             Some(next) if !next.is_empty() => cursor = Some(next),
             _ => break,
         }
     }
-    Ok(games)
+    Ok((games, stale && !fresh))
 }
 
 fn all_caves(client: &Client) -> Result<Vec<Cave>> {

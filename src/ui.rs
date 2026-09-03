@@ -69,11 +69,11 @@ const HEADER_HEIGHT: f32 = 34.0;
 const RING: f32 = 6.0;
 const SECTION_GAP: f32 = 22.0;
 
-/// One carousel: a title and the library indices it shows.
+/// One carousel: a title and the game ids it shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     pub title: String,
-    pub games: Vec<usize>,
+    pub games: Vec<i64>,
 }
 
 /// The home screen's rows of carousels and which tile has focus. Drawing
@@ -123,10 +123,10 @@ impl Rows {
             self.cols[row] = self.cols[row].min(section.games.len().saturating_sub(1));
         }
         // Keep pointing at the same game when the rows reshuffle around it.
-        if let Some(index) = focused
-            && self.focused_game() != Some(index)
+        if let Some(id) = focused
+            && self.focused_game() != Some(id)
         {
-            self.focus_game(index);
+            self.focus_game(id);
         }
     }
 
@@ -134,8 +134,8 @@ impl Rows {
         self.cols.get(self.row).copied().unwrap_or(0)
     }
 
-    /// The library index under focus.
-    pub fn focused_game(&self) -> Option<usize> {
+    /// The game id under focus.
+    pub fn focused_game(&self) -> Option<i64> {
         self.sections.get(self.row)?.games.get(self.col()).copied()
     }
 
@@ -148,18 +148,18 @@ impl Rows {
         }
     }
 
-    /// Focuses a game by library index, preferring the current row.
-    pub fn focus_game(&mut self, index: usize) {
+    /// Focuses a game by id, preferring the current row.
+    pub fn focus_game(&mut self, id: i64) {
         let in_current = self
             .sections
             .get(self.row)
-            .and_then(|s| s.games.iter().position(|&g| g == index))
+            .and_then(|s| s.games.iter().position(|&g| g == id))
             .map(|col| (self.row, col));
         let anywhere = || {
             self.sections
                 .iter()
                 .enumerate()
-                .find_map(|(row, s)| s.games.iter().position(|&g| g == index).map(|c| (row, c)))
+                .find_map(|(row, s)| s.games.iter().position(|&g| g == id).map(|c| (row, c)))
         };
         if let Some((row, col)) = in_current.or_else(anywhere) {
             self.focus_tile(row, col);
@@ -186,7 +186,7 @@ impl Rows {
 
 /// Everything the home screen reads while drawing.
 pub struct LibraryView<'a> {
-    pub games: &'a [Game],
+    pub games: &'a std::collections::HashMap<i64, Game>,
     pub installed: &'a std::collections::HashSet<i64>,
     pub installs: &'a std::collections::HashMap<i64, InstallState>,
     pub updatable: &'a std::collections::HashSet<i64>,
@@ -247,7 +247,7 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
     // Playback follows focus: the focused game's animation, or none.
     let focused_game = rows.focused_game();
     let wanted = focused_game
-        .and_then(|i| games.get(i))
+        .and_then(|id| games.get(&id))
         .and_then(Game::animated_cover);
     if rows.playing.as_ref().map(|p| p.url.as_str()) != wanted {
         rows.playing = None;
@@ -322,8 +322,7 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                 let first = ((viewport.min.x - RING) / stride).floor().max(0.0) as usize;
                 let last = (((viewport.max.x - RING) / stride).ceil() as usize).min(count);
                 for col in first..last {
-                    let index = section.games[col];
-                    let Some(game) = games.get(index) else {
+                    let Some(game) = games.get(&section.games[col]) else {
                         continue;
                     };
                     let rect = Rect::from_min_size(

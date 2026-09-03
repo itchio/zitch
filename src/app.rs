@@ -22,8 +22,11 @@ pub struct App {
     input_mode: InputMode,
     status: String,
     profile: Option<Profile>,
-    games: Loadable<Vec<Game>>,
+    /// Games the profile has a key for, in butler's order (newest first).
+    owned: Loadable<Vec<Game>>,
     caves: Vec<Cave>,
+    /// Every game the screen can show, owned or installed, by id.
+    catalog: std::collections::HashMap<i64, Game>,
     installed: std::collections::HashSet<i64>,
     /// butler's download queue and the latest progress per download.
     downloads: Vec<Download>,
@@ -155,8 +158,9 @@ impl App {
             input_mode: InputMode::Keyboard,
             status: String::new(),
             profile: None,
-            games: Loadable::Loading,
+            owned: Loadable::Loading,
             caves: Vec::new(),
+            catalog: Default::default(),
             installed: Default::default(),
             downloads: Vec::new(),
             progress: Default::default(),
@@ -242,12 +246,24 @@ impl App {
             .collect()
     }
 
-    fn game_at(&self, index: usize) -> Option<&Game> {
-        self.games.get().and_then(|games| games.get(index))
+    fn game(&self, id: i64) -> Option<&Game> {
+        self.catalog.get(&id)
+    }
+
+    /// Owned games first, so their fresher records win over the copy each
+    /// cave carries; then installed games with no key.
+    fn rebuild_catalog(&mut self) {
+        let mut catalog = std::collections::HashMap::new();
+        for game in self.owned.get().into_iter().flatten() {
+            catalog.insert(game.id, game.clone());
+        }
+        for game in self.caves.iter().filter_map(|cave| cave.game.as_ref()) {
+            catalog.entry(game.id).or_insert_with(|| game.clone());
+        }
+        self.catalog = catalog;
     }
 
     fn apply(&mut self, action: Action) {
-        let count = self.games.get().map_or(0, Vec::len);
         if let (None, Action::Answer { prompt: 0, .. }) = (&self.prompt, &action) {
             self.prompt = Some(Prompt {
                 id: 0,
@@ -290,8 +306,8 @@ impl App {
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
                 Page::Library => self.rows.move_focus(direction),
-                Page::Game { index, button } => {
-                    let Some(game) = self.game_at(index) else {
+                Page::Game { id, button } => {
+                    let Some(game) = self.game(id) else {
                         return;
                     };
                     let buttons = ui::game_buttons(
@@ -308,29 +324,33 @@ impl App {
                         Direction::Right => (button + 1).min(buttons - 1),
                         _ => button,
                     };
-                    self.page = Page::Game { index, button };
+                    self.page = Page::Game { id, button };
                 }
             },
             Action::FocusIndex(index) => {
-                if index < count {
-                    self.rows.focus_game(index);
+                if let Some(game) = self.owned.get().and_then(|games| games.get(index)) {
+                    self.rows.focus_game(game.id);
                 }
             }
             Action::FocusTile { row, col } => self.rows.focus_tile(row, col),
             Action::FocusButton(button) => {
-                if let Page::Game { index, .. } = self.page {
-                    self.page = Page::Game { index, button };
+                if let Page::Game { id, .. } = self.page {
+                    self.page = Page::Game { id, button };
                 }
             }
             Action::Activate => match self.page.clone() {
                 Page::Library => {
-                    if let Some(index) = self.rows.focused_game().filter(|&i| i < count) {
+                    if let Some(id) = self
+                        .rows
+                        .focused_game()
+                        .filter(|id| self.catalog.contains_key(id))
+                    {
                         self.actions
-                            .push(Action::Open(Page::Game { index, button: 0 }));
+                            .push(Action::Open(Page::Game { id, button: 0 }));
                     }
                 }
-                Page::Game { index, button } => {
-                    let Some(game) = self.game_at(index) else {
+                Page::Game { id, button } => {
+                    let Some(game) = self.game(id) else {
                         return;
                     };
                     let buttons = ui::game_buttons(
@@ -375,8 +395,8 @@ impl App {
             Action::Back => match self.page {
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library => self.notice = None,
-                Page::Game { index, .. } => {
-                    self.rows.focus_game(index);
+                Page::Game { id, .. } => {
+                    self.rows.focus_game(id);
                     self.page = Page::Library;
                 }
             },
@@ -402,11 +422,7 @@ impl App {
             // Only meaningful while a prompt is open, handled above.
             Action::Answer { .. } | Action::PromptFocus(_) => {}
             Action::Install { game_id } => {
-                let Some(game) = self
-                    .games
-                    .get()
-                    .and_then(|g| g.iter().find(|g| g.id == game_id))
-                else {
+                let Some(game) = self.game(game_id).cloned() else {
                     return;
                 };
                 if self.installs.contains_key(&game_id) {
@@ -417,7 +433,7 @@ impl App {
                 self.pending_installs.insert(game_id);
                 self.notice = Some(format!("Installing {}", game.title));
                 self.backend.send(Command::Install {
-                    game: Box::new(game.clone()),
+                    game: Box::new(game),
                 });
                 self.rebuild_installs();
             }
@@ -464,21 +480,29 @@ impl App {
             .any(|cave| cave.game_id() == Some(game_id) && self.running.contains(&cave.id))
     }
 
-    /// Lays the home screen out as carousels: what you can play now first,
-    /// then what you played last, then anything with an update, then all.
+    /// Lays the home screen out as carousels, the way the itch app's
+    /// Library tab does: what is installed, then what was played last,
+    /// anything with an update, and everything owned.
     fn rebuild_sections(&mut self) {
-        let Some(games) = self.games.get() else {
+        if self.owned.get().is_none() {
             return;
-        };
+        }
         let filter = self.filter;
         let query = self.query.trim().to_lowercase();
         if !query.is_empty() {
-            // Searching narrows the whole screen to one row of matches.
-            let matches: Vec<usize> = games
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| filter.matches(g) && g.title.to_lowercase().contains(&query))
-                .map(|(i, _)| i)
+            // Searching narrows the whole screen to one row of matches,
+            // owned first then installed-only, each in its usual order.
+            let mut seen = std::collections::HashSet::new();
+            let matches: Vec<i64> = self
+                .owned_ids()
+                .into_iter()
+                .chain(self.installed_ids())
+                .filter(|id| seen.insert(*id))
+                .filter(|id| {
+                    self.catalog.get(id).is_some_and(|g| {
+                        filter.matches(g) && g.title.to_lowercase().contains(&query)
+                    })
+                })
                 .collect();
             let title = match matches.len() {
                 0 => "No matches".to_string(),
@@ -491,87 +515,89 @@ impl App {
             }]);
             return;
         }
-        let index_of: std::collections::HashMap<i64, usize> =
-            games.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
         let mut sections = Vec::new();
 
-        let mut installed: Vec<(&Cave, usize)> = self
-            .caves
-            .iter()
-            .filter_map(|cave| Some((cave, *index_of.get(&cave.game_id()?)?)))
-            .collect();
-        // Newest install first.
-        installed.sort_by(|a, b| {
-            let at = |c: &Cave| c.stats.as_ref().and_then(|s| s.installed_at.clone());
-            at(b.0).cmp(&at(a.0))
-        });
-        let mut seen = std::collections::HashSet::new();
-        let installed_games: Vec<usize> = installed
-            .iter()
-            .map(|(_, i)| *i)
-            .filter(|i| seen.insert(*i))
-            .collect();
-        if !installed_games.is_empty() {
+        let installed = self.installed_ids();
+        if !installed.is_empty() {
             sections.push(ui::Section {
                 title: "Installed".into(),
-                games: installed_games,
+                games: installed,
             });
         }
 
-        let mut played: Vec<(&Cave, usize)> = installed
+        let mut played: Vec<&Cave> = self
+            .caves
             .iter()
-            .copied()
-            .filter(|(cave, _)| {
+            .filter(|cave| {
                 cave.stats
                     .as_ref()
                     .is_some_and(|s| s.last_touched_at.is_some() && s.seconds_run > 0)
             })
             .collect();
-        played.sort_by(|a, b| {
-            let at = |c: &Cave| c.stats.as_ref().and_then(|s| s.last_touched_at.clone());
-            at(b.0).cmp(&at(a.0))
-        });
+        played.sort_by_key(|cave| std::cmp::Reverse(last_touched(cave)));
         let mut seen = std::collections::HashSet::new();
-        let played_games: Vec<usize> = played
+        let played: Vec<i64> = played
             .iter()
-            .map(|(_, i)| *i)
-            .filter(|i| seen.insert(*i))
+            .filter_map(|cave| cave.game_id())
+            .filter(|id| seen.insert(*id))
             .take(12)
             .collect();
-        if !played_games.is_empty() {
+        if !played.is_empty() {
             sections.push(ui::Section {
                 title: "Recently played".into(),
-                games: played_games,
+                games: played,
             });
         }
 
         let updatable = self.updatable();
-        let update_games: Vec<usize> = games
+        let mut seen = std::collections::HashSet::new();
+        let updates: Vec<i64> = self
+            .caves
             .iter()
-            .enumerate()
-            .filter(|(_, g)| updatable.contains(&g.id))
-            .map(|(i, _)| i)
+            .filter_map(|cave| cave.game_id())
+            .filter(|id| updatable.contains(id) && seen.insert(*id))
             .collect();
-        if !update_games.is_empty() {
+        if !updates.is_empty() {
             sections.push(ui::Section {
                 title: "Updates".into(),
-                games: update_games,
+                games: updates,
             });
         }
 
         sections.push(ui::Section {
             title: match filter {
-                Filter::All => "All games".to_string(),
+                Filter::All => "Owned".to_string(),
                 other => other.label().to_string(),
             },
-            games: games
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| filter.matches(g))
-                .map(|(i, _)| i)
+            games: self
+                .owned_ids()
+                .into_iter()
+                .filter(|id| self.catalog.get(id).is_some_and(|g| filter.matches(g)))
                 .collect(),
         });
         self.rows.set_sections(sections);
+    }
+
+    fn owned_ids(&self) -> Vec<i64> {
+        self.owned
+            .get()
+            .into_iter()
+            .flatten()
+            .map(|game| game.id)
+            .collect()
+    }
+
+    /// Installed games, most recently touched first, as the itch app sorts
+    /// its Installed stripe.
+    fn installed_ids(&self) -> Vec<i64> {
+        let mut caves: Vec<&Cave> = self.caves.iter().collect();
+        caves.sort_by_key(|cave| std::cmp::Reverse(last_touched(cave)));
+        let mut seen = std::collections::HashSet::new();
+        caves
+            .iter()
+            .filter_map(|cave| cave.game_id())
+            .filter(|id| seen.insert(*id))
+            .collect()
     }
 
     fn download_for(&self, game_id: i64) -> Option<&Download> {
@@ -659,7 +685,7 @@ impl App {
             return;
         }
 
-        let loaded = !matches!(self.games, Loadable::Loading) || self.error.is_some();
+        let loaded = !matches!(self.owned, Loadable::Loading) || self.error.is_some();
         if let Some(until) = shot.wait_until {
             if now < until {
                 return;
@@ -711,12 +737,14 @@ impl App {
                 Event::Status(text) => self.status = text,
                 Event::SignedIn(profile) => self.profile = Some(profile),
                 Event::OwnedGames(games) => {
-                    self.games = Loadable::Loaded(games);
+                    self.owned = Loadable::Loaded(games);
+                    self.rebuild_catalog();
                     self.rebuild_sections();
                 }
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
+                    self.rebuild_catalog();
                     self.rebuild_sections();
                 }
                 Event::Downloads(downloads) => {
@@ -792,8 +820,8 @@ impl App {
                     // A failed queue attempt has no download to report on.
                     self.pending_installs.clear();
                     self.rebuild_installs();
-                    if self.games.get().is_none() {
-                        self.games = Loadable::Failed(message.clone());
+                    if self.owned.get().is_none() {
+                        self.owned = Loadable::Failed(message.clone());
                     }
                     self.error = Some(message);
                 }
@@ -823,9 +851,9 @@ impl App {
                 (Glyph::Tab, "Filter".to_string()),
                 (Glyph::Search, "Search".to_string()),
             ],
-            Page::Game { index, button } => {
+            Page::Game { id, button } => {
                 let mut hints = Vec::new();
-                if let Some(game) = self.game_at(index) {
+                if let Some(game) = self.game(id) {
                     let buttons = ui::game_buttons(
                         game,
                         &self.caves_for(game.id),
@@ -871,7 +899,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.input_mode != InputMode::Touch && self.games.get().is_some() {
+        if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
             ui::footer(ui, &self.glyphs, self.input_mode, &hints);
         }
@@ -903,12 +931,16 @@ impl eframe::App for App {
                         ui.add_space(12.0);
                         ui::subtle(ui, user.name());
                     }
-                    if let Loadable::Loaded(games) = &self.games {
+                    if let Loadable::Loaded(games) = &self.owned {
                         ui.add_space(12.0);
-                        ui::subtle(ui, &format!("{} games", games.len()));
+                        ui::subtle(ui, &format!("{} owned", games.len()));
+                        if !self.caves.is_empty() {
+                            ui.add_space(12.0);
+                            ui::subtle(ui, &format!("{} installed", self.installed.len()));
+                        }
                     }
                 });
-                if self.page.is_library() && self.games.get().is_some() {
+                if self.page.is_library() && self.owned.get().is_some() {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
@@ -938,7 +970,7 @@ impl eframe::App for App {
                         });
                     });
                 }
-                match (&self.games, &self.notice) {
+                match (&self.owned, &self.notice) {
                     (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, notice),
                     (Loadable::Loaded(_), None) => ui::subtle(ui, ""),
                     _ => ui::subtle(ui, &self.status),
@@ -947,13 +979,13 @@ impl eframe::App for App {
                     ui::error(ui, error);
                 }
                 ui.add_space(16.0);
-                match (&self.games, self.page.clone()) {
+                match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui),
                     (Loadable::Failed(_), _) => {}
-                    (Loadable::Loaded(games), Page::Library) => ui::library(
+                    (Loadable::Loaded(_), Page::Library) => ui::library(
                         ui,
                         ui::LibraryView {
-                            games,
+                            games: &self.catalog,
                             installed: &self.installed,
                             installs: &self.installs,
                             updatable: &self.updatable(),
@@ -962,8 +994,8 @@ impl eframe::App for App {
                         &mut self.rows,
                         &mut self.actions,
                     ),
-                    (Loadable::Loaded(games), Page::Game { index, button }) => {
-                        match games.get(index) {
+                    (Loadable::Loaded(_), Page::Game { id, button }) => {
+                        match self.catalog.get(&id) {
                             Some(game) => {
                                 let caves: Vec<&Cave> = self
                                     .caves
@@ -1002,6 +1034,15 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.backend.shutdown();
     }
+}
+
+/// When the cave was last played or, failing that, installed.
+fn last_touched(cave: &Cave) -> Option<String> {
+    let stats = cave.stats.as_ref()?;
+    stats
+        .last_touched_at
+        .clone()
+        .or_else(|| stats.installed_at.clone())
 }
 
 fn capitalize(text: &str) -> String {

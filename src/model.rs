@@ -142,9 +142,9 @@ impl Filter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Library,
-    /// One game from the library, with one of its buttons focused.
+    /// One game, with one of its buttons focused.
     Game {
-        index: usize,
+        id: i64,
         button: usize,
     },
 }
@@ -180,7 +180,7 @@ pub enum Direction {
 #[derive(Debug, Clone)]
 pub enum Action {
     MoveFocus(Direction),
-    /// Focus a game by library index, scrolling to it.
+    /// Focus the nth owned game, scrolling to it; for scripted screenshots.
     FocusIndex(usize),
     /// Focus a tile without scrolling to it; the pointer is already there.
     FocusTile {
