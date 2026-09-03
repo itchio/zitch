@@ -1,4 +1,4 @@
-.PHONY: build run run-verbose shot check fmt clean help sync-butler
+.PHONY: build release run run-verbose shot check fmt clean help sync-butler
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -13,6 +13,7 @@ SCRIPT ?=
 
 help:
 	@echo "make build        compile a debug binary"
+	@echo "make release      compile an optimized binary to target/release/zitch"
 	@echo "make run          build and launch the app"
 	@echo "make run-verbose  same, logging every JSON-RPC message"
 	@echo "make shot         launch, write a screenshot to \$$SHOT ($(SHOT)), exit"
@@ -28,6 +29,10 @@ help:
 
 build:
 	cargo build
+
+release:
+	cargo build --release
+	@ls -lh target/release/zitch | awk '{print "target/release/zitch: " $$5}'
 
 run: build
 	./target/debug/zitch --app-name $(APP) $(ARGS)
