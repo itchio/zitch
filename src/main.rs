@@ -29,6 +29,11 @@ struct Cli {
     #[arg(long)]
     dbpath: Option<PathBuf>,
 
+    /// Which saved login to use, by butlerd profile id. Defaults to the
+    /// most recently used one; an unknown id lists the choices.
+    #[arg(long, env = "ZITCH_PROFILE_ID")]
+    profile_id: Option<i64>,
+
     /// File containing an itch.io API key, used to sign in when the database
     /// has no saved profile. Never logged.
     #[arg(long, env = "ZITCH_API_KEY_FILE")]
@@ -81,6 +86,7 @@ fn main() -> eframe::Result<()> {
         butler: cli.butler,
         dbpath,
         api_key,
+        profile_id: cli.profile_id,
         // Same layout as the itch app, so a shared config dir shares games.
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),

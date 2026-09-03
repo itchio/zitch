@@ -33,6 +33,8 @@ pub struct Config {
     pub dbpath: PathBuf,
     /// Used for `Profile.LoginWithAPIKey` when no saved profile exists.
     pub api_key: Option<String>,
+    /// A saved profile to use instead of the most recent one.
+    pub profile_id: Option<i64>,
     /// Where games go when the database has no install location yet.
     pub install_dir: PathBuf,
     /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
@@ -708,8 +710,34 @@ fn install_location(client: &Client, config: &Config) -> Result<String> {
 fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> {
     let mut saved = client.call(ProfileListParams {})?.profiles;
     saved.sort_by(|a, b| b.last_connected.cmp(&a.last_connected));
-    if let Some(entry) = saved.first() {
-        emit.status("Using saved login");
+    let chosen = match config.profile_id {
+        Some(id) => Some(saved.iter().find(|p| p.id == id).ok_or_else(|| {
+            let choices: Vec<String> = saved
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} ({})",
+                        p.id,
+                        p.user.as_ref().map_or("?", |u| u.username.as_str())
+                    )
+                })
+                .collect();
+            anyhow!(
+                "no saved profile with id {id}; saved profiles: {}",
+                if choices.is_empty() {
+                    "none".to_string()
+                } else {
+                    choices.join(", ")
+                }
+            )
+        })?),
+        None => saved.first(),
+    };
+    if let Some(entry) = chosen {
+        emit.status(format!(
+            "Using saved login for {}",
+            entry.user.as_ref().map_or("?", |u| u.username.as_str())
+        ));
         let result = client.call(ProfileUseSavedLoginParams {
             profile_id: entry.id,
         })?;
