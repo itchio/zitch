@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Command, Event};
 use crate::gamepad::Gamepad;
+use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, GameUpdate, InstallState,
@@ -16,6 +17,9 @@ pub struct App {
     backend: Backend,
     covers: CoverLoader,
     gamepad: Gamepad,
+    glyphs: Glyphs,
+    /// The device the user touched last, which picks the footer's glyphs.
+    input_mode: InputMode,
     status: String,
     profile: Option<Profile>,
     games: Loadable<Vec<Game>>,
@@ -136,6 +140,8 @@ impl App {
             backend,
             covers,
             gamepad: Gamepad::new(),
+            glyphs: Glyphs::load(ctx),
+            input_mode: InputMode::Keyboard,
             status: String::new(),
             profile: None,
             games: Loadable::Loading,
@@ -690,15 +696,77 @@ impl App {
     }
 }
 
+impl App {
+    /// What the footer offers on the current page, in reading order.
+    fn hints(&self) -> Vec<(Glyph, String)> {
+        if let Some(prompt) = &self.prompt {
+            let mut hints = Vec::new();
+            if prompt.choices.len() > 1 {
+                hints.push((Glyph::NavigateHorizontal, "Choose".to_string()));
+            }
+            if let Some(choice) = prompt.choices.get(prompt.focus) {
+                hints.push((Glyph::Confirm, choice.clone()));
+            }
+            hints.push((Glyph::Back, "Dismiss".to_string()));
+            return hints;
+        }
+        match self.page.clone() {
+            Page::Library => vec![
+                (Glyph::Navigate, "Browse".to_string()),
+                (Glyph::Confirm, "Open".to_string()),
+            ],
+            Page::Game { index, button } => {
+                let mut hints = Vec::new();
+                if let Some(game) = self.game_at(index) {
+                    let buttons = ui::game_buttons(
+                        game,
+                        &self.caves_for(game.id),
+                        self.installs.get(&game.id),
+                        self.is_running(game.id),
+                        self.update_for(game.id),
+                    );
+                    if buttons.len() > 1 {
+                        hints.push((Glyph::NavigateHorizontal, "Choose".to_string()));
+                    }
+                    if let Some((label, _)) = buttons.get(button) {
+                        hints.push((Glyph::Confirm, label.to_string()));
+                    }
+                }
+                hints.push((Glyph::Back, "Back".to_string()));
+                hints
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
+        let (keys, touches) = ctx.input(|i| {
+            (
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Key { .. })),
+                i.any_touches(),
+            )
+        });
         self.handle_keys(ctx);
-        self.gamepad.poll(ctx, &mut self.actions);
+        let pad = self.gamepad.poll(ctx, &mut self.actions);
+        if pad {
+            self.input_mode = InputMode::Gamepad;
+        } else if keys {
+            self.input_mode = InputMode::Keyboard;
+        } else if touches {
+            self.input_mode = InputMode::Touch;
+        }
         self.drive_shot(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.input_mode != InputMode::Touch && self.games.get().is_some() {
+            let hints = self.hints();
+            ui::footer(ui, &self.glyphs, self.input_mode, &hints);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(ui::BG).inner_margin(24.0))
             .show(ui, |ui| {
@@ -706,7 +774,22 @@ impl eframe::App for App {
                     if self.page.is_library() {
                         ui::heading(ui, "Library");
                     } else {
-                        ui::heading(ui, "‹ Library");
+                        // The heading doubles as the way back for touch.
+                        let back = ui::back_button(ui);
+                        ui.add_space(6.0);
+                        let label = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new("Library")
+                                        .font(egui::FontId::proportional(30.0))
+                                        .color(egui::Color32::from_gray(0xee)),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if back.clicked() || label.clicked() {
+                            self.actions.push(Action::Back);
+                        }
                     }
                     if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
                         ui.add_space(12.0);

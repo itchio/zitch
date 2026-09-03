@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
+use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader};
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, UploadExt,
@@ -798,8 +799,6 @@ pub fn game_detail(
                     }
                 }
             });
-            ui.add_space(16.0);
-            subtle(ui, "Esc or B to go back");
         });
     });
 }
@@ -944,4 +943,59 @@ pub fn prompt(ctx: &egui::Context, prompt: &Prompt, actions: &mut Vec<Action>) {
                     });
                 });
         });
+}
+
+/// The hint bar along the bottom: a glyph and a word for each thing the
+/// current page lets the user do.
+pub fn footer(ui: &mut Ui, glyphs: &Glyphs, mode: InputMode, hints: &[(Glyph, String)]) {
+    egui::Panel::bottom("footer")
+        .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(BG)
+                .inner_margin(egui::Margin::symmetric(24, 10)),
+        )
+        .show_separator_line(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (glyph, label) in hints {
+                    if let Some(texture) = glyphs.get(mode, *glyph) {
+                        let size = 22.0;
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                                .fit_to_exact_size(vec2(size, size)),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(label)
+                            .font(FontId::proportional(13.0))
+                            .color(DIM),
+                    );
+                    ui.add_space(14.0);
+                }
+            });
+        });
+}
+
+/// A round back button with a painted chevron, sized for a fingertip.
+pub fn back_button(ui: &mut Ui) -> egui::Response {
+    let size = 40.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let fill = if response.hovered() {
+        TILE_HOVER
+    } else {
+        TILE_BG
+    };
+    ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+    let c = rect.center();
+    let arm = 7.0;
+    let points = [
+        pos2(c.x + arm * 0.5, c.y - arm),
+        pos2(c.x - arm * 0.5, c.y),
+        pos2(c.x + arm * 0.5, c.y + arm),
+    ];
+    ui.painter()
+        .add(egui::Shape::line(points.to_vec(), Stroke::new(3.0, TEXT)));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

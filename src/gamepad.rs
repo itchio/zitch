@@ -42,9 +42,11 @@ impl Gamepad {
         Self { gilrs, stick: None }
     }
 
-    /// Drains controller events into `actions`. Returns true while any
-    /// controller is connected, so the caller keeps polling.
+    /// Drains controller events into `actions`. Returns whether the
+    /// controller produced any action this frame, so the interface can show
+    /// controller glyphs; repaints keep coming while one is connected.
     pub fn poll(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) -> bool {
+        let before = actions.len();
         let Some(gilrs) = self.gilrs.as_mut() else {
             return false;
         };
@@ -71,7 +73,7 @@ impl Gamepad {
         } else {
             self.stick = None;
         }
-        connected
+        actions.len() > before
     }
 
     fn poll_stick(&mut self, actions: &mut Vec<Action>) {
