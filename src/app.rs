@@ -232,11 +232,9 @@ impl App {
                     };
                     self.actions.push(answer);
                 }
-                Action::Answer { prompt: id, choice } => {
-                    if id == prompt.id {
-                        self.prompt = None;
-                        self.backend.send(Command::Answer { prompt: id, choice });
-                    }
+                Action::Answer { prompt: id, choice } if id == prompt.id => {
+                    self.prompt = None;
+                    self.backend.send(Command::Answer { prompt: id, choice });
                 }
                 _ => {}
             }
@@ -814,12 +812,14 @@ impl eframe::App for App {
                     (Loadable::Failed(_), _) => {}
                     (Loadable::Loaded(games), Page::Library) => ui::library(
                         ui,
-                        games,
-                        &self.installed,
-                        &self.installs,
-                        &self.updatable(),
+                        ui::LibraryView {
+                            games,
+                            installed: &self.installed,
+                            installs: &self.installs,
+                            updatable: &self.updatable(),
+                            covers: &self.covers,
+                        },
                         &mut self.rows,
-                        &self.covers,
                         &mut self.actions,
                     ),
                     (Loadable::Loaded(games), Page::Game { index, button }) => {
@@ -834,12 +834,14 @@ impl eframe::App for App {
                                 let update = self.update_for(game.id).cloned();
                                 ui::game_detail(
                                     ui,
-                                    game,
-                                    &caves,
-                                    self.installs.get(&game.id),
-                                    running,
-                                    update.as_ref(),
-                                    button,
+                                    ui::GameView {
+                                        game,
+                                        caves: &caves,
+                                        install: self.installs.get(&game.id),
+                                        running,
+                                        update: update.as_ref(),
+                                        focused_button: button,
+                                    },
                                     &mut self.actions,
                                 );
                             }

@@ -181,16 +181,23 @@ impl Rows {
     }
 }
 
-pub fn library(
-    ui: &mut Ui,
-    games: &[Game],
-    installed: &std::collections::HashSet<i64>,
-    installs: &std::collections::HashMap<i64, InstallState>,
-    updatable: &std::collections::HashSet<i64>,
-    rows: &mut Rows,
-    covers: &CoverLoader,
-    actions: &mut Vec<Action>,
-) {
+/// Everything the home screen reads while drawing.
+pub struct LibraryView<'a> {
+    pub games: &'a [Game],
+    pub installed: &'a std::collections::HashSet<i64>,
+    pub installs: &'a std::collections::HashMap<i64, InstallState>,
+    pub updatable: &'a std::collections::HashSet<i64>,
+    pub covers: &'a CoverLoader,
+}
+
+pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Vec<Action>) {
+    let LibraryView {
+        games,
+        installed,
+        installs,
+        updatable,
+        covers,
+    } = view;
     let tile_width = TILE_WIDTH;
     let cover_height = tile_width / COVER_ASPECT;
     let tile_height = cover_height + TITLE_HEIGHT;
@@ -676,16 +683,25 @@ pub fn game_buttons(
     }
 }
 
-pub fn game_detail(
-    ui: &mut Ui,
-    game: &Game,
-    caves: &[&Cave],
-    install: Option<&InstallState>,
-    running: bool,
-    update: Option<&GameUpdate>,
-    focused_button: usize,
-    actions: &mut Vec<Action>,
-) {
+/// Everything the detail page reads while drawing.
+pub struct GameView<'a> {
+    pub game: &'a Game,
+    pub caves: &'a [&'a Cave],
+    pub install: Option<&'a InstallState>,
+    pub running: bool,
+    pub update: Option<&'a GameUpdate>,
+    pub focused_button: usize,
+}
+
+pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
+    let GameView {
+        game,
+        caves,
+        install,
+        running,
+        update,
+        focused_button,
+    } = view;
     let buttons = game_buttons(game, caves, install, running, update);
     let width = ui.available_width();
     let cover_width = (width * 0.42).min(420.0);
