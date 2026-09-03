@@ -55,9 +55,9 @@ struct Cli {
     #[arg(long, value_name = "WxH", value_parser = parse_size, default_value = "1280x720")]
     window: (f32, f32),
 
-    /// Interface scale. 1.6 reads from across the room; 1.0 suits a small
-    /// screen held in the hands. Ignored with --emulate.
-    #[arg(long, default_value_t = 1.6)]
+    /// Extra interface magnification on top of the layout, which already
+    /// scales with the screen. Ignored with --emulate.
+    #[arg(long, default_value_t = 1.0)]
     zoom: f32,
 
     /// Lay the interface out for a display of this many pixels, e.g.

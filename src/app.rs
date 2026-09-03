@@ -935,25 +935,26 @@ impl eframe::App for App {
 
 impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
+        let m = ui::Metrics::for_screen(ui.max_rect());
         if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
-            ui::footer(ui, &self.glyphs, self.input_mode, &hints);
+            ui::footer(ui, &m, &self.glyphs, self.input_mode, &hints);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ui::BG).inner_margin(24.0))
+            .frame(egui::Frame::new().fill(ui::BG).inner_margin(m.margin))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if self.page.is_library() {
-                        ui::heading(ui, "Library");
+                        ui::heading(ui, &m, "Library");
                     } else {
                         // The heading doubles as the way back for touch.
-                        let back = ui::back_button(ui);
-                        ui.add_space(6.0);
+                        let back = ui::back_button(ui, &m);
+                        ui.add_space(m.space(6.0));
                         let label = ui
                             .add(
                                 egui::Label::new(
                                     egui::RichText::new("Library")
-                                        .font(egui::FontId::proportional(30.0))
+                                        .font(egui::FontId::proportional(m.heading))
                                         .color(egui::Color32::from_gray(0xee)),
                                 )
                                 .sense(egui::Sense::click()),
@@ -964,24 +965,24 @@ impl App {
                         }
                     }
                     if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
-                        ui.add_space(12.0);
-                        ui::subtle(ui, user.name());
+                        ui.add_space(m.space(12.0));
+                        ui::subtle(ui, &m, user.name());
                     }
                     if let Loadable::Loaded(games) = &self.owned {
-                        ui.add_space(12.0);
-                        ui::subtle(ui, &format!("{} owned", games.len()));
+                        ui.add_space(m.space(12.0));
+                        ui::subtle(ui, &m, &format!("{} owned", games.len()));
                         if !self.caves.is_empty() {
-                            ui.add_space(12.0);
-                            ui::subtle(ui, &format!("{} installed", self.installed.len()));
+                            ui.add_space(m.space(12.0));
+                            ui::subtle(ui, &m, &format!("{} installed", self.installed.len()));
                         }
                     }
                 });
                 if self.page.is_library() && self.owned.get().is_some() {
-                    ui.add_space(10.0);
+                    ui.add_space(m.space(10.0));
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.spacing_mut().item_spacing.x = m.space(8.0);
                         for filter in Filter::ALL {
-                            if ui::chip(ui, filter.label(), filter == self.filter).clicked() {
+                            if ui::chip(ui, &m, filter.label(), filter == self.filter).clicked() {
                                 self.actions.push(Action::SetFilter(filter));
                             }
                         }
@@ -993,9 +994,12 @@ impl App {
                             let edit = ui.add(
                                 egui::TextEdit::singleline(&mut self.query)
                                     .id(id)
-                                    .hint_text("Search")
-                                    .desired_width(200.0)
-                                    .font(egui::FontId::proportional(15.0)),
+                                    .hint_text(
+                                        egui::RichText::new("Search")
+                                            .font(egui::FontId::proportional(m.label)),
+                                    )
+                                    .desired_width(m.space(200.0))
+                                    .font(egui::FontId::proportional(m.label)),
                             );
                             if std::mem::take(&mut self.focus_search) {
                                 edit.request_focus();
@@ -1007,19 +1011,20 @@ impl App {
                     });
                 }
                 match (&self.owned, &self.notice) {
-                    (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, notice),
-                    (Loadable::Loaded(_), None) => ui::subtle(ui, ""),
-                    _ => ui::subtle(ui, &self.status),
+                    (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, &m, notice),
+                    (Loadable::Loaded(_), None) => ui::subtle(ui, &m, ""),
+                    _ => ui::subtle(ui, &m, &self.status),
                 }
                 if let Some(error) = &self.error {
-                    ui::error(ui, error);
+                    ui::error(ui, &m, error);
                 }
-                ui.add_space(16.0);
+                ui.add_space(m.space(16.0));
                 match (&self.owned, self.page.clone()) {
-                    (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui),
+                    (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
                     (Loadable::Failed(_), _) => {}
                     (Loadable::Loaded(_), Page::Library) => ui::library(
                         ui,
+                        &m,
                         ui::LibraryView {
                             games: &self.catalog,
                             installed: &self.installed,
@@ -1042,6 +1047,7 @@ impl App {
                                 let update = self.update_for(game.id).cloned();
                                 ui::game_detail(
                                     ui,
+                                    &m,
                                     ui::GameView {
                                         game,
                                         caves: &caves,
@@ -1059,7 +1065,7 @@ impl App {
                 }
             });
         if let Some(prompt) = &self.prompt {
-            ui::prompt(ui.ctx(), ui.max_rect(), prompt, &mut self.actions);
+            ui::prompt(ui.ctx(), &m, ui.max_rect(), prompt, &mut self.actions);
         }
         self.apply_actions();
         if !self.installs.is_empty() {

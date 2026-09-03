@@ -22,9 +22,81 @@ const AMBER: Color32 = Color32::from_rgb(0xf5, 0xb8, 0x3d);
 
 /// itch.io covers are 315x250; tiles keep that shape.
 const COVER_ASPECT: f32 = 315.0 / 250.0;
-const TILE_WIDTH: f32 = 170.0;
-const GAP: f32 = 14.0;
-const TITLE_HEIGHT: f32 = 26.0;
+
+/// Sizes for the screen being drawn, recomputed every frame. The design
+/// was drawn on a 800x450 canvas and scales with the screen's height, so a
+/// TV across the room and a handheld in the hands get the same layout at
+/// their own size. Text has floors that matter at 1x density.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Metrics {
+    pub scale: f32,
+    /// Space between the page edge and content.
+    pub margin: f32,
+    pub tile_width: f32,
+    /// Space between tiles in a row.
+    pub gap: f32,
+    /// Room around a strip for the focus ring, which is painted outside the
+    /// cover and would otherwise be clipped at the strip's edges.
+    pub ring: f32,
+    /// Height of the title line under a tile's cover.
+    pub title_height: f32,
+    pub header_height: f32,
+    pub section_gap: f32,
+    pub heading: f32,
+    pub title: f32,
+    pub dialog: f32,
+    pub section: f32,
+    pub button: f32,
+    pub label: f32,
+    pub body: f32,
+    pub caption: f32,
+    pub badge: f32,
+}
+
+impl Metrics {
+    const DESIGN_HEIGHT: f32 = 450.0;
+    /// Tiles shrink below the design size rather than show fewer than this
+    /// across, so a narrow screen still reads as a carousel.
+    const MIN_COLUMNS: f32 = 3.5;
+
+    pub fn for_screen(screen: Rect) -> Self {
+        let scale = (screen.height() / Self::DESIGN_HEIGHT).clamp(0.8, 2.4);
+        // Whole points keep widget edges on pixels at 1x density.
+        let space = |base: f32| (base * scale).round();
+        let margin = (screen.width() * 0.03).clamp(12.0, 48.0).round();
+        let gap = space(14.0);
+        let usable = screen.width() - 2.0 * margin;
+        let tile_width = space(170.0)
+            .min((usable - Self::MIN_COLUMNS * gap) / Self::MIN_COLUMNS)
+            .round();
+        let font = |base: f32, floor: f32| (base * scale).max(floor);
+        Self {
+            scale,
+            margin,
+            tile_width,
+            gap,
+            ring: space(6.0),
+            title_height: space(26.0),
+            header_height: space(34.0),
+            section_gap: space(22.0),
+            heading: font(30.0, 20.0),
+            title: font(26.0, 18.0),
+            dialog: font(22.0, 16.0),
+            section: font(18.0, 14.0),
+            button: font(16.0, 13.0),
+            label: font(15.0, 12.0),
+            body: font(14.0, 12.0),
+            caption: font(13.0, 12.0),
+            badge: font(9.5, 10.0),
+        }
+    }
+
+    /// A length from the design canvas, scaled to this screen in whole
+    /// points.
+    pub fn space(&self, base: f32) -> f32 {
+        (base * self.scale).round()
+    }
+}
 
 /// One finger on the home screen. egui's own drag-to-scroll would give the
 /// gesture to whichever row it started on and drop the vertical part, so
@@ -62,12 +134,6 @@ impl Game {
         (is_gif && self.still_cover_url.as_deref() != Some(cover)).then_some(cover)
     }
 }
-
-const HEADER_HEIGHT: f32 = 34.0;
-/// Room around a strip for the focus ring, which is painted outside the
-/// cover and would otherwise be clipped at the strip's edges.
-const RING: f32 = 6.0;
-const SECTION_GAP: f32 = 22.0;
 
 /// One carousel: a title and the game ids it shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +259,13 @@ pub struct LibraryView<'a> {
     pub covers: &'a CoverLoader,
 }
 
-pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Vec<Action>) {
+pub fn library(
+    ui: &mut Ui,
+    m: &Metrics,
+    view: LibraryView,
+    rows: &mut Rows,
+    actions: &mut Vec<Action>,
+) {
     let LibraryView {
         games,
         installed,
@@ -201,10 +273,15 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
         updatable,
         covers,
     } = view;
-    let tile_width = TILE_WIDTH;
+    let Metrics {
+        tile_width,
+        gap,
+        ring,
+        ..
+    } = *m;
     let cover_height = tile_width / COVER_ASPECT;
-    let tile_height = cover_height + TITLE_HEIGHT;
-    let stride = tile_width + GAP;
+    let tile_height = cover_height + m.title_height;
+    let stride = tile_width + gap;
     let follow = std::mem::take(&mut rows.follow);
 
     let viewport_height = ui.available_height();
@@ -275,10 +352,10 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
             let section = &rows.sections[row];
             let focused_col = rows.cols[row];
             let is_focused_row = row == rows.row;
-            ui.allocate_ui(vec2(ui.available_width(), HEADER_HEIGHT), |ui| {
+            ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
                 ui.label(
                     egui::RichText::new(&section.title)
-                        .font(FontId::proportional(18.0))
+                        .font(FontId::proportional(m.section))
                         .color(if is_focused_row { TEXT } else { DIM }),
                 );
             });
@@ -288,48 +365,48 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                 .auto_shrink([false, false])
                 .scroll_source(no_drag)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .max_height(tile_height + 2.0 * RING);
+                .max_height(tile_height + 2.0 * ring);
             if let Some((swiped, offset)) = set_hscroll
                 && swiped == row
             {
                 strip = strip.horizontal_scroll_offset(offset);
             } else if follow && is_focused_row {
-                let left = RING + focused_col as f32 * stride;
+                let left = ring + focused_col as f32 * stride;
                 let right = left + tile_width;
-                let width = ui.available_width() + 2.0 * RING;
+                let width = ui.available_width() + 2.0 * ring;
                 let mut offset = rows.hscroll[row];
-                if left - GAP < offset {
-                    offset = left - GAP;
-                } else if right + GAP > offset + width {
-                    offset = right + GAP - width;
+                if left - gap < offset {
+                    offset = left - gap;
+                } else if right + gap > offset + width {
+                    offset = right + gap - width;
                 }
                 // egui shows an offset past the end for a frame before
                 // clamping it, which reads as a shake at the ends of the row.
-                let total = section.games.len() as f32 * stride - GAP + 2.0 * RING;
+                let total = section.games.len() as f32 * stride - gap + 2.0 * ring;
                 strip = strip.horizontal_scroll_offset(offset.clamp(0.0, (total - width).max(0.0)));
             }
             // The strip's clip region reaches into the page margin on both
             // sides, and the tiles are indented back by the same amount, so
             // they line up with the header while the ring has room.
-            let strip_area = ui.available_rect_before_wrap().expand2(vec2(RING, 0.0));
+            let strip_area = ui.available_rect_before_wrap().expand2(vec2(ring, 0.0));
             let mut strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip_area));
             let out = strip.show_viewport(&mut strip_ui, |ui, viewport| {
                 let count = section.games.len();
-                let total = count as f32 * stride - GAP + 2.0 * RING;
+                let total = count as f32 * stride - gap + 2.0 * ring;
                 let (strip_rect, _) = ui.allocate_exact_size(
-                    vec2(total.max(0.0), tile_height + 2.0 * RING),
+                    vec2(total.max(0.0), tile_height + 2.0 * ring),
                     Sense::hover(),
                 );
                 // Only tiles inside the viewport get drawn; a row can hold
                 // the whole library.
-                let first = ((viewport.min.x - RING) / stride).floor().max(0.0) as usize;
-                let last = (((viewport.max.x - RING) / stride).ceil() as usize).min(count);
+                let first = ((viewport.min.x - ring) / stride).floor().max(0.0) as usize;
+                let last = (((viewport.max.x - ring) / stride).ceil() as usize).min(count);
                 for col in first..last {
                     let Some(game) = games.get(&section.games[col]) else {
                         continue;
                     };
                     let rect = Rect::from_min_size(
-                        strip_rect.min + vec2(RING + col as f32 * stride, RING),
+                        strip_rect.min + vec2(ring + col as f32 * stride, ring),
                         vec2(tile_width, tile_height),
                     );
                     let response =
@@ -350,15 +427,15 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                         install: installs.get(&game.id),
                         updatable: updatable.contains(&game.id),
                     };
-                    draw_tile(ui, rect, cover_height, tile, animation);
+                    draw_tile(ui, m, rect, cover_height, tile, animation);
                 }
             });
             // The strip lives in a child ui; move the parent's cursor past it.
-            ui.add_space(tile_height + 2.0 * RING);
+            ui.add_space(tile_height + 2.0 * ring);
             rows.hscroll[row] = out.state.offset.x;
             rows.hmax[row] = (out.content_size.x - out.inner_rect.width()).max(0.0);
             rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
-            ui.add_space(SECTION_GAP - 6.0);
+            ui.add_space(m.section_gap - m.space(6.0));
         }
     });
     rows.vscroll = output.state.offset.y;
@@ -469,7 +546,14 @@ struct Tile<'a> {
     updatable: bool,
 }
 
-fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option<&mut Playing>) {
+fn draw_tile(
+    ui: &Ui,
+    m: &Metrics,
+    rect: Rect,
+    cover_height: f32,
+    tile: Tile,
+    playing: Option<&mut Playing>,
+) {
     let Tile {
         game,
         focused,
@@ -500,30 +584,32 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
         // No art: the title stands in for it, wrapped inside the cover.
         let galley = ui.painter().layout(
             game.title.clone(),
-            FontId::proportional(15.0),
+            FontId::proportional(m.label),
             DIM,
-            cover.width() - 24.0,
+            cover.width() - m.space(24.0),
         );
         let pos = cover.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, DIM);
     }
     if let Some(install) = install {
         let bar = Rect::from_min_max(
-            pos2(cover.left(), cover.bottom() - 6.0),
+            pos2(cover.left(), cover.bottom() - m.space(6.0)),
             cover.right_bottom(),
         );
         progress_bar(ui, bar, install.progress as f32);
     } else if updatable {
         badge(
             ui,
-            pos2(cover.left() + 8.0, cover.bottom() - 8.0),
+            m,
+            pos2(cover.left(), cover.bottom()) + m.space(8.0) * vec2(1.0, -1.0),
             "UPDATE",
             AMBER,
         );
     } else if installed {
         badge(
             ui,
-            pos2(cover.left() + 8.0, cover.bottom() - 8.0),
+            m,
+            pos2(cover.left(), cover.bottom()) + m.space(8.0) * vec2(1.0, -1.0),
             "INSTALLED",
             GREEN,
         );
@@ -537,12 +623,12 @@ fn draw_tile(ui: &Ui, rect: Rect, cover_height: f32, tile: Tile, playing: Option
         );
     }
     let title_rect = Rect::from_min_max(
-        pos2(rect.left(), cover.bottom() + 6.0),
+        pos2(rect.left(), cover.bottom() + m.space(6.0)),
         pos2(rect.right(), rect.bottom()),
     );
     let galley = ui.painter().layout(
         game.title.clone(),
-        FontId::proportional(13.5),
+        FontId::proportional(m.caption),
         if focused { TEXT } else { DIM },
         f32::INFINITY,
     );
@@ -602,48 +688,50 @@ fn paint_texture(ui: &Ui, texture: egui::load::SizedTexture, rect: Rect, radius:
         .paint_at(ui, rect);
 }
 
-pub fn heading(ui: &mut Ui, text: &str) {
+pub fn heading(ui: &mut Ui, m: &Metrics, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(FontId::proportional(30.0))
+            .font(FontId::proportional(m.heading))
             .color(TEXT),
     );
 }
 
-pub fn subtle(ui: &mut Ui, text: &str) {
+pub fn subtle(ui: &mut Ui, m: &Metrics, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(FontId::proportional(14.0))
+            .font(FontId::proportional(m.body))
             .color(DIM),
     );
 }
 
-pub fn error(ui: &mut Ui, text: &str) {
+pub fn error(ui: &mut Ui, m: &Metrics, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(FontId::proportional(14.0))
+            .font(FontId::proportional(m.body))
             .color(Color32::from_rgb(0xff, 0x6e, 0x6e)),
     );
 }
 
-pub fn centered_spinner(ui: &mut Ui) {
+pub fn centered_spinner(ui: &mut Ui, m: &Metrics) {
     let rect = ui.available_rect_before_wrap();
     let center = rect.center();
+    let size = m.space(40.0);
     let mut child = ui.new_child(
-        egui::UiBuilder::new().max_rect(Rect::from_center_size(center, vec2(40.0, 40.0))),
+        egui::UiBuilder::new().max_rect(Rect::from_center_size(center, vec2(size, size))),
     );
-    child.add(egui::Spinner::new().size(32.0).color(DIM));
+    child.add(egui::Spinner::new().size(m.space(32.0)).color(DIM));
 }
 
 /// A small label anchored by its bottom-left corner.
-fn badge(ui: &Ui, bottom_left: egui::Pos2, text: &str, fill: Color32) {
+fn badge(ui: &Ui, m: &Metrics, bottom_left: egui::Pos2, text: &str, fill: Color32) {
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_string(), FontId::proportional(9.5), BG);
-    let size = galley.size() + vec2(12.0, 6.0);
+        .layout_no_wrap(text.to_string(), FontId::proportional(m.badge), BG);
+    let pad = m.space(6.0) * vec2(1.0, 0.5);
+    let size = galley.size() + 2.0 * pad;
     let rect = Rect::from_min_size(bottom_left - vec2(0.0, size.y), size);
     ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
-    ui.painter().galley(rect.min + vec2(6.0, 3.0), galley, BG);
+    ui.painter().galley(rect.min + pad, galley, BG);
 }
 
 /// What the detail page offers for a game, in button order.
@@ -707,7 +795,7 @@ pub struct GameView<'a> {
     pub focused_button: usize,
 }
 
-pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
+pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
     let GameView {
         game,
         caves,
@@ -718,10 +806,11 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
     } = view;
     let buttons = game_buttons(game, caves, install, running, update);
     let width = ui.available_width();
-    let cover_width = (width * 0.42).min(420.0);
+    let cover_width = (width * 0.42).min(m.space(420.0));
     let cover_height = cover_width / COVER_ASPECT;
+    let column_gap = m.space(28.0);
     ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 28.0;
+        ui.spacing_mut().item_spacing.x = column_gap;
         let (cover, _) = ui.allocate_exact_size(vec2(cover_width, cover_height), Sense::hover());
         let radius = CornerRadius::same(8);
         let url = game
@@ -732,21 +821,21 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
             ui.painter().rect_filled(cover, radius, TILE_BG);
         }
         ui.vertical(|ui| {
-            ui.set_max_width(width - cover_width - 28.0);
+            ui.set_max_width(width - cover_width - column_gap);
             ui.label(
                 egui::RichText::new(&game.title)
-                    .font(FontId::proportional(26.0))
+                    .font(FontId::proportional(m.title))
                     .color(TEXT),
             );
             if let Some(text) = game.short_text.as_deref().filter(|t| !t.is_empty()) {
-                ui.add_space(4.0);
+                ui.add_space(m.space(4.0));
                 ui.label(
                     egui::RichText::new(text)
-                        .font(FontId::proportional(14.0))
+                        .font(FontId::proportional(m.body))
                         .color(DIM),
                 );
             }
-            ui.add_space(12.0);
+            ui.add_space(m.space(12.0));
             match (install, caves.first()) {
                 (Some(install), _) => {
                     let line = if let Some(error) = &install.error {
@@ -766,10 +855,10 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
                     };
                     ui.label(
                         egui::RichText::new(line)
-                            .font(FontId::proportional(13.0))
+                            .font(FontId::proportional(m.caption))
                             .color(ACCENT),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(m.space(8.0));
                     let (bar, _) = ui.allocate_exact_size(
                         vec2(ui.available_width().min(420.0), 8.0),
                         Sense::hover(),
@@ -779,7 +868,7 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
                 (None, Some(_)) if running => {
                     ui.label(
                         egui::RichText::new("Running")
-                            .font(FontId::proportional(13.0))
+                            .font(FontId::proportional(m.caption))
                             .color(GREEN),
                     );
                 }
@@ -793,13 +882,17 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
                     }
                     ui.label(
                         egui::RichText::new(line)
-                            .font(FontId::proportional(13.0))
+                            .font(FontId::proportional(m.caption))
                             .color(GREEN),
                     );
                     if let Some(stats) = &cave.stats
                         && stats.seconds_run > 0
                     {
-                        subtle(ui, &format!("Played {}", human_duration(stats.seconds_run)));
+                        subtle(
+                            ui,
+                            m,
+                            &format!("Played {}", human_duration(stats.seconds_run)),
+                        );
                     }
                     if let Some(update) = update {
                         let name = update
@@ -816,18 +909,18 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
                         };
                         ui.label(
                             egui::RichText::new(line)
-                                .font(FontId::proportional(13.0))
+                                .font(FontId::proportional(m.caption))
                                 .color(AMBER),
                         );
                     }
                 }
-                (None, None) => subtle(ui, "Not installed"),
+                (None, None) => subtle(ui, m, "Not installed"),
             }
-            ui.add_space(20.0);
+            ui.add_space(m.space(20.0));
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.spacing_mut().item_spacing.x = m.space(12.0);
                 for (index, (label, action)) in buttons.iter().enumerate() {
-                    let response = pill(ui, label, index == focused_button, index == 0);
+                    let response = pill(ui, m, label, index == focused_button, index == 0);
                     if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
                         actions.push(Action::FocusButton(index));
                     }
@@ -840,11 +933,11 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
     });
 }
 
-fn pill(ui: &mut Ui, label: &str, focused: bool, primary: bool) -> egui::Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), FontId::proportional(16.0), TEXT);
-    let size = galley.size() + vec2(40.0, 18.0);
+fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), FontId::proportional(m.button), TEXT);
+    let size = galley.size() + m.space(1.0) * vec2(40.0, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = match (primary, focused) {
         (true, _) => ACCENT,
@@ -922,7 +1015,13 @@ impl Page {
 /// go to it while it is up; the mouse can also pick a button.
 /// Draws the modal over `screen`, which is the whole window unless a
 /// smaller display is being emulated.
-pub fn prompt(ctx: &egui::Context, screen: Rect, prompt: &Prompt, actions: &mut Vec<Action>) {
+pub fn prompt(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    prompt: &Prompt,
+    actions: &mut Vec<Action>,
+) {
     egui::Area::new(egui::Id::new("prompt-dim"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
@@ -932,7 +1031,7 @@ pub fn prompt(ctx: &egui::Context, screen: Rect, prompt: &Prompt, actions: &mut 
             ui.painter()
                 .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
         });
-    let width = (screen.width() * 0.6).clamp(320.0, 560.0);
+    let width = (screen.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
     egui::Area::new(egui::Id::new("prompt"))
         .order(egui::Order::Foreground)
         .anchor(
@@ -944,31 +1043,31 @@ pub fn prompt(ctx: &egui::Context, screen: Rect, prompt: &Prompt, actions: &mut 
                 .fill(TILE_BG)
                 .corner_radius(CornerRadius::same(10))
                 .stroke(Stroke::new(1.0, TILE_HOVER))
-                .inner_margin(24.0)
+                .inner_margin(m.space(24.0))
                 .show(ui, |ui| {
                     ui.set_width(width);
                     ui.label(
                         egui::RichText::new(&prompt.title)
-                            .font(FontId::proportional(22.0))
+                            .font(FontId::proportional(m.dialog))
                             .color(TEXT),
                     );
                     if !prompt.body.is_empty() {
-                        ui.add_space(10.0);
+                        ui.add_space(m.space(10.0));
                         egui::ScrollArea::vertical()
                             .max_height(screen.height() * 0.4)
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(&prompt.body)
-                                        .font(FontId::proportional(13.0))
+                                        .font(FontId::proportional(m.caption))
                                         .color(DIM),
                                 );
                             });
                     }
-                    ui.add_space(18.0);
+                    ui.add_space(m.space(18.0));
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(12.0, 10.0);
+                        ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
                         for (index, label) in prompt.choices.iter().enumerate() {
-                            let response = pill(ui, label, index == prompt.focus, index == 0);
+                            let response = pill(ui, m, label, index == prompt.focus, index == 0);
                             if response.hovered()
                                 && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
                             {
@@ -988,21 +1087,27 @@ pub fn prompt(ctx: &egui::Context, screen: Rect, prompt: &Prompt, actions: &mut 
 
 /// The hint bar along the bottom: a glyph and a word for each thing the
 /// current page lets the user do.
-pub fn footer(ui: &mut Ui, glyphs: &Glyphs, mode: InputMode, hints: &[(Glyph, String)]) {
+pub fn footer(
+    ui: &mut Ui,
+    m: &Metrics,
+    glyphs: &Glyphs,
+    mode: InputMode,
+    hints: &[(Glyph, String)],
+) {
     egui::Panel::bottom("footer")
         .resizable(false)
         .frame(
             egui::Frame::new()
                 .fill(BG)
-                .inner_margin(egui::Margin::symmetric(24, 10)),
+                .inner_margin(egui::Margin::symmetric(m.margin as i8, m.space(10.0) as i8)),
         )
         .show_separator_line(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = m.space(8.0);
                 for (glyph, label) in hints {
                     if let Some(texture) = glyphs.get(mode, *glyph) {
-                        let size = 22.0;
+                        let size = m.space(22.0);
                         ui.add(
                             egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                                 .fit_to_exact_size(vec2(size, size)),
@@ -1010,18 +1115,18 @@ pub fn footer(ui: &mut Ui, glyphs: &Glyphs, mode: InputMode, hints: &[(Glyph, St
                     }
                     ui.label(
                         egui::RichText::new(label)
-                            .font(FontId::proportional(13.0))
+                            .font(FontId::proportional(m.caption))
                             .color(DIM),
                     );
-                    ui.add_space(14.0);
+                    ui.add_space(m.space(14.0));
                 }
             });
         });
 }
 
 /// A round back button with a painted chevron, sized for a fingertip.
-pub fn back_button(ui: &mut Ui) -> egui::Response {
-    let size = 40.0;
+pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
+    let size = m.space(40.0);
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     let fill = if response.hovered() {
         TILE_HOVER
@@ -1030,7 +1135,7 @@ pub fn back_button(ui: &mut Ui) -> egui::Response {
     };
     ui.painter().circle_filled(rect.center(), size / 2.0, fill);
     let c = rect.center();
-    let arm = 7.0;
+    let arm = m.space(7.0);
     let points = [
         pos2(c.x + arm * 0.5, c.y - arm),
         pos2(c.x - arm * 0.5, c.y),
@@ -1042,11 +1147,11 @@ pub fn back_button(ui: &mut Ui) -> egui::Response {
 }
 
 /// A small filter toggle for the header.
-pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), FontId::proportional(13.0), TEXT);
-    let size = galley.size() + vec2(20.0, 10.0);
+pub fn chip(ui: &mut Ui, m: &Metrics, label: &str, selected: bool) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), FontId::proportional(m.caption), TEXT);
+    let size = galley.size() + m.space(1.0) * vec2(20.0, 10.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if selected {
         ACCENT
@@ -1055,7 +1160,8 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
     } else {
         TILE_BG
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(14), fill);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same((size.y / 2.0) as u8), fill);
     let color = if selected { BG } else { DIM };
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, color);
