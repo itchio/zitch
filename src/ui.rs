@@ -64,6 +64,9 @@ impl Game {
 }
 
 const HEADER_HEIGHT: f32 = 34.0;
+/// Room around a strip for the focus ring, which is painted outside the
+/// cover and would otherwise be clipped at the strip's edges.
+const RING: f32 = 6.0;
 const SECTION_GAP: f32 = 22.0;
 
 /// One carousel: a title and the library indices it shows.
@@ -285,15 +288,15 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                 .auto_shrink([false, false])
                 .scroll_source(no_drag)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .max_height(tile_height + 6.0);
+                .max_height(tile_height + 2.0 * RING);
             if let Some((swiped, offset)) = set_hscroll
                 && swiped == row
             {
                 strip = strip.horizontal_scroll_offset(offset);
             } else if follow && is_focused_row {
-                let left = focused_col as f32 * stride;
+                let left = RING + focused_col as f32 * stride;
                 let right = left + tile_width;
-                let width = ui.available_width();
+                let width = ui.available_width() + 2.0 * RING;
                 let mut offset = rows.hscroll[row];
                 if left - GAP < offset {
                     offset = left - GAP;
@@ -302,22 +305,29 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                 }
                 strip = strip.horizontal_scroll_offset(offset.max(0.0));
             }
-            let out = strip.show_viewport(ui, |ui, viewport| {
+            // The strip's clip region reaches into the page margin on both
+            // sides, and the tiles are indented back by the same amount, so
+            // they line up with the header while the ring has room.
+            let strip_area = ui.available_rect_before_wrap().expand2(vec2(RING, 0.0));
+            let mut strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip_area));
+            let out = strip.show_viewport(&mut strip_ui, |ui, viewport| {
                 let count = section.games.len();
-                let total = count as f32 * stride - GAP;
-                let (strip_rect, _) =
-                    ui.allocate_exact_size(vec2(total.max(0.0), tile_height + 6.0), Sense::hover());
+                let total = count as f32 * stride - GAP + 2.0 * RING;
+                let (strip_rect, _) = ui.allocate_exact_size(
+                    vec2(total.max(0.0), tile_height + 2.0 * RING),
+                    Sense::hover(),
+                );
                 // Only tiles inside the viewport get drawn; a row can hold
                 // the whole library.
-                let first = (viewport.min.x / stride).floor().max(0.0) as usize;
-                let last = ((viewport.max.x / stride).ceil() as usize).min(count);
+                let first = ((viewport.min.x - RING) / stride).floor().max(0.0) as usize;
+                let last = (((viewport.max.x - RING) / stride).ceil() as usize).min(count);
                 for col in first..last {
                     let index = section.games[col];
                     let Some(game) = games.get(index) else {
                         continue;
                     };
                     let rect = Rect::from_min_size(
-                        strip_rect.min + vec2(col as f32 * stride, 3.0),
+                        strip_rect.min + vec2(RING + col as f32 * stride, RING),
                         vec2(tile_width, tile_height),
                     );
                     let response =
@@ -341,6 +351,8 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                     draw_tile(ui, rect, cover_height, tile, animation);
                 }
             });
+            // The strip lives in a child ui; move the parent's cursor past it.
+            ui.add_space(tile_height + 2.0 * RING);
             rows.hscroll[row] = out.state.offset.x;
             rows.hmax[row] = (out.content_size.x - out.inner_rect.width()).max(0.0);
             rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
