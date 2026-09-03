@@ -805,8 +805,15 @@ pub fn game_detail(ui: &mut Ui, view: GameView, actions: &mut Vec<Action>) {
                             .first()
                             .and_then(|c| c.upload.as_ref())
                             .map_or("newer version", UploadExt::name);
+                        let line = if update.direct {
+                            format!("Update available: {name}")
+                        } else if update.choices.len() > 1 {
+                            format!("{} newer uploads available", update.choices.len())
+                        } else {
+                            format!("Newer upload available: {name}")
+                        };
                         ui.label(
-                            egui::RichText::new(format!("Update available: {name}"))
+                            egui::RichText::new(line)
                                 .font(FontId::proportional(13.0))
                                 .color(AMBER),
                         );
@@ -952,8 +959,8 @@ pub fn prompt(ctx: &egui::Context, prompt: &Prompt, actions: &mut Vec<Action>) {
                             });
                     }
                     ui.add_space(18.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(12.0, 10.0);
                         for (index, label) in prompt.choices.iter().enumerate() {
                             let response = pill(ui, label, index == prompt.focus, index == 0);
                             if response.hovered()

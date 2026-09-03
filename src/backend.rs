@@ -26,7 +26,9 @@ use crate::butlerd::types::{
     ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming};
-use crate::model::{Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt, UserExt};
+use crate::model::{
+    Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt, UploadExt, UserExt,
+};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -224,7 +226,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             // Same-channel updates apply themselves, as in the itch app; the
             // rest wait for the user to pick.
             for update in result.updates.iter().filter(|u| u.direct) {
-                if let Err(error) = queue_update(client, update) {
+                if let Err(error) = queue_update(client, update, 0) {
                     log::warn!("queueing update: {error:#}");
                 }
             }
@@ -297,11 +299,30 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 );
             }
             Ok(Command::Update { update }) => {
-                if let Err(error) = queue_update(&client, &update) {
-                    log::error!("{error:#}");
-                    emit.send(Event::Error(format!("{error:#}")));
+                if update.direct {
+                    if let Err(error) = queue_update(&client, &update, 0) {
+                        log::error!("{error:#}");
+                        emit.send(Event::Error(format!("{error:#}")));
+                    }
+                    refresh_downloads(&client, emit);
+                } else {
+                    // Indirect updates are butler's guesses, so the user
+                    // picks. Asking blocks on the answer, which arrives
+                    // through this loop.
+                    let prompts = prompts.clone();
+                    spawn_op(
+                        format!("update-{}", update.cave_id),
+                        Arc::clone(&daemon),
+                        emit.clone(),
+                        move |client, emit| {
+                            if let Some(choice) = pick_update(&prompts, emit, &update) {
+                                queue_update(client, &update, choice)?;
+                                refresh_downloads(client, emit);
+                            }
+                            Ok(())
+                        },
+                    );
                 }
-                refresh_downloads(&client, emit);
             }
             Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -663,11 +684,36 @@ fn queue_install(client: &Client, config: &Config, game: Game) -> Result<()> {
     Ok(())
 }
 
-fn queue_update(client: &Client, update: &GameUpdate) -> Result<()> {
+/// Asks which of an indirect update's uploads to install. `None` when the
+/// user backs out.
+fn pick_update(prompts: &Prompts, emit: &Emitter, update: &GameUpdate) -> Option<usize> {
+    let title = update.game.as_ref().map_or("game", |g| g.title.as_str());
+    let names: Vec<String> = update
+        .choices
+        .iter()
+        .map(|c| {
+            c.upload
+                .as_ref()
+                .map_or("upload", UploadExt::name)
+                .to_string()
+        })
+        .collect();
+    let mut choices: Vec<&str> = names.iter().map(String::as_str).collect();
+    choices.push("Cancel");
+    let body = format!(
+        "Newer uploads for {title} appeared after it was installed. They may be a new \
+         version or something else, like extra content. Installing one replaces the \
+         current install."
+    );
+    let picked = prompts.ask(emit, "Update?", &body, &choices)?;
+    (picked < names.len()).then_some(picked)
+}
+
+fn queue_update(client: &Client, update: &GameUpdate, choice: usize) -> Result<()> {
     let choice = update
         .choices
-        .first()
-        .ok_or_else(|| anyhow!("update for cave {} has no choices", update.cave_id))?;
+        .get(choice)
+        .ok_or_else(|| anyhow!("update for cave {} has no choice {choice}", update.cave_id))?;
     let queued = client.call(InstallQueueParams {
         cave_id: Some(update.cave_id.clone()),
         game: update.game.clone(),
