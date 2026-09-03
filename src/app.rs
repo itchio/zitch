@@ -156,7 +156,7 @@ impl App {
         Self {
             backend,
             covers,
-            gamepad: Gamepad::new(),
+            gamepad: Gamepad::new(ctx.clone()),
             glyphs: Glyphs::load(ctx),
             input_mode: InputMode::Keyboard,
             status: String::new(),
@@ -902,7 +902,8 @@ impl eframe::App for App {
             )
         });
         self.handle_keys(ctx);
-        let pad = self.gamepad.poll(ctx, &mut self.actions);
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let pad = self.gamepad.poll(focused, &mut self.actions);
         if pad {
             self.input_mode = InputMode::Gamepad;
         } else if keys {
