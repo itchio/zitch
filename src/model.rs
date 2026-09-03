@@ -2,7 +2,7 @@
 //! the generated butlerd bindings; these are the app's own.
 
 pub use crate::butlerd::types::{
-    Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Upload, User,
+    Cave, Download, DownloadProgress, Game, GameClassification, GameUpdate, Profile, Upload, User,
 };
 
 pub trait UserExt {
@@ -73,6 +73,71 @@ pub struct Prompt {
     pub focus: usize,
 }
 
+/// Which part of the library the main row shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    /// Has an upload for this operating system.
+    Playable,
+    Games,
+    /// Tools and asset packs.
+    Tools,
+    /// Soundtracks, books, comics, mods, physical games, and the rest.
+    Other,
+}
+
+impl Filter {
+    pub const ALL: [Filter; 5] = [
+        Filter::All,
+        Filter::Playable,
+        Filter::Games,
+        Filter::Tools,
+        Filter::Other,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::All => "All",
+            Filter::Playable => "Playable here",
+            Filter::Games => "Games",
+            Filter::Tools => "Tools & assets",
+            Filter::Other => "Other",
+        }
+    }
+
+    pub fn matches(self, game: &Game) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Playable => {
+                let p = &game.platforms;
+                if cfg!(target_os = "linux") {
+                    p.linux.is_some()
+                } else if cfg!(target_os = "macos") {
+                    p.osx.is_some()
+                } else {
+                    p.windows.is_some()
+                }
+            }
+            Filter::Games => game.classification == GameClassification::Game,
+            Filter::Tools => matches!(
+                game.classification,
+                GameClassification::Tool | GameClassification::Assets
+            ),
+            Filter::Other => !matches!(
+                game.classification,
+                GameClassification::Game | GameClassification::Tool | GameClassification::Assets
+            ),
+        }
+    }
+
+    pub fn next(self, step: i32) -> Filter {
+        let len = Self::ALL.len() as i32;
+        let index = Self::ALL.iter().position(|f| *f == self).unwrap_or(0) as i32;
+        Self::ALL[((index + step).rem_euclid(len)) as usize]
+    }
+}
+
 /// What the window is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
@@ -137,6 +202,14 @@ pub enum Action {
     },
     /// Focus a prompt button; the pointer is already there.
     PromptFocus(usize),
+    SetFilter(Filter),
+    /// Step through the filters, wrapping.
+    CycleFilter(i32),
+    /// Put the cursor in the search box.
+    FocusSearch,
+    /// Leave the search box, keeping its text; focus goes to the results.
+    SearchDone,
+    ClearSearch,
     Install {
         game_id: i64,
     },

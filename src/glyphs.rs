@@ -22,6 +22,7 @@ pub enum Glyph {
     Navigate,
     NavigateHorizontal,
     Tab,
+    Search,
 }
 
 pub struct Glyphs {
@@ -40,11 +41,13 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Gamepad, Navigate => "xbox_dpad_all.png",
     Gamepad, NavigateHorizontal => "xbox_dpad_horizontal.png",
     Gamepad, Tab => "xbox_rb.png",
+    Gamepad, Search => "xbox_button_color_y.png",
     Keyboard, Confirm => "keyboard_enter.png",
     Keyboard, Back => "keyboard_escape.png",
     Keyboard, Navigate => "keyboard_arrows_all.png",
     Keyboard, NavigateHorizontal => "keyboard_arrows_horizontal.png",
     Keyboard, Tab => "keyboard_tab.png",
+    Keyboard, Search => "keyboard_slash_forward.png",
 ];
 
 impl Glyphs {

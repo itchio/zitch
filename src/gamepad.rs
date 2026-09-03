@@ -116,6 +116,9 @@ fn button_action(button: Button) -> Option<Action> {
         // South is A on Xbox and Cross on PlayStation; East is B / Circle.
         Button::South => Action::Activate,
         Button::East => Action::Back,
+        Button::North => Action::FocusSearch,
+        Button::LeftTrigger => Action::CycleFilter(-1),
+        Button::RightTrigger => Action::CycleFilter(1),
         _ => return None,
     })
 }

@@ -1015,3 +1015,24 @@ pub fn back_button(ui: &mut Ui) -> egui::Response {
         .add(egui::Shape::line(points.to_vec(), Stroke::new(3.0, TEXT)));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
+/// A small filter toggle for the header.
+pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(13.0), TEXT);
+    let size = galley.size() + vec2(20.0, 10.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if selected {
+        ACCENT
+    } else if response.hovered() {
+        TILE_HOVER
+    } else {
+        TILE_BG
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(14), fill);
+    let color = if selected { BG } else { DIM };
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}

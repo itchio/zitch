@@ -8,8 +8,8 @@ use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Game, GameUpdate, InstallState,
-    Loadable, Page, Profile, Prompt, UserExt,
+    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Filter, Game, GameUpdate,
+    InstallState, Loadable, Page, Profile, Prompt, UserExt,
 };
 use crate::ui;
 
@@ -40,6 +40,12 @@ pub struct App {
     updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
     prompt: Option<Prompt>,
+    filter: Filter,
+    query: String,
+    /// Move keyboard focus into the search box on the next frame.
+    focus_search: bool,
+    /// Take keyboard focus out of the search box on the next frame.
+    blur_search: bool,
     page: Page,
     error: Option<String>,
     /// Something the user just did, shown in the header.
@@ -73,6 +79,8 @@ pub enum Step {
     Wait(Duration),
     /// Write the screenshot now, mid-script, instead of at the end.
     Capture,
+    /// Type into the search box.
+    Search(String),
 }
 
 const COVER_GRACE: Duration = Duration::from_secs(3);
@@ -104,6 +112,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
+            "tab" => Ok(Step::Act(Action::CycleFilter(1))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "prompt" => Ok(Step::Act(Action::Answer {
@@ -115,6 +124,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                     Ok(Step::Act(Action::FocusIndex(index)))
                 } else if let Some(ms) = other.strip_prefix("wait:").and_then(|n| n.parse().ok()) {
                     Ok(Step::Wait(Duration::from_millis(ms)))
+                } else if let Some(text) = other.strip_prefix("search:") {
+                    Ok(Step::Search(text.to_string()))
                 } else {
                     Err(format!("unknown script step {other:?}"))
                 }
@@ -155,6 +166,10 @@ impl App {
             running: Default::default(),
             updates: Default::default(),
             prompt: None,
+            filter: Filter::default(),
+            query: String::new(),
+            focus_search: false,
+            blur_search: false,
             page: Page::Library,
             error: None,
             notice: None,
@@ -164,20 +179,52 @@ impl App {
         }
     }
 
+    fn search_id() -> egui::Id {
+        egui::Id::new("search")
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
+        let typing = ctx.memory(|m| m.has_focus(Self::search_id()));
         ctx.input_mut(|input| {
-            let mut key = |key: Key, action: Action| {
-                if input.consume_key(Modifiers::NONE, key) {
+            let mut key = |modifiers: Modifiers, key: Key, action: Action| {
+                if input.consume_key(modifiers, key) {
                     self.actions.push(action);
                 }
             };
-            key(Key::ArrowUp, Action::MoveFocus(Direction::Up));
-            key(Key::ArrowDown, Action::MoveFocus(Direction::Down));
-            key(Key::ArrowLeft, Action::MoveFocus(Direction::Left));
-            key(Key::ArrowRight, Action::MoveFocus(Direction::Right));
-            key(Key::Enter, Action::Activate);
-            key(Key::Escape, Action::Back);
+            if typing {
+                // The text box owns the arrows and letters; only leaving it
+                // is ours.
+                key(Modifiers::NONE, Key::Enter, Action::SearchDone);
+                key(Modifiers::NONE, Key::Escape, Action::ClearSearch);
+                key(Modifiers::NONE, Key::ArrowDown, Action::SearchDone);
+                return;
+            }
+            key(
+                Modifiers::NONE,
+                Key::ArrowUp,
+                Action::MoveFocus(Direction::Up),
+            );
+            key(
+                Modifiers::NONE,
+                Key::ArrowDown,
+                Action::MoveFocus(Direction::Down),
+            );
+            key(
+                Modifiers::NONE,
+                Key::ArrowLeft,
+                Action::MoveFocus(Direction::Left),
+            );
+            key(
+                Modifiers::NONE,
+                Key::ArrowRight,
+                Action::MoveFocus(Direction::Right),
+            );
+            key(Modifiers::NONE, Key::Enter, Action::Activate);
+            key(Modifiers::NONE, Key::Escape, Action::Back);
+            key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
+            key(Modifiers::NONE, Key::Tab, Action::CycleFilter(1));
+            key(Modifiers::SHIFT, Key::Tab, Action::CycleFilter(-1));
         });
     }
 
@@ -298,7 +345,35 @@ impl App {
                     }
                 }
             },
+            Action::SetFilter(filter) => {
+                if self.filter != filter {
+                    self.filter = filter;
+                    self.rebuild_sections();
+                }
+            }
+            Action::CycleFilter(step) => {
+                if self.page.is_library() {
+                    self.actions.push(Action::SetFilter(self.filter.next(step)));
+                }
+            }
+            Action::FocusSearch => {
+                if self.page.is_library() {
+                    self.focus_search = true;
+                }
+            }
+            Action::SearchDone => {
+                self.blur_search = true;
+                self.rows.follow = true;
+            }
+            Action::ClearSearch => {
+                self.blur_search = true;
+                if !self.query.is_empty() {
+                    self.query.clear();
+                    self.rebuild_sections();
+                }
+            }
             Action::Back => match self.page {
+                Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library => self.notice = None,
                 Page::Game { index, .. } => {
                     self.rows.focus_game(index);
@@ -395,6 +470,27 @@ impl App {
         let Some(games) = self.games.get() else {
             return;
         };
+        let filter = self.filter;
+        let query = self.query.trim().to_lowercase();
+        if !query.is_empty() {
+            // Searching narrows the whole screen to one row of matches.
+            let matches: Vec<usize> = games
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| filter.matches(g) && g.title.to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect();
+            let title = match matches.len() {
+                0 => "No matches".to_string(),
+                1 => "1 match".to_string(),
+                n => format!("{n} matches"),
+            };
+            self.rows.set_sections(vec![ui::Section {
+                title,
+                games: matches,
+            }]);
+            return;
+        }
         let index_of: std::collections::HashMap<i64, usize> =
             games.iter().enumerate().map(|(i, g)| (g.id, i)).collect();
         let mut sections = Vec::new();
@@ -464,8 +560,16 @@ impl App {
         }
 
         sections.push(ui::Section {
-            title: "All games".into(),
-            games: (0..games.len()).collect(),
+            title: match filter {
+                Filter::All => "All games".to_string(),
+                other => other.label().to_string(),
+            },
+            games: games
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| filter.matches(g))
+                .map(|(i, _)| i)
+                .collect(),
         });
         self.rows.set_sections(sections);
     }
@@ -565,6 +669,10 @@ impl App {
         if loaded && let Some(step) = shot.script.pop_front() {
             match step {
                 Step::Act(action) => self.actions.push(action),
+                Step::Search(text) => {
+                    self.query = text;
+                    self.rebuild_sections();
+                }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
                 Step::Capture => {
                     shot.capture_pending = true;
@@ -712,6 +820,8 @@ impl App {
             Page::Library => vec![
                 (Glyph::Navigate, "Browse".to_string()),
                 (Glyph::Confirm, "Open".to_string()),
+                (Glyph::Tab, "Filter".to_string()),
+                (Glyph::Search, "Search".to_string()),
             ],
             Page::Game { index, button } => {
                 let mut hints = Vec::new();
@@ -798,6 +908,36 @@ impl eframe::App for App {
                         ui::subtle(ui, &format!("{} games", games.len()));
                     }
                 });
+                if self.page.is_library() && self.games.get().is_some() {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        for filter in Filter::ALL {
+                            if ui::chip(ui, filter.label(), filter == self.filter).clicked() {
+                                self.actions.push(Action::SetFilter(filter));
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let id = Self::search_id();
+                            if std::mem::take(&mut self.blur_search) {
+                                ui.memory_mut(|m| m.surrender_focus(id));
+                            }
+                            let edit = ui.add(
+                                egui::TextEdit::singleline(&mut self.query)
+                                    .id(id)
+                                    .hint_text("Search")
+                                    .desired_width(200.0)
+                                    .font(egui::FontId::proportional(15.0)),
+                            );
+                            if std::mem::take(&mut self.focus_search) {
+                                edit.request_focus();
+                            }
+                            if edit.changed() {
+                                self.rebuild_sections();
+                            }
+                        });
+                    });
+                }
                 match (&self.games, &self.notice) {
                     (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, notice),
                     (Loadable::Loaded(_), None) => ui::subtle(ui, ""),
