@@ -7,7 +7,7 @@ mod images;
 mod model;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
@@ -15,9 +15,11 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "zitch", version, about)]
 struct Cli {
-    /// Path to the butler binary. Defaults to `butler` on PATH.
-    #[arg(long, env = "ZITCH_BUTLER", default_value = "butler")]
-    butler: PathBuf,
+    /// Path to the butler binary. Defaults to the one the itch app installed
+    /// under the config directory (see --app-name), or `butler` on PATH when
+    /// BROTH_USE_LOCAL includes `butler`, as with the itch app.
+    #[arg(long, env = "ZITCH_BUTLER")]
+    butler: Option<PathBuf>,
 
     /// Which config directory to use: `~/.config/<name>`, laid out like the
     /// itch app's. `itch` or `kitch` reuses that app's butler database and
@@ -82,8 +84,16 @@ fn main() -> eframe::Result<()> {
             }
         }
     });
+    let butler = match cli.butler.map(Ok).unwrap_or_else(|| find_butler(&config_dir)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    log::info!("using butler at {}", butler.display());
     let config = backend::Config {
-        butler: cli.butler,
+        butler,
         dbpath,
         api_key,
         profile_id: cli.profile_id,
@@ -119,4 +129,39 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app::App::new(backend, covers, &cc.egui_ctx, shot)))
         }),
     )
+}
+
+/// Finds butler the way the itch app's broth does: the version named by
+/// `broth/butler/.chosen-version` in the config directory, unless
+/// `BROTH_USE_LOCAL` lists `butler`, in which case the one on PATH.
+fn find_butler(config_dir: &Path) -> Result<PathBuf, String> {
+    let use_local = std::env::var("BROTH_USE_LOCAL")
+        .map(|list| list.split(',').any(|name| name.trim() == "butler"))
+        .unwrap_or(false);
+    if use_local {
+        log::info!("BROTH_USE_LOCAL includes butler; using butler on PATH");
+        return Ok(PathBuf::from("butler"));
+    }
+    let broth = config_dir.join("broth").join("butler");
+    let marker = broth.join(".chosen-version");
+    let version = std::fs::read_to_string(&marker).map_err(|error| {
+        format!(
+            "no butler installed under {}: reading {}: {error}\n\
+             Point --app-name at an itch app install (itch or kitch), pass \
+             --butler, or set BROTH_USE_LOCAL=butler to use the one on PATH.",
+            broth.display(),
+            marker.display()
+        )
+    })?;
+    let exe = if cfg!(windows) { "butler.exe" } else { "butler" };
+    let path = broth.join("versions").join(version.trim()).join(exe);
+    if !path.is_file() {
+        return Err(format!(
+            "{} names version {} but {} does not exist",
+            marker.display(),
+            version.trim(),
+            path.display()
+        ));
+    }
+    Ok(path)
 }
