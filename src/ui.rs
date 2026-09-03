@@ -303,7 +303,10 @@ pub fn library(ui: &mut Ui, view: LibraryView, rows: &mut Rows, actions: &mut Ve
                 } else if right + GAP > offset + width {
                     offset = right + GAP - width;
                 }
-                strip = strip.horizontal_scroll_offset(offset.max(0.0));
+                // egui shows an offset past the end for a frame before
+                // clamping it, which reads as a shake at the ends of the row.
+                let total = section.games.len() as f32 * stride - GAP + 2.0 * RING;
+                strip = strip.horizontal_scroll_offset(offset.clamp(0.0, (total - width).max(0.0)));
             }
             // The strip's clip region reaches into the page margin on both
             // sides, and the tiles are indented back by the same amount, so
