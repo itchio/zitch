@@ -456,8 +456,13 @@ impl App {
                 self.backend.send(Command::Retry { download_id });
             }
             Action::Uninstall { cave_id } => {
-                self.notice = Some("Uninstalling".into());
-                self.backend.send(Command::Uninstall { cave_id });
+                let title = self
+                    .caves
+                    .iter()
+                    .find(|cave| cave.id == cave_id)
+                    .and_then(|cave| cave.game.as_ref())
+                    .map_or_else(|| "this game".to_string(), |game| game.title.clone());
+                self.backend.send(Command::Uninstall { cave_id, title });
             }
         }
     }

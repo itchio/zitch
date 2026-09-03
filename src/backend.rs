@@ -54,8 +54,10 @@ pub enum Command {
     Retry {
         download_id: String,
     },
+    /// Asks first; the title names the game in the question.
     Uninstall {
         cave_id: String,
+        title: String,
     },
     Launch {
         cave_id: String,
@@ -264,12 +266,23 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
                 refresh_downloads(&client, emit);
             }
-            Ok(Command::Uninstall { cave_id }) => {
+            Ok(Command::Uninstall { cave_id, title }) => {
+                let prompts = prompts.clone();
                 spawn_op(
                     format!("uninstall-{cave_id}"),
                     Arc::clone(&daemon),
                     emit.clone(),
                     move |client, emit| {
+                        // Cancel comes first so a reflex press keeps the game.
+                        let confirmed = prompts.ask(
+                            emit,
+                            &format!("Uninstall {title}?"),
+                            "Removes the installed files. Anything the game saved elsewhere stays.",
+                            &["Cancel", "Uninstall"],
+                        ) == Some(1);
+                        if !confirmed {
+                            return Ok(());
+                        }
                         let result = client
                             .call(UninstallPerformParams {
                                 cave_id: cave_id.clone(),
