@@ -58,6 +58,8 @@ pub struct App {
     shot: Option<Shot>,
     /// Pretend the display is this many points, whatever the window size.
     emulate: Option<(f32, f32)>,
+    /// Force the cover policy instead of picking it by screen size.
+    low_spec: Option<bool>,
 }
 
 /// A debugging capture: write the window to a PNG once the library has
@@ -146,12 +148,12 @@ impl App {
         ctx: &egui::Context,
         zoom: f32,
         emulate: Option<(f32, f32)>,
+        low_spec: Option<bool>,
         shot: Option<Shot>,
     ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = ui::BG;
         ctx.set_visuals(visuals);
-        covers.install(ctx);
         ctx.set_zoom_factor(zoom);
         Self {
             backend,
@@ -184,6 +186,7 @@ impl App {
             rows: ui::Rows::default(),
             shot,
             emulate,
+            low_spec,
         }
     }
 
@@ -940,7 +943,12 @@ impl eframe::App for App {
 
 impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
-        let m = ui::Metrics::for_screen(ui.max_rect());
+        let screen = ui.max_rect();
+        let m = ui::Metrics::for_screen(screen);
+        self.covers.set_policy(crate::images::Policy::for_screen(
+            screen.height(),
+            self.low_spec,
+        ));
         if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
             ui::footer(ui, &m, &self.glyphs, self.input_mode, &hints);
@@ -1055,6 +1063,7 @@ impl App {
                                     &m,
                                     ui::GameView {
                                         game,
+                                        covers: &self.covers,
                                         caves: &caves,
                                         install: self.installs.get(&game.id),
                                         running,
@@ -1073,6 +1082,7 @@ impl App {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), prompt, &mut self.actions);
         }
         self.apply_actions();
+        self.covers.end_frame();
         if !self.installs.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }

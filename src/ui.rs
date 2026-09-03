@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
 use crate::glyphs::{Glyph, Glyphs, InputMode};
-use crate::images::{Animation, CoverLoader};
+use crate::images::{Animation, CoverLoader, Variant};
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, UploadExt,
 };
@@ -427,7 +427,7 @@ pub fn library(
                         install: installs.get(&game.id),
                         updatable: updatable.contains(&game.id),
                     };
-                    draw_tile(ui, m, rect, cover_height, tile, animation);
+                    draw_tile(ui, m, covers, rect, cover_height, tile, animation);
                 }
             });
             // The strip lives in a child ui; move the parent's cursor past it.
@@ -549,6 +549,7 @@ struct Tile<'a> {
 fn draw_tile(
     ui: &Ui,
     m: &Metrics,
+    covers: &CoverLoader,
     rect: Rect,
     cover_height: f32,
     tile: Tile,
@@ -575,7 +576,7 @@ fn draw_tile(
                 .still_cover_url
                 .as_deref()
                 .or(game.cover_url.as_deref());
-            url.is_some_and(|url| paint_cover(ui, url, cover, radius))
+            url.is_some_and(|url| paint_cover(ui, covers, url, Variant::Thumb, cover, radius))
         }
     };
     if !painted {
@@ -660,13 +661,23 @@ fn paint_frame(ui: &Ui, playing: &mut Playing, rect: Rect, radius: CornerRadius)
 
 /// Paints the cover cropped to fill `rect`, or returns false while it is
 /// still loading or has failed.
-fn paint_cover(ui: &Ui, url: &str, rect: Rect, radius: CornerRadius) -> bool {
-    let image = egui::Image::new(url);
-    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), rect.size())
-    else {
+fn paint_cover(
+    ui: &Ui,
+    covers: &CoverLoader,
+    url: &str,
+    variant: Variant,
+    rect: Rect,
+    radius: CornerRadius,
+) -> bool {
+    let Some(texture) = covers.texture(ui.ctx(), url, variant) else {
         return false;
     };
-    paint_texture(ui, texture, rect, radius);
+    paint_texture(
+        ui,
+        egui::load::SizedTexture::from_handle(&texture),
+        rect,
+        radius,
+    );
     true
 }
 
@@ -788,6 +799,7 @@ pub fn game_buttons(
 /// Everything the detail page reads while drawing.
 pub struct GameView<'a> {
     pub game: &'a Game,
+    pub covers: &'a CoverLoader,
     pub caves: &'a [&'a Cave],
     pub install: Option<&'a InstallState>,
     pub running: bool,
@@ -798,6 +810,7 @@ pub struct GameView<'a> {
 pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
     let GameView {
         game,
+        covers,
         caves,
         install,
         running,
@@ -817,7 +830,7 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
             .still_cover_url
             .as_deref()
             .or(game.cover_url.as_deref());
-        if !url.is_some_and(|url| paint_cover(ui, url, cover, radius)) {
+        if !url.is_some_and(|url| paint_cover(ui, covers, url, Variant::Detail, cover, radius)) {
             ui.painter().rect_filled(cover, radius, TILE_BG);
         }
         ui.vertical(|ui| {

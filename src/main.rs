@@ -66,6 +66,12 @@ struct Cli {
     #[arg(long, value_name = "WxH", value_parser = parse_size)]
     emulate: Option<(f32, f32)>,
 
+    /// Use the handheld cover policy (small thumbnails, tight memory and
+    /// disk budgets, no animated covers) regardless of screen size, or
+    /// `--low-spec=false` to never use it.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    low_spec: Option<bool>,
+
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
@@ -93,7 +99,10 @@ fn main() -> eframe::Result<()> {
     let base_dirs = directories::BaseDirs::new().expect("a home directory");
     let config_dir = base_dirs.config_dir().join(&cli.app_name);
     // Covers are the same whichever app's database is in use.
-    let covers = images::CoverLoader::new(base_dirs.cache_dir().join("zitch").join("covers"));
+    let covers = images::CoverLoader::new(
+        base_dirs.cache_dir().join("zitch").join("covers"),
+        images::Policy::for_screen(cli.emulate.unwrap_or(cli.window).1, cli.low_spec),
+    );
     let dbpath = cli
         .dbpath
         .unwrap_or_else(|| config_dir.join("db").join("butler.db"));
@@ -108,7 +117,11 @@ fn main() -> eframe::Result<()> {
             }
         }
     });
-    let butler = match cli.butler.map(Ok).unwrap_or_else(|| find_butler(&config_dir)) {
+    let butler = match cli
+        .butler
+        .map(Ok)
+        .unwrap_or_else(|| find_butler(&config_dir))
+    {
         Ok(path) => path,
         Err(error) => {
             eprintln!("{error}");
@@ -156,6 +169,7 @@ fn main() -> eframe::Result<()> {
                 &cc.egui_ctx,
                 cli.zoom,
                 cli.emulate,
+                cli.low_spec,
                 shot,
             )))
         }),
@@ -184,7 +198,11 @@ fn find_butler(config_dir: &Path) -> Result<PathBuf, String> {
             marker.display()
         )
     })?;
-    let exe = if cfg!(windows) { "butler.exe" } else { "butler" };
+    let exe = if cfg!(windows) {
+        "butler.exe"
+    } else {
+        "butler"
+    };
     let path = broth.join("versions").join(version.trim()).join(exe);
     if !path.is_file() {
         return Err(format!(
