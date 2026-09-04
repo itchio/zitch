@@ -715,6 +715,14 @@ pub fn subtle(ui: &mut Ui, m: &Metrics, text: &str) {
     );
 }
 
+pub fn offline(ui: &mut Ui, m: &Metrics) {
+    ui.label(
+        egui::RichText::new("Offline")
+            .font(FontId::proportional(m.body))
+            .color(AMBER),
+    );
+}
+
 pub fn error(ui: &mut Ui, m: &Metrics, text: &str) {
     ui.label(
         egui::RichText::new(text)
@@ -752,6 +760,7 @@ pub fn game_buttons(
     install: Option<&InstallState>,
     running: bool,
     update: Option<&GameUpdate>,
+    online: bool,
 ) -> Vec<(&'static str, Action)> {
     if running {
         return Vec::new();
@@ -776,7 +785,7 @@ pub fn game_buttons(
                     cave_id: cave.id.clone(),
                 },
             )];
-            if update.is_some() {
+            if update.is_some() && online {
                 buttons.push((
                     "Update",
                     Action::Update {
@@ -792,7 +801,8 @@ pub fn game_buttons(
             ));
             buttons
         }
-        None => vec![("Install", Action::Install { game_id: game.id })],
+        None if online => vec![("Install", Action::Install { game_id: game.id })],
+        None => Vec::new(),
     }
 }
 
@@ -804,6 +814,7 @@ pub struct GameView<'a> {
     pub install: Option<&'a InstallState>,
     pub running: bool,
     pub update: Option<&'a GameUpdate>,
+    pub online: bool,
     pub focused_button: usize,
 }
 
@@ -815,9 +826,10 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
         install,
         running,
         update,
+        online,
         focused_button,
     } = view;
-    let buttons = game_buttons(game, caves, install, running, update);
+    let buttons = game_buttons(game, caves, install, running, update, online);
     let width = ui.available_width();
     let cover_width = (width * 0.42).min(m.space(420.0));
     let cover_height = cover_width / COVER_ASPECT;
@@ -927,7 +939,8 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                         );
                     }
                 }
-                (None, None) => subtle(ui, m, "Not installed"),
+                (None, None) if online => subtle(ui, m, "Not installed"),
+                (None, None) => subtle(ui, m, "Not installed; offline"),
             }
             ui.add_space(m.space(20.0));
             ui.horizontal(|ui| {

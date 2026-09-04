@@ -41,9 +41,21 @@ pub trait ServerRequest: Request {}
 /// A running `butler daemon` process. Killed when dropped; `--destiny-pid`
 /// also reaps it if this process dies first.
 pub struct Daemon {
-    child: Child,
+    child: Mutex<Child>,
     pub address: String,
     pub secret: String,
+}
+
+/// butlerd's code for a request that failed for want of a network.
+pub const CODE_NETWORK_DISCONNECTED: i64 = 9000;
+
+/// Whether a call failed because butler could not reach itch.io.
+pub fn is_offline(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<RpcError>()
+            .is_some_and(|rpc| rpc.code == CODE_NETWORK_DISCONNECTED)
+    })
 }
 
 #[derive(Deserialize)]
@@ -112,7 +124,7 @@ impl Daemon {
                 })
                 .expect("spawning stdout drain");
             return Ok(Self {
-                child,
+                child: Mutex::new(child),
                 address: tcp.address,
                 secret,
             });
@@ -120,10 +132,19 @@ impl Daemon {
     }
 }
 
+impl Daemon {
+    /// Whether the process is still running.
+    pub fn alive(&self) -> bool {
+        let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
+        matches!(child.try_wait(), Ok(None))
+    }
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

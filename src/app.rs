@@ -43,6 +43,8 @@ pub struct App {
     updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
     prompt: Option<Prompt>,
+    /// Whether butler can reach itch.io; installs and updates need it.
+    online: bool,
     filter: Filter,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
@@ -175,6 +177,7 @@ impl App {
             running: Default::default(),
             updates: Default::default(),
             prompt: None,
+            online: true,
             filter: Filter::default(),
             query: String::new(),
             focus_search: false,
@@ -323,6 +326,7 @@ impl App {
                         self.installs.get(&game.id),
                         self.is_running(game.id),
                         self.update_for(game.id),
+                        self.online,
                     )
                     .len()
                     .max(1);
@@ -366,6 +370,7 @@ impl App {
                         self.installs.get(&game.id),
                         self.is_running(game.id),
                         self.update_for(game.id),
+                        self.online,
                     );
                     if let Some((_, action)) = buttons.get(button) {
                         self.actions.push(action.clone());
@@ -816,6 +821,15 @@ impl App {
                         Err(error) => format!("Couldn't launch: {error}"),
                     });
                 }
+                Event::Online(online) => {
+                    if self.online && !online {
+                        self.notice =
+                            Some("Offline: installs and updates need a connection".into());
+                    } else if !self.online && online {
+                        self.notice = Some("Back online".into());
+                    }
+                    self.online = online;
+                }
                 Event::Prompt(prompt) => self.prompt = Some(prompt),
                 Event::PromptClosed(id) => {
                     if self.prompt.as_ref().is_some_and(|p| p.id == id) {
@@ -872,6 +886,7 @@ impl App {
                         self.installs.get(&game.id),
                         self.is_running(game.id),
                         self.update_for(game.id),
+                        self.online,
                     );
                     if buttons.len() > 1 {
                         hints.push((Glyph::NavigateHorizontal, "Choose".to_string()));
@@ -989,6 +1004,10 @@ impl App {
                             ui::subtle(ui, &m, &format!("{} installed", self.installed.len()));
                         }
                     }
+                    if !self.online {
+                        ui.add_space(m.space(12.0));
+                        ui::offline(ui, &m);
+                    }
                 });
                 if self.page.is_library() && self.owned.get().is_some() {
                     ui.add_space(m.space(10.0));
@@ -1068,6 +1087,7 @@ impl App {
                                         install: self.installs.get(&game.id),
                                         running,
                                         update: update.as_ref(),
+                                        online: self.online,
                                         focused_button: button,
                                     },
                                     &mut self.actions,

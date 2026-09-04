@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -25,7 +25,7 @@ use crate::butlerd::types::{
     PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
 };
-use crate::butlerd::{Client, Daemon, Incoming};
+use crate::butlerd::{Client, Daemon, Incoming, is_offline};
 use crate::model::{
     Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt, UploadExt, UserExt,
 };
@@ -107,8 +107,28 @@ pub enum Event {
     /// A question to show until [`Event::PromptClosed`] or an answer.
     Prompt(Prompt),
     PromptClosed(u64),
+    /// Whether butler can reach itch.io. Starts unknown and is reported once
+    /// the first network call settles, then whenever it changes.
+    Online(bool),
     Error(String),
 }
+
+/// The current daemon, replaced when it has to be restarted. Everything
+/// that opens a connection goes through here so it finds the live one.
+type Link = Arc<Mutex<Arc<Daemon>>>;
+
+fn current(link: &Link) -> Arc<Daemon> {
+    Arc::clone(&link.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
+fn connect(link: &Link) -> Result<Client> {
+    Client::connect(&current(link))
+}
+
+/// How often to look for the network again while offline.
+const PROBE_EVERY: Duration = Duration::from_secs(60);
+/// How long to wait before trying to start butler again after it died.
+const RESPAWN_DELAY: Duration = Duration::from_secs(5);
 
 /// Repaints the window when the backend has news. egui only repaints on
 /// input, so without this a reply would sit unseen until the mouse moved.
@@ -194,9 +214,15 @@ impl Emitter {
 
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
-    let daemon = Arc::new(Daemon::spawn(&config.butler, &config.dbpath)?);
-    let client = Client::connect(&daemon)?;
-    emit.status(format!("Connected to butlerd at {}", daemon.address));
+    let link: Link = Arc::new(Mutex::new(Arc::new(Daemon::spawn(
+        &config.butler,
+        &config.dbpath,
+    )?)));
+    let mut client = connect(&link)?;
+    emit.status(format!(
+        "Connected to butlerd at {}",
+        current(&link).address
+    ));
 
     let profile = sign_in(&client, &config, emit)?;
     let name = profile.user.as_ref().map_or("?", UserExt::name);
@@ -204,47 +230,56 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     emit.send(Event::SignedIn(profile.clone()));
 
     emit.status("Loading library");
+    // butler answers from its cache, so this works offline too.
     let (games, stale) = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
     refresh_caves(&client, emit);
     refresh_downloads(&client, emit);
-    if stale {
-        // The cached list is shown already; the itch app also refetches
-        // when butler flags it stale, so new purchases appear.
-        let (games, _) = owned_games(&client, profile.id, true)?;
-        emit.send(Event::OwnedGames(games));
-    }
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let driver = spawn_driver(Arc::clone(&daemon), emit.clone(), Arc::clone(&stopping));
+    let driver = spawn_driver(Arc::clone(&link), emit.clone(), Arc::clone(&stopping));
     let prompts = Prompts::default();
     let config = Arc::new(config);
-
-    spawn_op(
-        "check-updates".into(),
-        Arc::clone(&daemon),
-        emit.clone(),
-        |client, emit| {
-            let result = client.call(CheckUpdateParams::default())?;
-            for warning in &result.warnings {
-                log::warn!("update check: {warning}");
-            }
-            log::info!("{} updates available", result.updates.len());
-            // Same-channel updates apply themselves, as in the itch app; the
-            // rest wait for the user to pick.
-            for update in result.updates.iter().filter(|u| u.direct) {
-                if let Err(error) = queue_update(client, update, 0) {
-                    log::warn!("queueing update: {error:#}");
-                }
-            }
-            emit.send(Event::Updates(result.updates));
-            refresh_downloads(client, emit);
-            Ok(())
-        },
-    );
+    let sync = Sync {
+        profile_id: profile.id,
+        online: Arc::new(AtomicBool::new(true)),
+        stale: Arc::new(AtomicBool::new(stale)),
+    };
+    sync.spawn(&link, emit);
+    let mut next_probe = Instant::now() + PROBE_EVERY;
 
     loop {
+        // Anything can take butler down: the kernel's memory killer on a
+        // small device, a crash, a firmware reaping background processes.
+        if !current(&link).alive() {
+            emit.status("butler exited; restarting");
+            match Daemon::spawn(&config.butler, &config.dbpath) {
+                Ok(daemon) => {
+                    *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
+                    client = connect(&link)?;
+                    if let Err(error) = client.call(ProfileUseSavedLoginParams {
+                        profile_id: profile.id,
+                    }) {
+                        log::warn!("signing in again: {error:#}");
+                    }
+                    emit.status("butler restarted");
+                    refresh_caves(&client, emit);
+                    refresh_downloads(&client, emit);
+                    // Whatever the old daemon was checking died with it.
+                    sync.spawn(&link, emit);
+                }
+                Err(error) => {
+                    emit.send(Event::Error(format!("restarting butler: {error:#}")));
+                    std::thread::sleep(RESPAWN_DELAY);
+                    continue;
+                }
+            }
+        }
+        if !sync.online.load(Ordering::Relaxed) && Instant::now() >= next_probe {
+            sync.spawn(&link, emit);
+            next_probe = Instant::now() + PROBE_EVERY;
+        }
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Command::Install { game }) => {
@@ -270,7 +305,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 let prompts = prompts.clone();
                 spawn_op(
                     format!("uninstall-{cave_id}"),
-                    Arc::clone(&daemon),
+                    Arc::clone(&link),
                     emit.clone(),
                     move |client, emit| {
                         // Cancel comes first so a reflex press keeps the game.
@@ -302,7 +337,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 let profile_id = profile.id;
                 spawn_op(
                     format!("launch-{cave_id}"),
-                    Arc::clone(&daemon),
+                    Arc::clone(&link),
                     emit.clone(),
                     move |client, emit| {
                         let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
@@ -331,7 +366,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     let prompts = prompts.clone();
                     spawn_op(
                         format!("update-{}", update.cave_id),
-                        Arc::clone(&daemon),
+                        Arc::clone(&link),
                         emit.clone(),
                         move |client, emit| {
                             if let Some(choice) = pick_update(&prompts, emit, &update) {
@@ -363,7 +398,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
 /// own connection so its notifications are unambiguous. butler works the
 /// queue inside that call and idles when it is empty.
 fn spawn_driver(
-    daemon: Arc<Daemon>,
+    link: Link,
     emit: Emitter,
     stopping: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
@@ -371,7 +406,7 @@ fn spawn_driver(
         .name("downloads-driver".into())
         .spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
-                let client = match Client::connect(&daemon) {
+                let client = match connect(&link) {
                     Ok(client) => client,
                     Err(error) => {
                         log::warn!("download driver: {error:#}");
@@ -633,7 +668,83 @@ fn answer_launch_request(
 
 /// Runs a butlerd call on its own connection and thread, so the main loop
 /// keeps turning while it works.
-fn spawn_op<F>(name: String, daemon: Arc<Daemon>, emit: Emitter, op: F)
+/// The work that needs itch.io: a fresh owned list when butler's cache is
+/// stale, and the update check. Runs at startup and again whenever the
+/// network comes back, and is what decides whether we are online.
+#[derive(Clone)]
+struct Sync {
+    profile_id: i64,
+    online: Arc<AtomicBool>,
+    /// Whether butler flagged the cached owned list stale, so a fresh
+    /// fetch is still owed.
+    stale: Arc<AtomicBool>,
+}
+
+impl Sync {
+    fn spawn(&self, link: &Link, emit: &Emitter) {
+        let sync = self.clone();
+        spawn_op(
+            "sync".into(),
+            Arc::clone(link),
+            emit.clone(),
+            move |client, emit| match sync.run(client, emit) {
+                Ok(()) => Ok(()),
+                Err(error) if is_offline(&error) => {
+                    sync.set_online(emit, false);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+        );
+    }
+
+    fn run(&self, client: &Client, emit: &Emitter) -> Result<()> {
+        // A one-item fresh fetch is the cheapest call that must reach the
+        // API, so it doubles as the network probe.
+        client.call(FetchProfileOwnedKeysParams {
+            profile_id: self.profile_id,
+            limit: Some(1),
+            fresh: Some(true),
+            ..Default::default()
+        })?;
+        self.set_online(emit, true);
+        if self.stale.load(Ordering::Relaxed) {
+            // The cached list is shown already; the itch app also refetches
+            // when butler flags it stale, so new purchases appear.
+            let (games, _) = owned_games(client, self.profile_id, true)?;
+            emit.send(Event::OwnedGames(games));
+            self.stale.store(false, Ordering::Relaxed);
+        }
+        check_updates(client, emit)
+    }
+
+    fn set_online(&self, emit: &Emitter, online: bool) {
+        if self.online.swap(online, Ordering::Relaxed) != online {
+            log::info!("{}", if online { "online" } else { "offline" });
+        }
+        emit.send(Event::Online(online));
+    }
+}
+
+fn check_updates(client: &Client, emit: &Emitter) -> Result<()> {
+    let result = client.call(CheckUpdateParams::default())?;
+    for warning in &result.warnings {
+        log::warn!("update check: {warning}");
+    }
+    log::info!("{} updates available", result.updates.len());
+    // Same-channel updates apply themselves, as in the itch app; the
+    // rest wait for the user to pick.
+    for update in result.updates.iter().filter(|u| u.direct) {
+        if let Err(error) = queue_update(client, update, 0) {
+            log::warn!("queueing update: {error:#}");
+        }
+    }
+    emit.send(Event::Updates(result.updates));
+    refresh_downloads(client, emit);
+    Ok(())
+}
+
+fn spawn_op<F>(name: String, link: Link, emit: Emitter, op: F)
 where
     F: FnOnce(&Client, &Emitter) -> Result<()> + Send + 'static,
 {
@@ -642,7 +753,7 @@ where
     let result = std::thread::Builder::new()
         .name(name.clone())
         .spawn(move || {
-            let client = match Client::connect(&daemon) {
+            let client = match connect(&link) {
                 Ok(client) => client,
                 Err(error) => {
                     emit.send(Event::Error(format!("{error:#}")));
@@ -650,8 +761,14 @@ where
                 }
             };
             if let Err(error) = op(&client, &emit) {
-                log::error!("{name}: {error:#}");
-                emit.send(Event::Error(format!("{error:#}")));
+                // A daemon that died mid-call is restarted by the main loop
+                // and reported there; the call's own failure is noise.
+                if !current(&link).alive() {
+                    log::warn!("{name}: {error:#} (butler exited)");
+                } else {
+                    log::error!("{name}: {error:#}");
+                    emit.send(Event::Error(format!("{error:#}")));
+                }
             }
         });
     if let Err(error) = result {
