@@ -154,8 +154,12 @@ fn button_action(button: Button) -> Option<Action> {
         Button::South => Action::Activate,
         Button::East => Action::Back,
         Button::North => Action::FocusSearch,
-        Button::LeftTrigger => Action::CycleFilter(-1),
-        Button::RightTrigger => Action::CycleFilter(1),
+        // gilrs names the bumpers LeftTrigger/RightTrigger; the triggers
+        // proper are the *2 variants.
+        Button::LeftTrigger => Action::CycleTab(-1),
+        Button::RightTrigger => Action::CycleTab(1),
+        Button::LeftTrigger2 => Action::CycleFilter(-1),
+        Button::RightTrigger2 => Action::CycleFilter(1),
         _ => return None,
     })
 }

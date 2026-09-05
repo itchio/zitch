@@ -9,7 +9,7 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, Direction, Download, DownloadProgress, Filter, Game, GameUpdate,
-    InstallState, Loadable, Page, Profile, Prompt, UserExt,
+    InstallState, Loadable, Page, Profile, Prompt, Tab, UserExt,
 };
 use crate::ui;
 
@@ -45,6 +45,12 @@ pub struct App {
     prompt: Option<Prompt>,
     /// Whether butler can reach itch.io; installs and updates need it.
     online: bool,
+    tab: Tab,
+    /// Row and button with focus on the Downloads tab.
+    downloads_focus: (usize, usize),
+    /// Downloads that completed this session. butler drops them from its
+    /// queue as soon as they finish, so the tab remembers them itself.
+    finished: Vec<Download>,
     filter: Filter,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
@@ -122,6 +128,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
             "tab" => Ok(Step::Act(Action::CycleFilter(1))),
+            "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
+            "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "prompt" => Ok(Step::Act(Action::Answer {
@@ -178,6 +186,9 @@ impl App {
             updates: Default::default(),
             prompt: None,
             online: true,
+            tab: Tab::default(),
+            downloads_focus: (0, 0),
+            finished: Vec::new(),
             filter: Filter::default(),
             query: String::new(),
             focus_search: false,
@@ -239,6 +250,8 @@ impl App {
             key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
             key(Modifiers::NONE, Key::Tab, Action::CycleFilter(1));
             key(Modifiers::SHIFT, Key::Tab, Action::CycleFilter(-1));
+            key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
+            key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
     }
 
@@ -315,7 +328,27 @@ impl App {
         }
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
-                Page::Library => self.rows.move_focus(direction),
+                Page::Library => match self.tab {
+                    Tab::Library => self.rows.move_focus(direction),
+                    Tab::Collections => {}
+                    Tab::Downloads => {
+                        let rows = self.download_rows();
+                        let (row, button) = self.downloads_focus;
+                        let row = match direction {
+                            Direction::Up => row.saturating_sub(1),
+                            Direction::Down => (row + 1).min(rows.len().saturating_sub(1)),
+                            _ => row,
+                        };
+                        let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
+                        let button = match direction {
+                            Direction::Left => button.saturating_sub(1),
+                            Direction::Right => button + 1,
+                            _ => button,
+                        }
+                        .min(buttons.saturating_sub(1));
+                        self.downloads_focus = (row, button);
+                    }
+                },
                 Page::Game { id, button } => {
                     let Some(game) = self.game(id) else {
                         return;
@@ -350,16 +383,27 @@ impl App {
                 }
             }
             Action::Activate => match self.page.clone() {
-                Page::Library => {
-                    if let Some(id) = self
-                        .rows
-                        .focused_game()
-                        .filter(|id| self.catalog.contains_key(id))
-                    {
-                        self.actions
-                            .push(Action::Open(Page::Game { id, button: 0 }));
+                Page::Library => match self.tab {
+                    Tab::Library => {
+                        if let Some(id) = self
+                            .rows
+                            .focused_game()
+                            .filter(|id| self.catalog.contains_key(id))
+                        {
+                            self.actions
+                                .push(Action::Open(Page::Game { id, button: 0 }));
+                        }
                     }
-                }
+                    Tab::Collections => {}
+                    Tab::Downloads => {
+                        let rows = self.download_rows();
+                        let (row, button) = self.downloads_focus;
+                        if let Some((_, action)) = rows.get(row).and_then(|r| r.buttons.get(button))
+                        {
+                            self.actions.push(action.clone());
+                        }
+                    }
+                },
                 Page::Game { id, button } => {
                     let Some(game) = self.game(id) else {
                         return;
@@ -384,12 +428,24 @@ impl App {
                 }
             }
             Action::CycleFilter(step) => {
-                if self.page.is_library() {
+                if self.page.is_library() && self.tab == Tab::Library {
                     self.actions.push(Action::SetFilter(self.filter.next(step)));
                 }
             }
-            Action::FocusSearch => {
+            Action::SetTab(tab) => {
                 if self.page.is_library() {
+                    self.tab = tab;
+                    self.notice = None;
+                    self.blur_search = true;
+                }
+            }
+            Action::CycleTab(step) => {
+                if self.page.is_library() {
+                    self.actions.push(Action::SetTab(self.tab.next(step)));
+                }
+            }
+            Action::FocusSearch => {
+                if self.page.is_library() && self.tab == Tab::Library {
                     self.focus_search = true;
                 }
             }
@@ -405,6 +461,9 @@ impl App {
                 }
             }
             Action::Back => match self.page {
+                Page::Library if self.tab != Tab::Library => {
+                    self.actions.push(Action::SetTab(Tab::Library))
+                }
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library => self.notice = None,
                 Page::Game { id, .. } => {
@@ -796,6 +855,8 @@ impl App {
                     } else {
                         format!("Installed {title}")
                     });
+                    self.finished.retain(|d| d.id != download.id);
+                    self.finished.insert(0, download);
                 }
                 Event::Updates(updates) => {
                     self.updates = updates
@@ -858,27 +919,139 @@ impl App {
 
 impl App {
     /// What the footer offers on the current page, in reading order.
-    fn hints(&self) -> Vec<(Glyph, String)> {
+    /// What the Downloads tab lists: butler's queue first, in its order,
+    /// then what finished this session.
+    fn download_rows(&self) -> Vec<ui::DownloadRow<'_>> {
+        let mut rows = Vec::new();
+        let mut queue: Vec<&Download> = self.downloads.iter().collect();
+        queue.sort_by_key(|d| (d.error.is_some(), d.position));
+        for download in queue {
+            let game = download.game.as_ref();
+            let game_id = game.map(|g| g.id);
+            let title = game.map_or_else(|| "Download".to_string(), |g| g.title.clone());
+            let updating = self.caves.iter().any(|cave| cave.id == download.cave_id);
+            let prefix = if updating { "Update: " } else { "" };
+            let error = download
+                .error_message
+                .as_deref()
+                .or(download.error.as_deref());
+            let mut buttons = Vec::new();
+            let (detail, progress, failed) = if let Some(error) = error {
+                if let Some(game_id) = game_id {
+                    buttons.push(("Retry", Action::RetryInstall { game_id }));
+                    buttons.push(("Dismiss", Action::CancelInstall { game_id }));
+                }
+                (format!("{prefix}Failed, {error}"), None, true)
+            } else {
+                if let Some(game_id) = game_id {
+                    let label = if self.discarding.contains(&download.id) {
+                        "Cancelling"
+                    } else {
+                        "Cancel"
+                    };
+                    buttons.push((label, Action::CancelInstall { game_id }));
+                }
+                match self.progress.get(&download.id) {
+                    Some(p) if p.bps > 0.0 => (
+                        format!(
+                            "{prefix}{}, {:.0}%, {}/s, {} left",
+                            capitalize(&p.stage),
+                            p.progress * 100.0,
+                            ui::human_size(p.bps as i64),
+                            ui::human_duration_seconds(p.eta as i64),
+                        ),
+                        Some(p.progress as f32),
+                        false,
+                    ),
+                    Some(p) if !p.stage.is_empty() => (
+                        format!(
+                            "{prefix}{}, {:.0}%",
+                            capitalize(&p.stage),
+                            p.progress * 100.0
+                        ),
+                        Some(p.progress as f32),
+                        false,
+                    ),
+                    _ if download.started_at.is_some() => {
+                        (format!("{prefix}Starting"), Some(0.0), false)
+                    }
+                    _ => (format!("{prefix}Queued"), None, false),
+                }
+            };
+            rows.push(ui::DownloadRow {
+                game,
+                title,
+                detail,
+                progress,
+                failed,
+                buttons,
+            });
+        }
+        for download in &self.finished {
+            let game = download.game.as_ref();
+            let mut buttons = Vec::new();
+            if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
+                buttons.push((
+                    "Open",
+                    Action::Open(Page::Game {
+                        id: game.id,
+                        button: 0,
+                    }),
+                ));
+            }
+            rows.push(ui::DownloadRow {
+                game,
+                title: game.map_or_else(|| "Download".to_string(), |g| g.title.clone()),
+                detail: "Finished".to_string(),
+                progress: None,
+                failed: false,
+                buttons,
+            });
+        }
+        rows
+    }
+
+    fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
         if let Some(prompt) = &self.prompt {
             let mut hints = Vec::new();
             if prompt.choices.len() > 1 {
-                hints.push((Glyph::NavigateHorizontal, "Choose".to_string()));
+                hints.push((vec![Glyph::NavigateHorizontal], "Choose".to_string()));
             }
             if let Some(choice) = prompt.choices.get(prompt.focus) {
-                hints.push((Glyph::Confirm, choice.clone()));
+                hints.push((vec![Glyph::Confirm], choice.clone()));
             }
-            hints.push((Glyph::Back, "Dismiss".to_string()));
+            hints.push((vec![Glyph::Back], "Dismiss".to_string()));
             return hints;
         }
+        // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page.clone() {
-            Page::Library => vec![
-                (Glyph::Navigate, "Browse".to_string()),
-                (Glyph::Confirm, "Open".to_string()),
-                (Glyph::Tab, "Filter".to_string()),
-                (Glyph::Search, "Search".to_string()),
-            ],
+            Page::Library => match self.tab {
+                Tab::Library => vec![
+                    (vec![Glyph::Navigate], "Browse".to_string()),
+                    (vec![Glyph::Confirm], "Open".to_string()),
+                    (
+                        vec![Glyph::FilterLeft, Glyph::FilterRight],
+                        "Filter".to_string(),
+                    ),
+                    (vec![Glyph::Search], "Search".to_string()),
+                ],
+                Tab::Collections => vec![(vec![Glyph::Back], "Back".to_string())],
+                Tab::Downloads => {
+                    let rows = self.download_rows();
+                    let (row, button) = self.downloads_focus;
+                    let mut hints = Vec::new();
+                    if rows.len() > 1 {
+                        hints.push((vec![Glyph::Navigate], "Browse".to_string()));
+                    }
+                    if let Some((label, _)) = rows.get(row).and_then(|r| r.buttons.get(button)) {
+                        hints.push((vec![Glyph::Confirm], label.to_string()));
+                    }
+                    hints.push((vec![Glyph::Back], "Back".to_string()));
+                    hints
+                }
+            },
             Page::Game { id, button } => {
-                let mut hints = Vec::new();
+                let mut hints: Vec<(Vec<Glyph>, String)> = Vec::new();
                 if let Some(game) = self.game(id) {
                     let buttons = ui::game_buttons(
                         game,
@@ -889,13 +1062,13 @@ impl App {
                         self.online,
                     );
                     if buttons.len() > 1 {
-                        hints.push((Glyph::NavigateHorizontal, "Choose".to_string()));
+                        hints.push((vec![Glyph::NavigateHorizontal], "Choose".to_string()));
                     }
                     if let Some((label, _)) = buttons.get(button) {
-                        hints.push((Glyph::Confirm, label.to_string()));
+                        hints.push((vec![Glyph::Confirm], label.to_string()));
                     }
                 }
-                hints.push((Glyph::Back, "Back".to_string()));
+                hints.push((vec![Glyph::Back], "Back".to_string()));
                 hints
             }
         }
@@ -973,7 +1146,18 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if self.page.is_library() {
-                        ui::heading(ui, &m, "Library");
+                        let downloading =
+                            self.downloads.iter().filter(|d| d.error.is_none()).count();
+                        if let Some(tab) = ui::tab_strip(
+                            ui,
+                            &m,
+                            &self.glyphs,
+                            self.input_mode,
+                            self.tab,
+                            downloading,
+                        ) {
+                            self.actions.push(Action::SetTab(tab));
+                        }
                     } else {
                         // The heading doubles as the way back for touch.
                         let back = ui::back_button(ui, &m);
@@ -981,7 +1165,7 @@ impl App {
                         let label = ui
                             .add(
                                 egui::Label::new(
-                                    egui::RichText::new("Library")
+                                    egui::RichText::new(self.tab.label())
                                         .font(egui::FontId::proportional(m.heading))
                                         .color(egui::Color32::from_gray(0xee)),
                                 )
@@ -992,24 +1176,21 @@ impl App {
                             self.actions.push(Action::Back);
                         }
                     }
-                    if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
-                        ui.add_space(m.space(12.0));
-                        ui::subtle(ui, &m, user.name());
-                    }
-                    if let Loadable::Loaded(games) = &self.owned {
-                        ui.add_space(m.space(12.0));
-                        ui::subtle(ui, &m, &format!("{} owned", games.len()));
-                        if !self.caves.is_empty() {
-                            ui.add_space(m.space(12.0));
-                            ui::subtle(ui, &m, &format!("{} installed", self.installed.len()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = m.space(12.0);
+                        if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
+                            ui::subtle(ui, &m, user.name());
                         }
-                    }
-                    if !self.online {
-                        ui.add_space(m.space(12.0));
-                        ui::offline(ui, &m);
-                    }
+                        if let Loadable::Loaded(games) = &self.owned {
+                            ui::subtle(ui, &m, &format!("{} owned", games.len()));
+                        }
+                        if !self.online {
+                            ui::offline(ui, &m);
+                        }
+                    });
                 });
-                if self.page.is_library() && self.owned.get().is_some() {
+                if self.page.is_library() && self.tab == Tab::Library && self.owned.get().is_some()
+                {
                     ui.add_space(m.space(10.0));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = m.space(8.0);
@@ -1054,19 +1235,44 @@ impl App {
                 match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
                     (Loadable::Failed(_), _) => {}
-                    (Loadable::Loaded(_), Page::Library) => ui::library(
-                        ui,
-                        &m,
-                        ui::LibraryView {
-                            games: &self.catalog,
-                            installed: &self.installed,
-                            installs: &self.installs,
-                            updatable: &self.updatable(),
-                            covers: &self.covers,
-                        },
-                        &mut self.rows,
-                        &mut self.actions,
-                    ),
+                    (Loadable::Loaded(_), Page::Library) => match self.tab {
+                        Tab::Library => ui::library(
+                            ui,
+                            &m,
+                            ui::LibraryView {
+                                games: &self.catalog,
+                                installed: &self.installed,
+                                installs: &self.installs,
+                                updatable: &self.updatable(),
+                                covers: &self.covers,
+                            },
+                            &mut self.rows,
+                            &mut self.actions,
+                        ),
+                        Tab::Collections => ui::placeholder(ui, &m, "Collections are on the way"),
+                        Tab::Downloads => {
+                            let rows = self.download_rows();
+                            let (row, button) = self.downloads_focus;
+                            let row = row.min(rows.len().saturating_sub(1));
+                            let button = button.min(
+                                rows.get(row)
+                                    .map_or(0, |r| r.buttons.len())
+                                    .saturating_sub(1),
+                            );
+                            let mut actions = Vec::new();
+                            ui::downloads(
+                                ui,
+                                &m,
+                                ui::DownloadsView {
+                                    rows: &rows,
+                                    covers: &self.covers,
+                                    focus: (row, button),
+                                },
+                                &mut actions,
+                            );
+                            self.actions.extend(actions);
+                        }
+                    },
                     (Loadable::Loaded(_), Page::Game { id, button }) => {
                         match self.catalog.get(&id) {
                             Some(game) => {

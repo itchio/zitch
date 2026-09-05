@@ -8,7 +8,7 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 use crate::model::{
-    Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, UploadExt,
+    Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, Tab, UploadExt,
 };
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
@@ -699,14 +699,6 @@ fn paint_texture(ui: &Ui, texture: egui::load::SizedTexture, rect: Rect, radius:
         .paint_at(ui, rect);
 }
 
-pub fn heading(ui: &mut Ui, m: &Metrics, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .font(FontId::proportional(m.heading))
-            .color(TEXT),
-    );
-}
-
 pub fn subtle(ui: &mut Ui, m: &Metrics, text: &str) {
     ui.label(
         egui::RichText::new(text)
@@ -1118,7 +1110,7 @@ pub fn footer(
     m: &Metrics,
     glyphs: &Glyphs,
     mode: InputMode,
-    hints: &[(Glyph, String)],
+    hints: &[(Vec<Glyph>, String)],
 ) {
     egui::Panel::bottom("footer")
         .resizable(false)
@@ -1131,13 +1123,15 @@ pub fn footer(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = m.space(8.0);
-                for (glyph, label) in hints {
-                    if let Some(texture) = glyphs.get(mode, *glyph) {
-                        let size = m.space(22.0);
-                        ui.add(
-                            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                                .fit_to_exact_size(vec2(size, size)),
-                        );
+                for (keys, label) in hints {
+                    for glyph in keys {
+                        if let Some(texture) = glyphs.get(mode, *glyph) {
+                            let size = m.space(22.0);
+                            ui.add(
+                                egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                                    .fit_to_exact_size(vec2(size, size)),
+                            );
+                        }
                     }
                     ui.label(
                         egui::RichText::new(label)
@@ -1192,4 +1186,227 @@ pub fn chip(ui: &mut Ui, m: &Metrics, label: &str, selected: bool) -> egui::Resp
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The tab bar along the top, with the bumper glyphs that switch tabs at
+/// each end. Returns a tab the pointer picked.
+pub fn tab_strip(
+    ui: &mut Ui,
+    m: &Metrics,
+    glyphs: &Glyphs,
+    mode: InputMode,
+    active: Tab,
+    downloading: usize,
+) -> Option<Tab> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = m.space(18.0);
+        let glyph = |ui: &mut Ui, glyph: Glyph| {
+            if let Some(texture) = glyphs.get(mode, glyph) {
+                let size = m.space(20.0);
+                ui.add(
+                    egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                        .fit_to_exact_size(vec2(size, size)),
+                );
+            }
+        };
+        glyph(ui, Glyph::TabLeft);
+        for tab in Tab::ALL {
+            let selected = tab == active;
+            let color = if selected { TEXT } else { DIM };
+            let galley = ui.painter().layout_no_wrap(
+                tab.label().to_string(),
+                FontId::proportional(m.section),
+                color,
+            );
+            let count = (tab == Tab::Downloads && downloading > 0).then(|| {
+                ui.painter().layout_no_wrap(
+                    downloading.to_string(),
+                    FontId::proportional(m.caption),
+                    BG,
+                )
+            });
+            let pad = m.space(3.0);
+            let count_width = count
+                .as_ref()
+                .map_or(0.0, |c| c.size().x + m.space(12.0) + m.space(8.0));
+            let size = vec2(
+                galley.size().x + 2.0 * pad + count_width,
+                galley.size().y + m.space(12.0),
+            );
+            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            let text_pos = pos2(rect.left() + pad, rect.top());
+            let text_height = galley.size().y;
+            let text_right = text_pos.x + galley.size().x;
+            ui.painter().galley(text_pos, galley, color);
+            if let Some(count) = count {
+                let height = text_height * 0.8;
+                let pill = Rect::from_min_size(
+                    pos2(
+                        text_right + m.space(8.0),
+                        rect.top() + (text_height - height) / 2.0,
+                    ),
+                    vec2(count.size().x + m.space(12.0), height),
+                );
+                ui.painter()
+                    .rect_filled(pill, CornerRadius::same((height / 2.0) as u8), ACCENT);
+                ui.painter()
+                    .galley(pill.center() - count.size() / 2.0, count, BG);
+            }
+            if selected {
+                let line = Rect::from_min_max(
+                    pos2(rect.left(), rect.bottom() - m.space(3.0)),
+                    rect.right_bottom(),
+                );
+                ui.painter()
+                    .rect_filled(line, CornerRadius::same(2), ACCENT);
+            }
+            if response.clicked() {
+                picked = Some(tab);
+            }
+            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+        glyph(ui, Glyph::TabRight);
+    });
+    picked
+}
+
+/// A quiet line in the middle of an otherwise empty page.
+pub fn placeholder(ui: &mut Ui, m: &Metrics, text: &str) {
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        FontId::proportional(m.dialog),
+        DIM,
+    );
+}
+
+/// One entry on the Downloads tab, already worded by the app.
+pub struct DownloadRow<'a> {
+    pub game: Option<&'a Game>,
+    pub title: String,
+    pub detail: String,
+    /// 0 to 1 while butler is working on it.
+    pub progress: Option<f32>,
+    pub failed: bool,
+    pub buttons: Vec<(&'static str, Action)>,
+}
+
+pub struct DownloadsView<'a> {
+    pub rows: &'a [DownloadRow<'a>],
+    pub covers: &'a CoverLoader,
+    /// Row and button with controller focus.
+    pub focus: (usize, usize),
+}
+
+pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Vec<Action>) {
+    if view.rows.is_empty() {
+        placeholder(ui, m, "Nothing downloading");
+        return;
+    }
+    let thumb_width = m.space(110.0);
+    let thumb_height = (thumb_width / COVER_ASPECT).round();
+    let pad = m.space(12.0);
+    let row_height = thumb_height + 2.0 * pad;
+    let radius = CornerRadius::same(6);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = m.space(10.0);
+            // Room for the focus ring, which is painted outside the row.
+            ui.add_space(m.ring);
+            for (index, row) in view.rows.iter().enumerate() {
+                let focused_row = index == view.focus.0;
+                let width = ui.available_width() - 2.0 * m.ring;
+                let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
+                let rect = rect.translate(vec2(m.ring, 0.0));
+                if focused_row {
+                    ui.scroll_to_rect(rect.expand(m.ring), None);
+                    ui.painter().rect_stroke(
+                        rect.expand(2.0),
+                        CornerRadius::same(8),
+                        Stroke::new(3.0, ACCENT),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                ui.painter().rect_filled(rect, radius, TILE_BG);
+
+                let thumb = Rect::from_min_size(
+                    rect.left_top() + vec2(pad, pad),
+                    vec2(thumb_width, thumb_height),
+                );
+                let url = row.game.and_then(|game| {
+                    game.still_cover_url
+                        .as_deref()
+                        .or(game.cover_url.as_deref())
+                });
+                if !url.is_some_and(|url| {
+                    paint_cover(ui, view.covers, url, Variant::Thumb, thumb, radius)
+                }) {
+                    ui.painter().rect_filled(thumb, radius, TILE_HOVER);
+                }
+
+                // Buttons hug the right edge; the first one is leftmost.
+                let button_rect = Rect::from_min_max(
+                    pos2(rect.right() - m.space(320.0), rect.top()),
+                    pos2(rect.right() - pad, rect.bottom()),
+                );
+                let mut buttons_left = button_rect.right();
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(button_rect)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = m.space(10.0);
+                        for (button, (label, action)) in row.buttons.iter().enumerate().rev() {
+                            let focused = focused_row && button == view.focus.1;
+                            let response = pill(ui, m, label, focused, false);
+                            buttons_left = buttons_left.min(response.rect.left());
+                            if response.clicked() {
+                                actions.push(action.clone());
+                            }
+                        }
+                    },
+                );
+
+                let text_left = thumb.right() + m.space(16.0);
+                let text_right = buttons_left - m.space(16.0);
+                let text_width = (text_right - text_left).max(0.0);
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    row.title.clone(),
+                    FontId::proportional(m.title),
+                    TEXT,
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
+                let title = ui.painter().layout_job(job);
+                let detail_color = if row.failed { ACCENT } else { DIM };
+                let detail = ui.painter().layout(
+                    row.detail.clone(),
+                    FontId::proportional(m.body),
+                    detail_color,
+                    text_width,
+                );
+                let bar_height = if row.progress.is_some() {
+                    m.space(6.0) + m.space(10.0)
+                } else {
+                    0.0
+                };
+                let block = title.size().y + m.space(6.0) + detail.size().y + bar_height;
+                let mut y = rect.top() + (rect.height() - block) / 2.0;
+                ui.painter().galley(pos2(text_left, y), title.clone(), TEXT);
+                y += title.size().y + m.space(6.0);
+                ui.painter()
+                    .galley(pos2(text_left, y), detail.clone(), detail_color);
+                y += detail.size().y + m.space(10.0);
+                if let Some(progress) = row.progress {
+                    let bar =
+                        Rect::from_min_size(pos2(text_left, y), vec2(text_width, m.space(6.0)));
+                    progress_bar(ui, bar, progress);
+                }
+            }
+            ui.add_space(m.ring);
+        });
 }

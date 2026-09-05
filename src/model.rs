@@ -149,6 +149,33 @@ pub enum Page {
     },
 }
 
+/// The top-level screens, switched with the bumpers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Tab {
+    #[default]
+    Library,
+    Collections,
+    Downloads,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Library, Tab::Collections, Tab::Downloads];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Library => "Library",
+            Tab::Collections => "Collections",
+            Tab::Downloads => "Downloads",
+        }
+    }
+
+    pub fn next(self, step: i32) -> Tab {
+        let len = Self::ALL.len() as i32;
+        let index = Self::ALL.iter().position(|t| *t == self).unwrap_or(0) as i32;
+        Self::ALL[((index + step).rem_euclid(len)) as usize]
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Loadable<T> {
     #[default]
@@ -205,6 +232,9 @@ pub enum Action {
     SetFilter(Filter),
     /// Step through the filters, wrapping.
     CycleFilter(i32),
+    SetTab(Tab),
+    /// Step through the tabs, wrapping.
+    CycleTab(i32),
     /// Put the cursor in the search box.
     FocusSearch,
     /// Leave the search box, keeping its text; focus goes to the results.
