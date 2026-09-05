@@ -20,14 +20,16 @@ use crate::butlerd::types::{
     AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
     CheckUpdateParams, DownloadReason, DownloadsClearFinishedParams, DownloadsDiscardParams,
     DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams, DownloadsRetryParams,
-    FetchCavesParams, FetchGameUploadsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
+    FetchCavesParams, FetchCollectionGamesParams, FetchGameUploadsParams,
+    FetchProfileCollectionsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
     PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
 };
 use crate::butlerd::{Client, Daemon, Incoming, is_offline};
 use crate::model::{
-    Cave, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt, UploadExt, UserExt,
+    Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt,
+    UploadExt, UserExt,
 };
 
 pub struct Config {
@@ -79,6 +81,8 @@ pub enum Event {
     Status(String),
     SignedIn(Profile),
     OwnedGames(Vec<Game>),
+    /// The profile's collections with their games, in butler's order.
+    Collections(Vec<CollectionGames>),
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
     /// The whole download queue, after anything changed it.
@@ -234,6 +238,9 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let (games, stale) = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
+    let (collections, collections_stale) = collections(&client, profile.id, false)?;
+    emit.send(Event::Collections(collections));
+    let stale = stale || collections_stale;
     refresh_caves(&client, emit);
     refresh_downloads(&client, emit);
 
@@ -713,6 +720,8 @@ impl Sync {
             // when butler flags it stale, so new purchases appear.
             let (games, _) = owned_games(client, self.profile_id, true)?;
             emit.send(Event::OwnedGames(games));
+            let (collections, _) = collections(client, self.profile_id, true)?;
+            emit.send(Event::Collections(collections));
             self.stale.store(false, Ordering::Relaxed);
         }
         check_updates(client, emit)
@@ -965,6 +974,60 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
         }
     }
     Ok((games, stale && !fresh))
+}
+
+/// Long collections are cut here; the rows are for browsing, not
+/// exhausting, and each page is a round trip to the API when fresh.
+const COLLECTION_GAMES_MAX: usize = 300;
+
+fn collections(
+    client: &Client,
+    profile_id: i64,
+    fresh: bool,
+) -> Result<(Vec<CollectionGames>, bool)> {
+    let mut collections = Vec::new();
+    let mut stale = false;
+    let mut cursor = None;
+    loop {
+        let page = client.call(FetchProfileCollectionsParams {
+            profile_id,
+            limit: Some(100),
+            cursor: cursor.take(),
+            fresh: Some(fresh),
+            ..Default::default()
+        })?;
+        stale |= page.stale == Some(true);
+        collections.extend(page.items);
+        match page.next_cursor {
+            Some(next) if !next.is_empty() => cursor = Some(next),
+            _ => break,
+        }
+    }
+    let mut shelves = Vec::with_capacity(collections.len());
+    for collection in collections {
+        let mut games = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = client.call(FetchCollectionGamesParams {
+                profile_id,
+                collection_id: collection.id,
+                limit: Some(100),
+                cursor: cursor.take(),
+                fresh: Some(fresh),
+                ..Default::default()
+            })?;
+            stale |= page.stale == Some(true);
+            games.extend(page.items.into_iter().filter_map(|item| item.game));
+            match page.next_cursor {
+                Some(next) if !next.is_empty() && games.len() < COLLECTION_GAMES_MAX => {
+                    cursor = Some(next)
+                }
+                _ => break,
+            }
+        }
+        shelves.push(CollectionGames { collection, games });
+    }
+    Ok((shelves, stale && !fresh))
 }
 
 fn all_caves(client: &Client) -> Result<Vec<Cave>> {

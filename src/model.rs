@@ -2,7 +2,8 @@
 //! the generated butlerd bindings; these are the app's own.
 
 pub use crate::butlerd::types::{
-    Cave, Download, DownloadProgress, Game, GameClassification, GameUpdate, Profile, Upload, User,
+    Cave, Collection, Download, DownloadProgress, Game, GameClassification, GameUpdate, Profile,
+    Upload, User,
 };
 
 pub trait UserExt {
@@ -147,6 +148,13 @@ pub enum Page {
         id: i64,
         button: usize,
     },
+}
+
+/// A collection with the games butler has for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionGames {
+    pub collection: Collection,
+    pub games: Vec<Game>,
 }
 
 /// The top-level screens, switched with the bumpers.

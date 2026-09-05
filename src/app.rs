@@ -8,8 +8,8 @@ use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, Direction, Download, DownloadProgress, Filter, Game, GameUpdate,
-    InstallState, Loadable, Page, Profile, Prompt, Tab, UserExt,
+    Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, Filter, Game,
+    GameUpdate, InstallState, Loadable, Page, Profile, Prompt, Tab, UserExt,
 };
 use crate::ui;
 
@@ -25,6 +25,9 @@ pub struct App {
     /// Games the profile has a key for, in butler's order (newest first).
     owned: Loadable<Vec<Game>>,
     caves: Vec<Cave>,
+    collections: Loadable<Vec<CollectionGames>>,
+    /// The Collections tab's carousels, one per collection.
+    pub collection_rows: ui::Rows,
     /// Every game the screen can show, owned or installed, by id.
     catalog: std::collections::HashMap<i64, Game>,
     installed: std::collections::HashSet<i64>,
@@ -187,6 +190,8 @@ impl App {
             prompt: None,
             online: true,
             tab: Tab::default(),
+            collections: Loadable::default(),
+            collection_rows: ui::Rows::default(),
             downloads_focus: (0, 0),
             finished: Vec::new(),
             filter: Filter::default(),
@@ -283,6 +288,15 @@ impl App {
         for game in self.caves.iter().filter_map(|cave| cave.game.as_ref()) {
             catalog.entry(game.id).or_insert_with(|| game.clone());
         }
+        for game in self
+            .collections
+            .get()
+            .into_iter()
+            .flatten()
+            .flat_map(|c| &c.games)
+        {
+            catalog.entry(game.id).or_insert_with(|| game.clone());
+        }
         self.catalog = catalog;
     }
 
@@ -330,7 +344,7 @@ impl App {
             Action::MoveFocus(direction) => match self.page.clone() {
                 Page::Library => match self.tab {
                     Tab::Library => self.rows.move_focus(direction),
-                    Tab::Collections => {}
+                    Tab::Collections => self.collection_rows.move_focus(direction),
                     Tab::Downloads => {
                         let rows = self.download_rows();
                         let (row, button) = self.downloads_focus;
@@ -384,9 +398,13 @@ impl App {
             }
             Action::Activate => match self.page.clone() {
                 Page::Library => match self.tab {
-                    Tab::Library => {
-                        if let Some(id) = self
-                            .rows
+                    Tab::Library | Tab::Collections => {
+                        let rows = if self.tab == Tab::Library {
+                            &self.rows
+                        } else {
+                            &self.collection_rows
+                        };
+                        if let Some(id) = rows
                             .focused_game()
                             .filter(|id| self.catalog.contains_key(id))
                         {
@@ -394,7 +412,6 @@ impl App {
                                 .push(Action::Open(Page::Game { id, button: 0 }));
                         }
                     }
-                    Tab::Collections => {}
                     Tab::Downloads => {
                         let rows = self.download_rows();
                         let (row, button) = self.downloads_focus;
@@ -467,7 +484,11 @@ impl App {
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library => self.notice = None,
                 Page::Game { id, .. } => {
-                    self.rows.focus_game(id);
+                    match self.tab {
+                        Tab::Library => self.rows.focus_game(id),
+                        Tab::Collections => self.collection_rows.focus_game(id),
+                        Tab::Downloads => {}
+                    }
                     self.page = Page::Library;
                 }
             },
@@ -817,6 +838,18 @@ impl App {
                     self.rebuild_catalog();
                     self.rebuild_sections();
                 }
+                Event::Collections(collections) => {
+                    let sections = collections
+                        .iter()
+                        .map(|c| ui::Section {
+                            title: format!("{} · {}", c.collection.title, c.collection.games_count),
+                            games: c.games.iter().map(|g| g.id).collect(),
+                        })
+                        .collect();
+                    self.collections = Loadable::Loaded(collections);
+                    self.collection_rows.set_sections(sections);
+                    self.rebuild_catalog();
+                }
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
@@ -1035,7 +1068,11 @@ impl App {
                     ),
                     (vec![Glyph::Search], "Search".to_string()),
                 ],
-                Tab::Collections => vec![(vec![Glyph::Back], "Back".to_string())],
+                Tab::Collections => vec![
+                    (vec![Glyph::Navigate], "Browse".to_string()),
+                    (vec![Glyph::Confirm], "Open".to_string()),
+                    (vec![Glyph::Back], "Back".to_string()),
+                ],
                 Tab::Downloads => {
                     let rows = self.download_rows();
                     let (row, button) = self.downloads_focus;
@@ -1249,7 +1286,25 @@ impl App {
                             &mut self.rows,
                             &mut self.actions,
                         ),
-                        Tab::Collections => ui::placeholder(ui, &m, "Collections are on the way"),
+                        Tab::Collections => match &self.collections {
+                            Loadable::Loaded(collections) if collections.is_empty() => {
+                                ui::placeholder(ui, &m, "No collections")
+                            }
+                            Loadable::Loaded(_) => ui::library(
+                                ui,
+                                &m,
+                                ui::LibraryView {
+                                    games: &self.catalog,
+                                    installed: &self.installed,
+                                    installs: &self.installs,
+                                    updatable: &self.updatable(),
+                                    covers: &self.covers,
+                                },
+                                &mut self.collection_rows,
+                                &mut self.actions,
+                            ),
+                            _ => ui::centered_spinner(ui, &m),
+                        },
                         Tab::Downloads => {
                             let rows = self.download_rows();
                             let (row, button) = self.downloads_focus;
