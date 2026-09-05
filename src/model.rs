@@ -75,12 +75,9 @@ pub struct Prompt {
 }
 
 /// Which part of the library the main row shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Filter {
-    #[default]
-    All,
-    /// Has an upload for this operating system.
-    Playable,
+/// What kind of thing a library entry is, one row each on the Library tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
     Games,
     /// Tools and asset packs.
     Tools,
@@ -88,58 +85,44 @@ pub enum Filter {
     Other,
 }
 
-impl Filter {
-    pub const ALL: [Filter; 5] = [
-        Filter::All,
-        Filter::Playable,
-        Filter::Games,
-        Filter::Tools,
-        Filter::Other,
-    ];
+impl Kind {
+    pub const ALL: [Kind; 3] = [Kind::Games, Kind::Tools, Kind::Other];
 
     pub fn label(self) -> &'static str {
         match self {
-            Filter::All => "All",
-            Filter::Playable => "Playable here",
-            Filter::Games => "Games",
-            Filter::Tools => "Tools & assets",
-            Filter::Other => "Other",
+            Kind::Games => "Games",
+            Kind::Tools => "Tools & assets",
+            Kind::Other => "Other",
         }
     }
 
     pub fn matches(self, game: &Game) -> bool {
         match self {
-            Filter::All => true,
-            Filter::Playable => {
-                let p = &game.platforms;
-                if cfg!(target_os = "linux") {
-                    p.linux.is_some()
-                } else if cfg!(target_os = "macos") {
-                    p.osx.is_some()
-                } else {
-                    p.windows.is_some()
-                }
-            }
-            Filter::Games => game.classification == GameClassification::Game,
-            Filter::Tools => matches!(
+            Kind::Games => game.classification == GameClassification::Game,
+            Kind::Tools => matches!(
                 game.classification,
                 GameClassification::Tool | GameClassification::Assets
             ),
-            Filter::Other => !matches!(
+            Kind::Other => !matches!(
                 game.classification,
                 GameClassification::Game | GameClassification::Tool | GameClassification::Assets
             ),
         }
     }
+}
 
-    pub fn next(self, step: i32) -> Filter {
-        let len = Self::ALL.len() as i32;
-        let index = Self::ALL.iter().position(|f| *f == self).unwrap_or(0) as i32;
-        Self::ALL[((index + step).rem_euclid(len)) as usize]
+/// Whether the game has an upload for this operating system.
+pub fn playable_here(game: &Game) -> bool {
+    let p = &game.platforms;
+    if cfg!(target_os = "linux") {
+        p.linux.is_some()
+    } else if cfg!(target_os = "macos") {
+        p.osx.is_some()
+    } else {
+        p.windows.is_some()
     }
 }
 
-/// What the window is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Library,
@@ -208,6 +191,10 @@ pub enum Direction {
     Down,
     Left,
     Right,
+    /// To the first item in the row.
+    Home,
+    /// To the last item in the row.
+    End,
 }
 
 /// What the interface asked for while drawing. Applied after the frame so
@@ -237,10 +224,14 @@ pub enum Action {
     },
     /// Focus a prompt button; the pointer is already there.
     PromptFocus(usize),
-    SetFilter(Filter),
-    /// Step through the filters, wrapping.
-    CycleFilter(i32),
+    /// Flip the current tab's filter: Playable here on Library, Installed
+    /// on Collections.
+    ToggleFilter,
+    /// Hide games with no upload for this computer, on every tab.
+    SetPlayableOnly(bool),
     SetTab(Tab),
+    /// Narrow the Collections tab to installed games, or show everything.
+    SetCollectionsInstalledOnly(bool),
     /// Step through the tabs, wrapping.
     CycleTab(i32),
     /// Put the cursor in the search box.

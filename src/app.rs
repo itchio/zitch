@@ -8,8 +8,8 @@ use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, Filter, Game,
-    GameUpdate, InstallState, Loadable, Page, Profile, Prompt, Tab, UserExt,
+    Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, Game,
+    GameUpdate, InstallState, Kind, Loadable, Page, Profile, Prompt, Tab, UserExt, playable_here,
 };
 use crate::ui;
 
@@ -26,6 +26,8 @@ pub struct App {
     owned: Loadable<Vec<Game>>,
     caves: Vec<Cave>,
     collections: Loadable<Vec<CollectionGames>>,
+    /// Show only installed games on the Collections tab.
+    collections_installed_only: bool,
     /// The Collections tab's carousels, one per collection.
     pub collection_rows: ui::Rows,
     /// Every game the screen can show, owned or installed, by id.
@@ -54,7 +56,8 @@ pub struct App {
     /// Downloads that completed this session. butler drops them from its
     /// queue as soon as they finish, so the tab remembers them itself.
     finished: Vec<Download>,
-    filter: Filter,
+    /// Hide games with no upload for this computer, on every tab.
+    playable_only: bool,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
     focus_search: bool,
@@ -127,10 +130,12 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "down" => Ok(Step::Act(Action::MoveFocus(Direction::Down))),
             "left" => Ok(Step::Act(Action::MoveFocus(Direction::Left))),
             "right" => Ok(Step::Act(Action::MoveFocus(Direction::Right))),
+            "home" => Ok(Step::Act(Action::MoveFocus(Direction::Home))),
+            "end" => Ok(Step::Act(Action::MoveFocus(Direction::End))),
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
-            "tab" => Ok(Step::Act(Action::CycleFilter(1))),
+            "tab" => Ok(Step::Act(Action::ToggleFilter)),
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
@@ -191,10 +196,11 @@ impl App {
             online: true,
             tab: Tab::default(),
             collections: Loadable::default(),
+            collections_installed_only: false,
             collection_rows: ui::Rows::default(),
             downloads_focus: (0, 0),
             finished: Vec::new(),
-            filter: Filter::default(),
+            playable_only: false,
             query: String::new(),
             focus_search: false,
             blur_search: false,
@@ -250,11 +256,17 @@ impl App {
                 Key::ArrowRight,
                 Action::MoveFocus(Direction::Right),
             );
+            key(
+                Modifiers::NONE,
+                Key::Home,
+                Action::MoveFocus(Direction::Home),
+            );
+            key(Modifiers::NONE, Key::End, Action::MoveFocus(Direction::End));
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
             key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
-            key(Modifiers::NONE, Key::Tab, Action::CycleFilter(1));
-            key(Modifiers::SHIFT, Key::Tab, Action::CycleFilter(-1));
+            key(Modifiers::NONE, Key::Tab, Action::ToggleFilter);
+            key(Modifiers::SHIFT, Key::Tab, Action::ToggleFilter);
             key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
             key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
@@ -280,6 +292,15 @@ impl App {
 
     /// Owned games first, so their fresher records win over the copy each
     /// cave carries; then installed games with no key.
+    /// The carousel rows the current tab shows, if it has any.
+    fn active_rows(&mut self) -> Option<&mut ui::Rows> {
+        match self.tab {
+            Tab::Library => Some(&mut self.rows),
+            Tab::Collections => Some(&mut self.collection_rows),
+            Tab::Downloads => None,
+        }
+    }
+
     fn rebuild_catalog(&mut self) {
         let mut catalog = std::collections::HashMap::new();
         for game in self.owned.get().into_iter().flatten() {
@@ -343,14 +364,19 @@ impl App {
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
                 Page::Library => match self.tab {
-                    Tab::Library => self.rows.move_focus(direction),
-                    Tab::Collections => self.collection_rows.move_focus(direction),
+                    Tab::Library | Tab::Collections => {
+                        if let Some(rows) = self.active_rows() {
+                            rows.move_focus(direction);
+                        }
+                    }
                     Tab::Downloads => {
                         let rows = self.download_rows();
                         let (row, button) = self.downloads_focus;
                         let row = match direction {
                             Direction::Up => row.saturating_sub(1),
                             Direction::Down => (row + 1).min(rows.len().saturating_sub(1)),
+                            Direction::Home => 0,
+                            Direction::End => rows.len().saturating_sub(1),
                             _ => row,
                         };
                         let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
@@ -390,7 +416,11 @@ impl App {
                     self.rows.focus_game(game.id);
                 }
             }
-            Action::FocusTile { row, col } => self.rows.focus_tile(row, col),
+            Action::FocusTile { row, col } => {
+                if let Some(rows) = self.active_rows() {
+                    rows.focus_tile(row, col);
+                }
+            }
             Action::FocusButton(button) => {
                 if let Page::Game { id, .. } = self.page {
                     self.page = Page::Game { id, button };
@@ -399,13 +429,9 @@ impl App {
             Action::Activate => match self.page.clone() {
                 Page::Library => match self.tab {
                     Tab::Library | Tab::Collections => {
-                        let rows = if self.tab == Tab::Library {
-                            &self.rows
-                        } else {
-                            &self.collection_rows
-                        };
-                        if let Some(id) = rows
-                            .focused_game()
+                        if let Some(id) = self
+                            .active_rows()
+                            .and_then(|rows| rows.focused_game())
                             .filter(|id| self.catalog.contains_key(id))
                         {
                             self.actions
@@ -438,15 +464,32 @@ impl App {
                     }
                 }
             },
-            Action::SetFilter(filter) => {
-                if self.filter != filter {
-                    self.filter = filter;
+            Action::SetPlayableOnly(on) => {
+                if self.playable_only != on {
+                    self.playable_only = on;
                     self.rebuild_sections();
+                    self.rebuild_collection_sections();
+                    self.rows.follow = true;
+                    self.collection_rows.follow = true;
                 }
             }
-            Action::CycleFilter(step) => {
-                if self.page.is_library() && self.tab == Tab::Library {
-                    self.actions.push(Action::SetFilter(self.filter.next(step)));
+            Action::ToggleFilter => match (self.page.is_library(), self.tab) {
+                (true, Tab::Library) => {
+                    self.actions
+                        .push(Action::SetPlayableOnly(!self.playable_only));
+                }
+                (true, Tab::Collections) => {
+                    self.actions.push(Action::SetCollectionsInstalledOnly(
+                        !self.collections_installed_only,
+                    ));
+                }
+                _ => {}
+            },
+            Action::SetCollectionsInstalledOnly(on) => {
+                if self.collections_installed_only != on {
+                    self.collections_installed_only = on;
+                    self.rebuild_collection_sections();
+                    self.collection_rows.follow = true;
                 }
             }
             Action::SetTab(tab) => {
@@ -454,6 +497,8 @@ impl App {
                     self.tab = tab;
                     self.notice = None;
                     self.blur_search = true;
+                    self.rows.follow = true;
+                    self.collection_rows.follow = true;
                 }
             }
             Action::CycleTab(step) => {
@@ -484,10 +529,8 @@ impl App {
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library => self.notice = None,
                 Page::Game { id, .. } => {
-                    match self.tab {
-                        Tab::Library => self.rows.focus_game(id),
-                        Tab::Collections => self.collection_rows.focus_game(id),
-                        Tab::Downloads => {}
+                    if let Some(rows) = self.active_rows() {
+                        rows.focus_game(id);
                     }
                     self.page = Page::Library;
                 }
@@ -584,7 +627,6 @@ impl App {
         if self.owned.get().is_none() {
             return;
         }
-        let filter = self.filter;
         let query = self.query.trim().to_lowercase();
         if !query.is_empty() {
             // Searching narrows the whole screen to one row of matches,
@@ -596,9 +638,9 @@ impl App {
                 .chain(self.installed_ids())
                 .filter(|id| seen.insert(*id))
                 .filter(|id| {
-                    self.catalog.get(id).is_some_and(|g| {
-                        filter.matches(g) && g.title.to_lowercase().contains(&query)
-                    })
+                    self.catalog
+                        .get(id)
+                        .is_some_and(|g| self.passes(g) && g.title.to_lowercase().contains(&query))
                 })
                 .collect();
             let title = match matches.len() {
@@ -609,18 +651,13 @@ impl App {
             self.rows.set_sections(vec![ui::Section {
                 title,
                 games: matches,
+                note: None,
             }]);
             return;
         }
         let mut sections = Vec::new();
 
-        let installed = self.installed_ids();
-        if !installed.is_empty() {
-            sections.push(ui::Section {
-                title: "Installed".into(),
-                games: installed,
-            });
-        }
+        sections.extend(self.section(|_| "Installed".into(), self.installed_ids()));
 
         let mut played: Vec<&Cave> = self
             .caves
@@ -639,12 +676,7 @@ impl App {
             .filter(|id| seen.insert(*id))
             .take(12)
             .collect();
-        if !played.is_empty() {
-            sections.push(ui::Section {
-                title: "Recently played".into(),
-                games: played,
-            });
-        }
+        sections.extend(self.section(|_| "Recently played".into(), played));
 
         let updatable = self.updatable();
         let mut seen = std::collections::HashSet::new();
@@ -654,25 +686,43 @@ impl App {
             .filter_map(|cave| cave.game_id())
             .filter(|id| updatable.contains(id) && seen.insert(*id))
             .collect();
-        if !updates.is_empty() {
-            sections.push(ui::Section {
-                title: "Updates".into(),
-                games: updates,
-            });
-        }
+        sections.extend(self.section(|_| "Updates".into(), updates));
 
-        sections.push(ui::Section {
-            title: match filter {
-                Filter::All => "Owned".to_string(),
-                other => other.label().to_string(),
-            },
-            games: self
+        // The owned library, one row per kind of thing.
+        for kind in Kind::ALL {
+            let games: Vec<i64> = self
                 .owned_ids()
                 .into_iter()
-                .filter(|id| self.catalog.get(id).is_some_and(|g| filter.matches(g)))
-                .collect(),
-        });
+                .filter(|id| self.catalog.get(id).is_some_and(|g| kind.matches(g)))
+                .collect();
+            sections.extend(self.section(|n| format!("{} · {n}", kind.label()), games));
+        }
         self.rows.set_sections(sections);
+    }
+
+    /// Whether the game clears the page-wide filter.
+    fn passes(&self, game: &Game) -> bool {
+        !self.playable_only || playable_here(game)
+    }
+
+    /// A row after the page-wide filter: none when it was empty anyway, a
+    /// note in place of tiles when the filter took everything.
+    fn section(&self, title: impl Fn(usize) -> String, games: Vec<i64>) -> Option<ui::Section> {
+        if games.is_empty() {
+            return None;
+        }
+        let games: Vec<i64> = games
+            .into_iter()
+            .filter(|id| self.catalog.get(id).is_none_or(|g| self.passes(g)))
+            .collect();
+        let note = games
+            .is_empty()
+            .then(|| "Nothing here runs on this computer".to_string());
+        Some(ui::Section {
+            title: title(games.len()),
+            games,
+            note,
+        })
     }
 
     fn owned_ids(&self) -> Vec<i64> {
@@ -704,6 +754,39 @@ impl App {
     }
 
     /// Derives what each game's tile and page show from the queue.
+    /// One row per collection. With the installed filter on, collections
+    /// with nothing installed sink to the bottom and say so.
+    fn rebuild_collection_sections(&mut self) {
+        let Some(collections) = self.collections.get() else {
+            return;
+        };
+        let mut sections: Vec<ui::Section> = collections
+            .iter()
+            .map(|c| {
+                let games: Vec<i64> = c
+                    .games
+                    .iter()
+                    .filter(|g| self.passes(g))
+                    .map(|g| g.id)
+                    .filter(|id| !self.collections_installed_only || self.installed.contains(id))
+                    .collect();
+                let note = match (games.is_empty(), self.collections_installed_only) {
+                    _ if c.games.is_empty() => Some("Empty collection".to_string()),
+                    (true, true) => Some("Nothing installed from this collection".to_string()),
+                    (true, false) => Some("Nothing here runs on this computer".to_string()),
+                    _ => None,
+                };
+                ui::Section {
+                    title: format!("{} · {}", c.collection.title, c.collection.games_count),
+                    games,
+                    note,
+                }
+            })
+            .collect();
+        sections.sort_by_key(|s| s.games.is_empty());
+        self.collection_rows.set_sections(sections);
+    }
+
     fn rebuild_installs(&mut self) {
         let mut installs = std::collections::HashMap::new();
         for download in &self.downloads {
@@ -839,22 +922,16 @@ impl App {
                     self.rebuild_sections();
                 }
                 Event::Collections(collections) => {
-                    let sections = collections
-                        .iter()
-                        .map(|c| ui::Section {
-                            title: format!("{} · {}", c.collection.title, c.collection.games_count),
-                            games: c.games.iter().map(|g| g.id).collect(),
-                        })
-                        .collect();
                     self.collections = Loadable::Loaded(collections);
-                    self.collection_rows.set_sections(sections);
                     self.rebuild_catalog();
+                    self.rebuild_collection_sections();
                 }
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
                     self.rebuild_catalog();
                     self.rebuild_sections();
+                    self.rebuild_collection_sections();
                 }
                 Event::Downloads(downloads) => {
                     let listed: std::collections::HashSet<String> =
@@ -1068,11 +1145,18 @@ impl App {
                     ),
                     (vec![Glyph::Search], "Search".to_string()),
                 ],
-                Tab::Collections => vec![
-                    (vec![Glyph::Navigate], "Browse".to_string()),
-                    (vec![Glyph::Confirm], "Open".to_string()),
-                    (vec![Glyph::Back], "Back".to_string()),
-                ],
+                Tab::Collections => {
+                    let mut hints = vec![(vec![Glyph::Navigate], "Browse".to_string())];
+                    if self.collection_rows.focused_game().is_some() {
+                        hints.push((vec![Glyph::Confirm], "Open".to_string()));
+                    }
+                    hints.push((
+                        vec![Glyph::FilterLeft, Glyph::FilterRight],
+                        "Filter".to_string(),
+                    ));
+                    hints.push((vec![Glyph::Back], "Back".to_string()));
+                    hints
+                }
                 Tab::Downloads => {
                     let rows = self.download_rows();
                     let (row, button) = self.downloads_focus;
@@ -1231,10 +1315,9 @@ impl App {
                     ui.add_space(m.space(10.0));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = m.space(8.0);
-                        for filter in Filter::ALL {
-                            if ui::chip(ui, &m, filter.label(), filter == self.filter).clicked() {
-                                self.actions.push(Action::SetFilter(filter));
-                            }
+                        if ui::chip(ui, &m, "Playable here", self.playable_only).clicked() {
+                            self.actions
+                                .push(Action::SetPlayableOnly(!self.playable_only));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let id = Self::search_id();
@@ -1260,6 +1343,26 @@ impl App {
                         });
                     });
                 }
+                if self.page.is_library()
+                    && self.tab == Tab::Collections
+                    && self.collections.get().is_some()
+                {
+                    ui.add_space(m.space(10.0));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = m.space(8.0);
+                        for (label, on) in [("All", false), ("Installed", true)] {
+                            let selected = self.collections_installed_only == on;
+                            if ui::chip(ui, &m, label, selected).clicked() {
+                                self.actions.push(Action::SetCollectionsInstalledOnly(on));
+                            }
+                        }
+                        ui.add_space(m.space(16.0));
+                        if ui::chip(ui, &m, "Playable here", self.playable_only).clicked() {
+                            self.actions
+                                .push(Action::SetPlayableOnly(!self.playable_only));
+                        }
+                    });
+                }
                 match (&self.owned, &self.notice) {
                     (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, &m, notice),
                     (Loadable::Loaded(_), None) => ui::subtle(ui, &m, ""),
@@ -1282,6 +1385,7 @@ impl App {
                                 installs: &self.installs,
                                 updatable: &self.updatable(),
                                 covers: &self.covers,
+                                scrollbar: self.input_mode == InputMode::Keyboard,
                             },
                             &mut self.rows,
                             &mut self.actions,
@@ -1290,19 +1394,26 @@ impl App {
                             Loadable::Loaded(collections) if collections.is_empty() => {
                                 ui::placeholder(ui, &m, "No collections")
                             }
-                            Loadable::Loaded(_) => ui::library(
-                                ui,
-                                &m,
-                                ui::LibraryView {
-                                    games: &self.catalog,
-                                    installed: &self.installed,
-                                    installs: &self.installs,
-                                    updatable: &self.updatable(),
-                                    covers: &self.covers,
-                                },
-                                &mut self.collection_rows,
-                                &mut self.actions,
-                            ),
+                            // Scoped so the rows' scroll state does not share
+                            // egui ids with the Library tab's rows.
+                            Loadable::Loaded(_) => {
+                                ui.push_id("collections", |ui| {
+                                    ui::library(
+                                        ui,
+                                        &m,
+                                        ui::LibraryView {
+                                            games: &self.catalog,
+                                            installed: &self.installed,
+                                            installs: &self.installs,
+                                            updatable: &self.updatable(),
+                                            covers: &self.covers,
+                                            scrollbar: self.input_mode == InputMode::Keyboard,
+                                        },
+                                        &mut self.collection_rows,
+                                        &mut self.actions,
+                                    );
+                                });
+                            }
                             _ => ui::centered_spinner(ui, &m),
                         },
                         Tab::Downloads => {
@@ -1322,6 +1433,7 @@ impl App {
                                     rows: &rows,
                                     covers: &self.covers,
                                     focus: (row, button),
+                                    scrollbar: self.input_mode == InputMode::Keyboard,
                                 },
                                 &mut actions,
                             );

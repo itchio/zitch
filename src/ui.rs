@@ -140,6 +140,8 @@ impl Game {
 pub struct Section {
     pub title: String,
     pub games: Vec<i64>,
+    /// Shown in place of the tiles when there are none.
+    pub note: Option<String>,
 }
 
 /// The home screen's rows of carousels and which tile has focus. Drawing
@@ -245,6 +247,10 @@ impl Rows {
             }
             Direction::Up => self.row = self.row.saturating_sub(1),
             Direction::Down => self.row = (self.row + 1).min(self.sections.len() - 1),
+            Direction::Home => self.cols[self.row] = 0,
+            Direction::End => {
+                self.cols[self.row] = self.sections[self.row].games.len().saturating_sub(1)
+            }
         }
         self.follow = true;
     }
@@ -257,6 +263,8 @@ pub struct LibraryView<'a> {
     pub installs: &'a std::collections::HashMap<i64, InstallState>,
     pub updatable: &'a std::collections::HashSet<i64>,
     pub covers: &'a CoverLoader,
+    /// Show the vertical scroll bar; a pad or finger has no use for it.
+    pub scrollbar: bool,
 }
 
 pub fn library(
@@ -272,6 +280,7 @@ pub fn library(
         installs,
         updatable,
         covers,
+        scrollbar,
     } = view;
     let Metrics {
         tile_width,
@@ -298,7 +307,7 @@ pub fn library(
     let mut area = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_source(no_drag)
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        .scroll_bar_visibility(scroll_bar(ui, scrollbar));
     if let Some(offset) = set_vscroll {
         area = area.vertical_scroll_offset(offset);
     } else if follow && let Some(&(top, height)) = rows.row_spans.get(rows.row) {
@@ -359,6 +368,21 @@ pub fn library(
                         .color(if is_focused_row { TEXT } else { DIM }),
                 );
             });
+
+            if section.games.is_empty() {
+                if let Some(note) = &section.note {
+                    ui.label(
+                        egui::RichText::new(note)
+                            .font(FontId::proportional(m.body))
+                            .color(DIM),
+                    );
+                }
+                rows.hscroll[row] = 0.0;
+                rows.hmax[row] = 0.0;
+                rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
+                ui.add_space(m.section_gap);
+                continue;
+            }
 
             let mut strip = egui::ScrollArea::horizontal()
                 .id_salt(("row", row))
@@ -1299,6 +1323,18 @@ pub struct DownloadsView<'a> {
     pub covers: &'a CoverLoader,
     /// Row and button with controller focus.
     pub focus: (usize, usize),
+    pub scrollbar: bool,
+}
+
+/// egui's default bar is invisible until the pointer moves; the thin style
+/// stays visible so a mouse user can see how far down the page goes.
+fn scroll_bar(ui: &mut Ui, shown: bool) -> egui::scroll_area::ScrollBarVisibility {
+    if shown {
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::thin();
+        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+    } else {
+        egui::scroll_area::ScrollBarVisibility::AlwaysHidden
+    }
 }
 
 pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Vec<Action>) {
@@ -1313,7 +1349,7 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
     let radius = CornerRadius::same(6);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .scroll_bar_visibility(scroll_bar(ui, view.scrollbar))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = m.space(10.0);
             // Room for the focus ring, which is painted outside the row.

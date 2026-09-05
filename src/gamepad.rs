@@ -158,8 +158,7 @@ fn button_action(button: Button) -> Option<Action> {
         // proper are the *2 variants.
         Button::LeftTrigger => Action::CycleTab(-1),
         Button::RightTrigger => Action::CycleTab(1),
-        Button::LeftTrigger2 => Action::CycleFilter(-1),
-        Button::RightTrigger2 => Action::CycleFilter(1),
+        Button::LeftTrigger2 | Button::RightTrigger2 => Action::ToggleFilter,
         _ => return None,
     })
 }
