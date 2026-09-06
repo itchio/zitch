@@ -30,6 +30,22 @@ pub enum Glyph {
 
 pub struct Glyphs {
     textures: HashMap<(InputMode, Glyph), TextureHandle>,
+    logo: Option<TextureHandle>,
+}
+
+const LOGO: &[u8] = include_bytes!("../assets/itch-logo.png");
+
+fn decode(ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<TextureHandle> {
+    let decoded = match image::load_from_memory(bytes) {
+        Ok(image) => image.into_rgba8(),
+        Err(error) => {
+            log::error!("{name}: {error}");
+            return None;
+        }
+    };
+    let size = [decoded.width() as usize, decoded.height() as usize];
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+    Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR))
 }
 
 macro_rules! glyph_files {
@@ -62,21 +78,18 @@ impl Glyphs {
     pub fn load(ctx: &egui::Context) -> Self {
         let mut textures = HashMap::new();
         for (mode, glyph, name, bytes) in FILES {
-            let decoded = match image::load_from_memory(bytes) {
-                Ok(image) => image.into_rgba8(),
-                Err(error) => {
-                    log::error!("glyph {name}: {error}");
-                    continue;
-                }
-            };
-            let size = [decoded.width() as usize, decoded.height() as usize];
-            let image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
-            textures.insert(
-                (*mode, *glyph),
-                ctx.load_texture(format!("glyph/{name}"), image, egui::TextureOptions::LINEAR),
-            );
+            if let Some(texture) = decode(ctx, &format!("glyph/{name}"), bytes) {
+                textures.insert((*mode, *glyph), texture);
+            }
         }
-        Self { textures }
+        Self {
+            textures,
+            logo: decode(ctx, "logo", LOGO),
+        }
+    }
+
+    pub fn logo(&self) -> Option<&TextureHandle> {
+        self.logo.as_ref()
     }
 
     pub fn get(&self, mode: InputMode, glyph: Glyph) -> Option<&TextureHandle> {

@@ -176,9 +176,8 @@ impl App {
         low_spec: Option<bool>,
         shot: Option<Shot>,
     ) -> Self {
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = ui::BG;
-        ctx.set_visuals(visuals);
+        ui::install_fonts(ctx);
+        ctx.set_visuals(ui::visuals());
         ctx.set_zoom_factor(zoom);
         Self {
             backend,
@@ -1412,6 +1411,7 @@ impl App {
             .frame(egui::Frame::new().fill(ui::BG).inner_margin(m.margin))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui::logo(ui, &m, &self.glyphs);
                     if self.page.is_library() {
                         let downloading =
                             self.downloads.iter().filter(|d| d.error.is_none()).count();
@@ -1433,8 +1433,11 @@ impl App {
                             .add(
                                 egui::Label::new(
                                     egui::RichText::new(self.tab.label())
-                                        .font(egui::FontId::proportional(m.heading))
-                                        .color(egui::Color32::from_gray(0xee)),
+                                        .font(egui::FontId::new(
+                                            m.heading,
+                                            egui::FontFamily::Name("black".into()),
+                                        ))
+                                        .color(ui::TEXT),
                                 )
                                 .sense(egui::Sense::click()),
                             )
@@ -1461,7 +1464,9 @@ impl App {
                     ui.add_space(m.space(10.0));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = m.space(8.0);
-                        if ui::chip(ui, &m, "Playable here", self.playable_only).clicked() {
+                        if ui::filter_group(ui, &m, &[("Playable here", self.playable_only)])
+                            .is_some()
+                        {
                             self.actions
                                 .push(Action::SetPlayableOnly(!self.playable_only));
                         }
@@ -1495,15 +1500,19 @@ impl App {
                 {
                     ui.add_space(m.space(10.0));
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = m.space(8.0);
-                        for (label, on) in [("All", false), ("Installed", true)] {
-                            let selected = self.collections_installed_only == on;
-                            if ui::chip(ui, &m, label, selected).clicked() {
-                                self.actions.push(Action::SetCollectionsInstalledOnly(on));
-                            }
+                        let installed = self.collections_installed_only;
+                        if let Some(picked) = ui::filter_group(
+                            ui,
+                            &m,
+                            &[("All", !installed), ("Installed", installed)],
+                        ) {
+                            self.actions
+                                .push(Action::SetCollectionsInstalledOnly(picked == 1));
                         }
-                        ui.add_space(m.space(16.0));
-                        if ui::chip(ui, &m, "Playable here", self.playable_only).clicked() {
+                        ui.add_space(m.space(24.0));
+                        if ui::filter_group(ui, &m, &[("Playable here", self.playable_only)])
+                            .is_some()
+                        {
                             self.actions
                                 .push(Action::SetPlayableOnly(!self.playable_only));
                         }

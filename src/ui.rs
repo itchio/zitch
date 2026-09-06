@@ -11,14 +11,218 @@ use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, Tab, UploadExt,
 };
 
-pub const BG: Color32 = Color32::from_rgb(0x14, 0x12, 0x1a);
-const TILE_BG: Color32 = Color32::from_rgb(0x24, 0x21, 0x2e);
-const TILE_HOVER: Color32 = Color32::from_rgb(0x34, 0x30, 0x42);
-const TEXT: Color32 = Color32::from_gray(0xee);
+// The itch app's palette (renderer/styles.ts): codGray, itemBackground,
+// ivory, carnation, gossip, amber.
+pub const BG: Color32 = Color32::from_gray(0x15);
+const TILE_BG: Color32 = Color32::from_gray(0x1e);
+const TILE_HOVER: Color32 = Color32::from_gray(0x2a);
+pub const TEXT: Color32 = Color32::from_rgb(0xff, 0xff, 0xf0);
 const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
-const DIM: Color32 = Color32::from_gray(0x99);
-const GREEN: Color32 = Color32::from_rgb(0x4c, 0xc9, 0x6b);
-const AMBER: Color32 = Color32::from_rgb(0xf5, 0xb8, 0x3d);
+const DIM: Color32 = Color32::from_gray(0xba);
+const GREEN: Color32 = Color32::from_rgb(0xb9, 0xe8, 0xa1);
+const AMBER: Color32 = Color32::from_rgb(0xff, 0xc2, 0x00);
+/// The app's secondary button surface: translucent white over whatever
+/// is behind, so one style works on the page and on a row.
+const SURFACE: Color32 = Color32::from_rgba_premultiplied(0x0b, 0x0b, 0x0b, 0x0b);
+const SURFACE_HOVER: Color32 = Color32::from_rgba_premultiplied(0x17, 0x17, 0x17, 0x17);
+const BORDER: Color32 = Color32::from_rgba_premultiplied(0x1c, 0x1c, 0x1c, 0x1c);
+const BORDER_HOVER: Color32 = Color32::from_rgba_premultiplied(0x33, 0x33, 0x33, 0x33);
+const SHADOW: Color32 = Color32::from_rgb(0x1b, 0x19, 0x19);
+/// Border of the filter bar's options.
+const FILTER_BORDER: Color32 = Color32::from_rgb(0x84, 0x34, 0x42);
+
+const LATO_REGULAR: &[u8] = include_bytes!("../assets/fonts/Lato-Regular.ttf");
+const LATO_BOLD: &[u8] = include_bytes!("../assets/fonts/Lato-Bold.ttf");
+const LATO_BLACK: &[u8] = include_bytes!("../assets/fonts/Lato-Black.ttf");
+
+/// Lato, the itch app's face, ahead of egui's bundled fonts, which stay
+/// for the glyphs Lato lacks.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        ("lato", LATO_REGULAR),
+        ("lato-bold", LATO_BOLD),
+        ("lato-black", LATO_BLACK),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+    }
+    let fallback = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for (family, name) in [
+        (egui::FontFamily::Proportional, "lato"),
+        (egui::FontFamily::Name("bold".into()), "lato-bold"),
+        (egui::FontFamily::Name("black".into()), "lato-black"),
+    ] {
+        let mut list = vec![name.to_string()];
+        list.extend(fallback.iter().cloned());
+        fonts.families.insert(family, list);
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn bold(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("bold".into()))
+}
+
+fn black(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("black".into()))
+}
+
+pub fn visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BG;
+    visuals.window_fill = TILE_BG;
+    visuals.extreme_bg_color = Color32::from_black_alpha(0x66);
+    visuals.selection.bg_fill = ACCENT.linear_multiply(0.4);
+    visuals.selection.stroke = Stroke::new(1.0, TEXT);
+    let widgets = &mut visuals.widgets;
+    for w in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        w.bg_stroke = Stroke::new(1.0, BORDER);
+        w.fg_stroke = Stroke::new(1.0, TEXT);
+        w.corner_radius = CornerRadius::same(12);
+    }
+    widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_HOVER);
+    widgets.active.bg_stroke = Stroke::new(1.0, BORDER_HOVER);
+    widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    visuals
+}
+
+/// Outline of a rectangle with superellipse corners, the `corner-shape:
+/// squircle` the itch app uses. `radii` are top-left, top-right,
+/// bottom-right, bottom-left.
+fn squircle(rect: Rect, radii: [f32; 4]) -> Vec<egui::Pos2> {
+    const EXPONENT: f32 = 4.0;
+    const STEPS: usize = 10;
+    let max = rect.width().min(rect.height()) / 2.0;
+    let corners = [
+        (rect.left_top(), vec2(1.0, 1.0), std::f32::consts::PI),
+        (
+            rect.right_top(),
+            vec2(-1.0, 1.0),
+            std::f32::consts::FRAC_PI_2 * 3.0,
+        ),
+        (rect.right_bottom(), vec2(-1.0, -1.0), 0.0),
+        (
+            rect.left_bottom(),
+            vec2(1.0, -1.0),
+            std::f32::consts::FRAC_PI_2,
+        ),
+    ];
+    let mut points = Vec::with_capacity(4 * (STEPS + 1));
+    for ((corner, inward, start), radius) in corners.into_iter().zip(radii) {
+        let radius = radius.clamp(0.0, max);
+        if radius <= 0.0 {
+            points.push(corner);
+            continue;
+        }
+        let center = corner + inward * radius;
+        for step in 0..=STEPS {
+            let angle = start + std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
+            let (sin, cos) = angle.sin_cos();
+            let x = cos.abs().powf(2.0 / EXPONENT) * cos.signum();
+            let y = sin.abs().powf(2.0 / EXPONENT) * sin.signum();
+            points.push(center + vec2(x, y) * radius);
+        }
+    }
+    points
+}
+
+fn fill_squircle(ui: &Ui, rect: Rect, radii: [f32; 4], fill: Color32, stroke: Stroke) {
+    ui.painter().add(egui::Shape::convex_polygon(
+        squircle(rect, radii),
+        fill,
+        stroke,
+    ));
+}
+
+/// A squircle filled with a linear gradient. `angle` follows CSS: 0 runs
+/// bottom to top, positive turns clockwise.
+fn gradient_squircle(
+    ui: &Ui,
+    rect: Rect,
+    radii: [f32; 4],
+    angle_degrees: f32,
+    from: Color32,
+    to: Color32,
+    stroke: Stroke,
+) {
+    let outline = squircle(rect, radii);
+    let (sin, cos) = angle_degrees.to_radians().sin_cos();
+    let dir = vec2(sin, -cos);
+    let half = vec2(rect.width(), rect.height()) / 2.0;
+    let extent = (half.x * dir.x).abs() + (half.y * dir.y).abs();
+    let color_at = |p: egui::Pos2| {
+        let t = ((p - rect.center()).dot(dir) / (2.0 * extent) + 0.5).clamp(0.0, 1.0);
+        from.lerp_to_gamma(to, t)
+    };
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.center(), color_at(rect.center()));
+    for p in &outline {
+        mesh.colored_vertex(*p, color_at(*p));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    // The mesh has no feathering; the stroke covers its edge.
+    ui.painter().add(egui::Shape::convex_polygon(
+        outline,
+        Color32::TRANSPARENT,
+        stroke,
+    ));
+}
+
+fn hsl(h: f32, s: f32, l: f32) -> Color32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let byte = |v: f32| ((v + m) * 255.0).round() as u8;
+    Color32::from_rgb(byte(r), byte(g), byte(b))
+}
+
+/// The controller focus ring, the app's `outline: 2px solid accent;
+/// outline-offset: 2px` on keyboard focus.
+fn focus_ring(ui: &Ui, rect: Rect, radii: [f32; 4], m: &Metrics) {
+    let gap = m.space(2.0);
+    let width = m.space(2.0);
+    let outer = rect.expand(gap + width / 2.0);
+    let radii = radii.map(|r| (r + gap + width / 2.0).max(0.0));
+    ui.painter().add(egui::Shape::convex_polygon(
+        squircle(outer, radii),
+        Color32::TRANSPARENT,
+        Stroke::new(width, ACCENT),
+    ));
+}
+
+/// Text with the app's 1px drop shadow.
+fn shadowed_text(ui: &Ui, pos: egui::Pos2, galley: Arc<egui::Galley>, color: Color32) {
+    ui.painter().galley(
+        pos + vec2(0.0, 1.0),
+        galley.clone(),
+        Color32::from_black_alpha(0x66),
+    );
+    ui.painter().galley(pos, galley, color);
+}
 
 /// itch.io covers are 315x250; tiles keep that shape.
 const COVER_ASPECT: f32 = 315.0 / 250.0;
@@ -377,7 +581,7 @@ pub fn library(
             ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
                 ui.label(
                     egui::RichText::new(&section.title)
-                        .font(FontId::proportional(m.section))
+                        .font(bold(m.section))
                         .color(if is_focused_row { TEXT } else { DIM }),
                 );
             });
@@ -792,13 +996,22 @@ pub fn centered_spinner(ui: &mut Ui, m: &Metrics) {
 
 /// A small label anchored by its bottom-left corner.
 fn badge(ui: &Ui, m: &Metrics, bottom_left: egui::Pos2, text: &str, fill: Color32) {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), FontId::proportional(m.badge), BG);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: black(m.badge),
+            color: BG,
+            extra_letter_spacing: m.badge * 0.06,
+            ..Default::default()
+        },
+    );
+    let galley = ui.painter().layout_job(job);
     let pad = m.space(6.0) * vec2(1.0, 0.5);
     let size = galley.size() + 2.0 * pad;
     let rect = Rect::from_min_size(bottom_left - vec2(0.0, size.y), size);
-    ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
+    fill_squircle(ui, rect, [m.space(4.0); 4], fill, Stroke::NONE);
     ui.painter().galley(rect.min + pad, galley, BG);
 }
 
@@ -898,7 +1111,7 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
             ui.set_max_width(width - cover_width - column_gap);
             ui.label(
                 egui::RichText::new(&game.title)
-                    .font(FontId::proportional(m.title))
+                    .font(black(m.title))
                     .color(TEXT),
             );
             if let Some(text) = game.short_text.as_deref().filter(|t| !t.is_empty()) {
@@ -994,6 +1207,12 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
             ui.add_space(m.space(20.0));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = m.space(12.0);
+                // An operation in flight is a readout where the main action
+                // was, as in the app; the buttons that remain are secondary.
+                if let Some(install) = install.filter(|i| i.error.is_none() && !i.cancelling) {
+                    let text = format!("{} {:.0}%", install.stage, install.progress * 100.0);
+                    status_readout(ui, m, &text);
+                }
                 for (index, (label, action)) in buttons.iter().enumerate() {
                     let response = pill(ui, m, label, index == focused_button, index == 0);
                     if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
@@ -1008,30 +1227,93 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
     });
 }
 
+/// A spinner and a bold label, the height of a pill.
+fn status_readout(ui: &mut Ui, m: &Metrics, text: &str) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), bold(m.button), TEXT);
+    let icon = m.space(22.0);
+    let height = galley.size().y.max(m.space(24.0)) + 2.0 * m.space(7.0);
+    let size = vec2(
+        icon + m.space(12.0) + galley.size().x + m.space(12.0),
+        height,
+    );
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
+        pos2(rect.left(), rect.center().y - icon / 2.0),
+        vec2(icon, icon),
+    )));
+    child.add(egui::Spinner::new().size(icon).color(ACCENT));
+    ui.painter().galley(
+        pos2(
+            rect.left() + icon + m.space(12.0),
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        Color32::from_rgb(0xe8, 0xe2, 0xdf),
+    );
+}
+
 fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> egui::Response {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_string(), FontId::proportional(m.button), TEXT);
-    let size = galley.size() + m.space(1.0) * vec2(40.0, 18.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), bold(m.button), TEXT);
+    let size = vec2(
+        galley.size().x + 2.0 * m.space(20.0),
+        galley.size().y.max(m.space(24.0)) + 2.0 * m.space(7.0),
+    );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let fill = match (primary, focused) {
-        (true, _) => ACCENT,
-        (false, true) => TILE_HOVER,
-        (false, false) => TILE_BG,
-    };
-    let radius = CornerRadius::same(6);
-    ui.painter().rect_filled(rect, radius, fill);
-    if focused {
-        ui.painter().rect_stroke(
-            rect.expand(3.0),
-            CornerRadius::same(9),
-            Stroke::new(2.5, TEXT),
-            egui::StrokeKind::Outside,
+    let radii = [m.space(16.0); 4];
+    let border = Stroke::new(m.space(1.25).max(1.0), FILTER_BORDER);
+    ui.painter().add(egui::Shape::convex_polygon(
+        squircle(rect.translate(vec2(0.0, m.space(1.0))), radii),
+        SHADOW,
+        Stroke::NONE,
+    ));
+    let color = if primary {
+        // The app's .primary: a 10deg gradient a shade darker than the
+        // accent, lightening one step on hover; focus does the same.
+        let (from, to, edge) = if focused {
+            (
+                hsl(355.0, 0.5, 0.36),
+                hsl(355.0, 0.5, 0.54),
+                hsl(355.0, 0.45, 0.62),
+            )
+        } else {
+            (
+                hsl(355.0, 0.5, 0.32),
+                hsl(355.0, 0.5, 0.48),
+                hsl(355.0, 0.4, 0.52),
+            )
+        };
+        gradient_squircle(
+            ui,
+            rect,
+            radii,
+            10.0,
+            from,
+            to,
+            Stroke::new(border.width, edge),
         );
+        TEXT
+    } else {
+        let (fill, edge) = if focused {
+            (SURFACE_HOVER, BORDER_HOVER)
+        } else {
+            (SURFACE, BORDER)
+        };
+        fill_squircle(ui, rect, radii, fill, Stroke::new(border.width, edge));
+        if focused {
+            TEXT
+        } else {
+            Color32::from_rgb(0xe8, 0xe2, 0xdf)
+        }
+    };
+    if focused {
+        focus_ring(ui, rect, radii, m);
     }
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, TEXT);
-    response
+    shadowed_text(ui, rect.center() - galley.size() / 2.0, galley, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub fn human_size(bytes: i64) -> String {
@@ -1059,15 +1341,42 @@ pub fn human_duration_seconds(seconds: i64) -> String {
     }
 }
 
+/// The app's styles.progress: a grey track and an accent fill with
+/// diagonal stripes.
 fn progress_bar(ui: &Ui, rect: Rect, fraction: f32) {
-    let radius = CornerRadius::same(3);
-    ui.painter().rect_filled(rect, radius, TILE_HOVER);
+    let radius = CornerRadius::same((rect.height() / 2.0) as u8);
+    ui.painter().rect_filled(
+        rect,
+        radius,
+        Color32::from_rgba_unmultiplied(165, 165, 165, 120),
+    );
     let filled = Rect::from_min_size(
         rect.min,
         vec2(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
     );
-    if filled.width() > 0.0 {
-        ui.painter().rect_filled(filled, radius, ACCENT);
+    if filled.width() <= 0.0 {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(filled);
+    painter.rect_filled(filled, radius, ACCENT);
+    painter.rect_filled(filled, radius, Color32::from_white_alpha(0x1a));
+    // Stripes at -60deg: each is a parallelogram spanning the bar's height.
+    let period = (rect.height() * 2.0).max(8.0);
+    let skew = rect.height() / 60f32.to_radians().tan();
+    let mut x = filled.left() - skew;
+    while x < filled.right() {
+        let points = vec![
+            pos2(x, filled.bottom()),
+            pos2(x + period / 2.0, filled.bottom()),
+            pos2(x + period / 2.0 + skew, filled.top()),
+            pos2(x + skew, filled.top()),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            Color32::from_white_alpha(0x4d),
+            Stroke::NONE,
+        ));
+        x += period;
     }
 }
 
@@ -1116,14 +1425,14 @@ pub fn prompt(
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(TILE_BG)
-                .corner_radius(CornerRadius::same(10))
-                .stroke(Stroke::new(1.0, TILE_HOVER))
+                .corner_radius(CornerRadius::same(14))
+                .stroke(Stroke::new(1.0, BORDER))
                 .inner_margin(m.space(24.0))
                 .show(ui, |ui| {
                     ui.set_width(width);
                     ui.label(
                         egui::RichText::new(&prompt.title)
-                            .font(FontId::proportional(m.dialog))
+                            .font(bold(m.dialog))
                             .color(TEXT),
                     );
                     if !prompt.body.is_empty() {
@@ -1205,12 +1514,17 @@ pub fn footer(
 pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
     let size = m.space(40.0);
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-    let fill = if response.hovered() {
-        TILE_HOVER
+    let (fill, edge) = if response.hovered() {
+        (SURFACE_HOVER, BORDER_HOVER)
     } else {
-        TILE_BG
+        (SURFACE, BORDER)
     };
-    ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+    ui.painter().circle(
+        rect.center(),
+        size / 2.0,
+        fill,
+        Stroke::new(m.space(1.25).max(1.0), edge),
+    );
     let c = rect.center();
     let arm = m.space(7.0);
     let points = [
@@ -1223,30 +1537,121 @@ pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A small filter toggle for the header.
-pub fn chip(ui: &mut Ui, m: &Metrics, label: &str, selected: bool) -> egui::Response {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_string(), FontId::proportional(m.caption), TEXT);
-    let size = galley.size() + m.space(1.0) * vec2(20.0, 10.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if selected {
-        ACCENT
-    } else if response.hovered() {
-        TILE_HOVER
-    } else {
-        TILE_BG
-    };
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same((size.y / 2.0) as u8), fill);
-    let color = if selected { BG } else { DIM };
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, color);
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+/// One segmented group from the itch app's filter bar. Returns the index
+/// of an option the pointer picked.
+pub fn filter_group(ui: &mut Ui, m: &Metrics, options: &[(&str, bool)]) -> Option<usize> {
+    let mut picked = None;
+    let radius = m.space(12.0);
+    let border = m.space(1.25).max(1.0);
+    let icon = m.label * 0.8;
+    let pad = vec2(m.label, m.label * 0.5);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (index, &(label, active)) in options.iter().enumerate() {
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(label.to_string(), FontId::proportional(m.label), TEXT);
+            let size = vec2(
+                pad.x * 2.0 + icon + m.label * 0.5 + galley.size().x,
+                pad.y * 2.0 + galley.size().y,
+            );
+            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            let first = index == 0;
+            let last = index + 1 == options.len();
+            let radii = [
+                if first { radius } else { 0.0 },
+                if last { radius } else { 0.0 },
+                if last { radius } else { 0.0 },
+                if first { radius } else { 0.0 },
+            ];
+            let (from, to) = if active {
+                (hsl(355.0, 0.43, 0.33), hsl(355.0, 0.43, 0.22))
+            } else {
+                (hsl(355.0, 0.43, 0.17), hsl(355.0, 0.43, 0.11))
+            };
+            // Options share their inner borders; the stroke is drawn once
+            // per option and overlaps by a border width.
+            let shape = if first {
+                rect
+            } else {
+                Rect::from_min_max(rect.min - vec2(border, 0.0), rect.max)
+            };
+            gradient_squircle(
+                ui,
+                shape,
+                radii,
+                180.0,
+                from,
+                to,
+                Stroke::new(border, FILTER_BORDER),
+            );
+            let icon_rect = Rect::from_min_size(
+                pos2(rect.left() + pad.x, rect.center().y - icon / 2.0),
+                vec2(icon, icon),
+            );
+            if active {
+                checkbox_icon(ui, icon_rect, TEXT);
+            } else {
+                funnel_icon(ui, icon_rect, TEXT.gamma_multiply(0.2));
+            }
+            let text_pos = pos2(
+                icon_rect.right() + m.label * 0.5,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            ui.painter().galley(text_pos, galley, TEXT);
+            if response.clicked() {
+                picked = Some(index);
+            }
+            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+    });
+    picked
 }
 
-/// The tab bar along the top, with the bumper glyphs that switch tabs at
-/// each end. Returns a tab the pointer picked.
+fn checkbox_icon(ui: &Ui, rect: Rect, color: Color32) {
+    let w = (rect.width() * 0.11).max(1.5);
+    ui.painter().rect_stroke(
+        rect.shrink(w / 2.0),
+        CornerRadius::same((rect.width() * 0.15) as u8),
+        Stroke::new(w, color),
+        egui::StrokeKind::Inside,
+    );
+    let p = |x: f32, y: f32| rect.min + vec2(x, y) * rect.width();
+    ui.painter().add(egui::Shape::line(
+        vec![p(0.27, 0.52), p(0.44, 0.69), p(0.74, 0.36)],
+        Stroke::new(w, color),
+    ));
+}
+
+fn funnel_icon(ui: &Ui, rect: Rect, color: Color32) {
+    let w = (rect.width() * 0.11).max(1.5);
+    let p = |x: f32, y: f32| rect.min + vec2(x, y) * rect.width();
+    ui.painter().add(egui::Shape::closed_line(
+        vec![
+            p(0.1, 0.18),
+            p(0.9, 0.18),
+            p(0.6, 0.55),
+            p(0.6, 0.82),
+            p(0.4, 0.92),
+            p(0.4, 0.55),
+        ],
+        Stroke::new(w, color),
+    ));
+}
+
+/// The itch logo at the head of the page.
+pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
+    if let Some(texture) = glyphs.logo() {
+        let height = m.space(26.0);
+        let size = texture.size_vec2();
+        ui.add(
+            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                .fit_to_exact_size(vec2(height * size.x / size.y, height)),
+        );
+        ui.add_space(m.space(14.0));
+    }
+}
+
 pub fn tab_strip(
     ui: &mut Ui,
     m: &Metrics,
@@ -1271,11 +1676,9 @@ pub fn tab_strip(
         for tab in Tab::ALL {
             let selected = tab == active;
             let color = if selected { TEXT } else { DIM };
-            let galley = ui.painter().layout_no_wrap(
-                tab.label().to_string(),
-                FontId::proportional(m.section),
-                color,
-            );
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(tab.label().to_string(), bold(m.section), color);
             let count = (tab == Tab::Downloads && downloading > 0).then(|| {
                 ui.painter().layout_no_wrap(
                     downloading.to_string(),
@@ -1446,7 +1849,7 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                 let text_width = (text_right - text_left).max(0.0);
                 let mut job = egui::text::LayoutJob::simple_singleline(
                     row.title.clone(),
-                    FontId::proportional(m.title),
+                    bold(m.title),
                     TEXT,
                 );
                 job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
