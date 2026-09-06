@@ -182,6 +182,10 @@ impl Rows {
         }
         let focused = self.focused_game();
         self.sections = sections;
+        // A gesture in flight indexes rows that may no longer exist.
+        self.swipe = None;
+        self.fling = egui::Vec2::ZERO;
+        self.fling_row = None;
         self.cols.resize(self.sections.len(), 0);
         self.hscroll.resize(self.sections.len(), 0.0);
         self.hmax.resize(self.sections.len(), 0.0);

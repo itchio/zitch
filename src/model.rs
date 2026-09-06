@@ -138,6 +138,8 @@ pub enum Page {
 pub struct CollectionGames {
     pub collection: Collection,
     pub games: Vec<Game>,
+    /// Only the first page or so of a big collection was fetched.
+    pub truncated: bool,
 }
 
 /// The top-level screens, switched with the bumpers.

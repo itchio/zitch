@@ -208,6 +208,16 @@ pub struct Client {
     incoming: Mutex<mpsc::Receiver<Incoming>>,
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        // The reader thread holds a clone of this socket and would otherwise
+        // block on it until the daemon exits.
+        if let Ok(stream) = self.writer.lock() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Message {
     id: Option<Value>,

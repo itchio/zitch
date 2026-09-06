@@ -83,6 +83,7 @@ pub enum Event {
     OwnedGames(Vec<Game>),
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
+    CollectionsFailed(String),
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
     /// The whole download queue, after anything changed it.
@@ -93,6 +94,16 @@ pub enum Event {
     },
     DownloadFinished(Download),
     DownloadErrored(Download),
+    /// Queueing the install never produced a download.
+    InstallFailed {
+        game_id: i64,
+        error: String,
+    },
+    /// The download stays in the queue as it was.
+    DiscardFailed {
+        download_id: String,
+        error: String,
+    },
     UninstallFinished {
         cave_id: String,
         result: Result<(), String>,
@@ -238,9 +249,6 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let (games, stale) = owned_games(&client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
-    let (collections, collections_stale) = collections(&client, profile.id, false)?;
-    emit.send(Event::Collections(collections));
-    let stale = stale || collections_stale;
     refresh_caves(&client, emit);
     refresh_downloads(&client, emit);
 
@@ -254,6 +262,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         stale: Arc::new(AtomicBool::new(stale)),
     };
     sync.spawn(&link, emit);
+    spawn_collections(&link, emit, profile.id);
     let mut next_probe = Instant::now() + PROBE_EVERY;
 
     loop {
@@ -278,7 +287,11 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
                 Err(error) => {
                     emit.send(Event::Error(format!("restarting butler: {error:#}")));
-                    std::thread::sleep(RESPAWN_DELAY);
+                    if let Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) =
+                        commands.recv_timeout(RESPAWN_DELAY)
+                    {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -290,15 +303,25 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Command::Install { game }) => {
+                let game_id = game.id;
                 if let Err(error) = queue_install(&client, &config, *game) {
                     log::error!("{error:#}");
-                    emit.send(Event::Error(format!("{error:#}")));
+                    emit.send(Event::InstallFailed {
+                        game_id,
+                        error: format!("{error:#}"),
+                    });
                 }
                 refresh_downloads(&client, emit);
             }
             Ok(Command::Discard { download_id }) => {
-                if let Err(error) = client.call(DownloadsDiscardParams { download_id }) {
+                if let Err(error) = client.call(DownloadsDiscardParams {
+                    download_id: download_id.clone(),
+                }) {
                     log::warn!("discard: {error:#}");
+                    emit.send(Event::DiscardFailed {
+                        download_id,
+                        error: format!("{error:#}"),
+                    });
                 }
                 refresh_downloads(&client, emit);
             }
@@ -314,6 +337,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     format!("uninstall-{cave_id}"),
                     Arc::clone(&link),
                     emit.clone(),
+                    {
+                        let cave_id = cave_id.clone();
+                        move |error| Event::UninstallFinished {
+                            cave_id: cave_id.clone(),
+                            result: Err(format!("{error:#}")),
+                        }
+                    },
                     move |client, emit| {
                         // Cancel comes first so a reflex press keeps the game.
                         let confirmed = prompts.ask(
@@ -325,14 +355,14 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         if !confirmed {
                             return Ok(());
                         }
-                        let result = client
-                            .call(UninstallPerformParams {
-                                cave_id: cave_id.clone(),
-                                hard: None,
-                            })
-                            .map(|_| ())
-                            .map_err(|e| format!("{e:#}"));
-                        emit.send(Event::UninstallFinished { cave_id, result });
+                        client.call(UninstallPerformParams {
+                            cave_id: cave_id.clone(),
+                            hard: None,
+                        })?;
+                        emit.send(Event::UninstallFinished {
+                            cave_id,
+                            result: Ok(()),
+                        });
                         refresh_caves(client, emit);
                         Ok(())
                     },
@@ -346,15 +376,23 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     format!("launch-{cave_id}"),
                     Arc::clone(&link),
                     emit.clone(),
+                    {
+                        let cave_id = cave_id.clone();
+                        move |error| Event::LaunchFinished {
+                            cave_id: cave_id.clone(),
+                            // The innermost error is butler's own words.
+                            result: Err(error.root_cause().to_string()),
+                        }
+                    },
                     move |client, emit| {
                         let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
-                        emit.send(Event::LaunchFinished {
-                            cave_id,
-                            // The innermost error is butler's own words.
-                            result: result.map_err(|e| e.root_cause().to_string()),
-                        });
                         // Play time and last-played change with every run.
                         refresh_caves(client, emit);
+                        result?;
+                        emit.send(Event::LaunchFinished {
+                            cave_id,
+                            result: Ok(()),
+                        });
                         Ok(())
                     },
                 );
@@ -375,6 +413,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         format!("update-{}", update.cave_id),
                         Arc::clone(&link),
                         emit.clone(),
+                        |error| Event::Error(format!("{error:#}")),
                         move |client, emit| {
                             if let Some(choice) = pick_update(&prompts, emit, &update) {
                                 queue_update(client, &update, choice)?;
@@ -694,6 +733,7 @@ impl Sync {
             "sync".into(),
             Arc::clone(link),
             emit.clone(),
+            |error| Event::Error(format!("{error:#}")),
             move |client, emit| match sync.run(client, emit) {
                 Ok(()) => Ok(()),
                 Err(error) if is_offline(&error) => {
@@ -720,8 +760,6 @@ impl Sync {
             // when butler flags it stale, so new purchases appear.
             let (games, _) = owned_games(client, self.profile_id, true)?;
             emit.send(Event::OwnedGames(games));
-            let (collections, _) = collections(client, self.profile_id, true)?;
-            emit.send(Event::Collections(collections));
             self.stale.store(false, Ordering::Relaxed);
         }
         check_updates(client, emit)
@@ -753,11 +791,14 @@ fn check_updates(client: &Client, emit: &Emitter) -> Result<()> {
     Ok(())
 }
 
-fn spawn_op<F>(name: String, link: Link, emit: Emitter, op: F)
+fn spawn_op<F, E>(name: String, link: Link, emit: Emitter, fail: E, op: F)
 where
     F: FnOnce(&Client, &Emitter) -> Result<()> + Send + 'static,
+    E: Fn(anyhow::Error) -> Event + Send + std::marker::Sync + 'static,
 {
+    let fail = Arc::new(fail);
     let outer_emit = emit.clone();
+    let outer_fail = Arc::clone(&fail);
     let outer_name = name.clone();
     let result = std::thread::Builder::new()
         .name(name.clone())
@@ -765,7 +806,7 @@ where
             let client = match connect(&link) {
                 Ok(client) => client,
                 Err(error) => {
-                    emit.send(Event::Error(format!("{error:#}")));
+                    emit.send(fail(error));
                     return;
                 }
             };
@@ -776,12 +817,14 @@ where
                     log::warn!("{name}: {error:#} (butler exited)");
                 } else {
                     log::error!("{name}: {error:#}");
-                    emit.send(Event::Error(format!("{error:#}")));
+                    emit.send(fail(error));
                 }
             }
         });
     if let Err(error) = result {
-        outer_emit.send(Event::Error(format!("spawning {outer_name}: {error}")));
+        outer_emit.send(outer_fail(anyhow::anyhow!(
+            "spawning {outer_name}: {error}"
+        )));
     }
 }
 
@@ -980,6 +1023,30 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
 /// exhausting, and each page is a round trip to the API when fresh.
 const COLLECTION_GAMES_MAX: usize = 300;
 
+/// Collections are slow to page through and not needed for the library, so
+/// they load beside it: the cached copy first, then a fresh one if butler
+/// says the cache is stale.
+fn spawn_collections(link: &Link, emit: &Emitter, profile_id: i64) {
+    spawn_op(
+        "collections".into(),
+        Arc::clone(link),
+        emit.clone(),
+        |error| Event::CollectionsFailed(format!("{error:#}")),
+        move |client, emit| {
+            let (cached, stale) = collections(client, profile_id, false)?;
+            emit.send(Event::Collections(cached));
+            if stale {
+                match collections(client, profile_id, true) {
+                    Ok((fresh, _)) => emit.send(Event::Collections(fresh)),
+                    // The cached copy is already up; offline is not an error.
+                    Err(error) => log::warn!("refreshing collections: {error:#}"),
+                }
+            }
+            Ok(())
+        },
+    );
+}
+
 fn collections(
     client: &Client,
     profile_id: i64,
@@ -1007,6 +1074,7 @@ fn collections(
     for collection in collections {
         let mut games = Vec::new();
         let mut cursor = None;
+        let mut truncated = false;
         loop {
             let page = client.call(FetchCollectionGamesParams {
                 profile_id,
@@ -1019,13 +1087,21 @@ fn collections(
             stale |= page.stale == Some(true);
             games.extend(page.items.into_iter().filter_map(|item| item.game));
             match page.next_cursor {
-                Some(next) if !next.is_empty() && games.len() < COLLECTION_GAMES_MAX => {
-                    cursor = Some(next)
+                Some(next) if !next.is_empty() => {
+                    if games.len() >= COLLECTION_GAMES_MAX {
+                        truncated = true;
+                        break;
+                    }
+                    cursor = Some(next);
                 }
                 _ => break,
             }
         }
-        shelves.push(CollectionGames { collection, games });
+        shelves.push(CollectionGames {
+            collection,
+            games,
+            truncated,
+        });
     }
     Ok((shelves, stale && !fresh))
 }

@@ -48,6 +48,8 @@ pub struct App {
     updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
     prompt: Option<Prompt>,
+    /// Questions that arrived while another was showing, oldest first.
+    prompt_queue: std::collections::VecDeque<Prompt>,
     /// Whether butler can reach itch.io; installs and updates need it.
     online: bool,
     tab: Tab,
@@ -193,6 +195,7 @@ impl App {
             running: Default::default(),
             updates: Default::default(),
             prompt: None,
+            prompt_queue: Default::default(),
             online: true,
             tab: Tab::default(),
             collections: Loadable::default(),
@@ -354,7 +357,7 @@ impl App {
                     self.actions.push(answer);
                 }
                 Action::Answer { prompt: id, choice } if id == prompt.id => {
-                    self.prompt = None;
+                    self.prompt = self.prompt_queue.pop_front();
                     self.backend.send(Command::Answer { prompt: id, choice });
                 }
                 _ => {}
@@ -371,7 +374,7 @@ impl App {
                     }
                     Tab::Downloads => {
                         let rows = self.download_rows();
-                        let (row, button) = self.downloads_focus;
+                        let (row, button) = self.downloads_focus_in(&rows);
                         let row = match direction {
                             Direction::Up => row.saturating_sub(1),
                             Direction::Down => (row + 1).min(rows.len().saturating_sub(1)),
@@ -440,7 +443,7 @@ impl App {
                     }
                     Tab::Downloads => {
                         let rows = self.download_rows();
-                        let (row, button) = self.downloads_focus;
+                        let (row, button) = self.downloads_focus_in(&rows);
                         if let Some((_, action)) = rows.get(row).and_then(|r| r.buttons.get(button))
                         {
                             self.actions.push(action.clone());
@@ -776,11 +779,17 @@ impl App {
                     (true, false) => Some("Nothing here runs on this computer".to_string()),
                     _ => None,
                 };
-                ui::Section {
-                    title: format!("{} · {}", c.collection.title, c.collection.games_count),
-                    games,
-                    note,
-                }
+                let title = if c.truncated {
+                    format!(
+                        "{} · first {} of {}",
+                        c.collection.title,
+                        c.games.len(),
+                        c.collection.games_count
+                    )
+                } else {
+                    format!("{} · {}", c.collection.title, c.collection.games_count)
+                };
+                ui::Section { title, games, note }
             })
             .collect();
         sections.sort_by_key(|s| s.games.is_empty());
@@ -943,10 +952,6 @@ impl App {
                             self.pending_installs.remove(&game.id);
                         }
                     }
-                    // A queue attempt that produced no download is over.
-                    if downloads.is_empty() {
-                        self.pending_installs.clear();
-                    }
                     self.downloads = downloads;
                     self.rebuild_installs();
                 }
@@ -1001,10 +1006,17 @@ impl App {
                     }
                     self.online = online;
                 }
-                Event::Prompt(prompt) => self.prompt = Some(prompt),
+                Event::Prompt(prompt) => {
+                    if self.prompt.is_some() {
+                        self.prompt_queue.push_back(prompt);
+                    } else {
+                        self.prompt = Some(prompt);
+                    }
+                }
                 Event::PromptClosed(id) => {
+                    self.prompt_queue.retain(|p| p.id != id);
                     if self.prompt.as_ref().is_some_and(|p| p.id == id) {
-                        self.prompt = None;
+                        self.prompt = self.prompt_queue.pop_front();
                     }
                 }
                 Event::UninstallFinished { result, .. } => {
@@ -1013,10 +1025,24 @@ impl App {
                         Err(error) => format!("Uninstall failed: {error}"),
                     });
                 }
-                Event::Error(message) => {
-                    // A failed queue attempt has no download to report on.
-                    self.pending_installs.clear();
+                Event::CollectionsFailed(error) => {
+                    log::error!("loading collections: {error}");
+                    if self.collections.get().is_none() {
+                        self.collections = Loadable::Failed(error);
+                    }
+                }
+                Event::InstallFailed { game_id, error } => {
+                    self.pending_installs.remove(&game_id);
                     self.rebuild_installs();
+                    let title = self.game(game_id).map_or("game", |g| g.title.as_str());
+                    self.notice = Some(format!("Couldn't install {title}: {error}"));
+                }
+                Event::DiscardFailed { download_id, error } => {
+                    self.discarding.remove(&download_id);
+                    self.rebuild_installs();
+                    self.notice = Some(format!("Couldn't cancel: {error}"));
+                }
+                Event::Error(message) => {
                     if self.owned.get().is_none() {
                         self.owned = Loadable::Failed(message.clone());
                     }
@@ -1031,6 +1057,15 @@ impl App {
     /// What the footer offers on the current page, in reading order.
     /// What the Downloads tab lists: butler's queue first, in its order,
     /// then what finished this session.
+    /// The stored focus, clamped to rows that still exist. The queue changes
+    /// underneath the focus, so every reader clamps rather than trusting it.
+    fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> (usize, usize) {
+        let (row, button) = self.downloads_focus;
+        let row = row.min(rows.len().saturating_sub(1));
+        let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
+        (row, button.min(buttons.saturating_sub(1)))
+    }
+
     fn download_rows(&self) -> Vec<ui::DownloadRow<'_>> {
         let mut rows = Vec::new();
         let mut queue: Vec<&Download> = self.downloads.iter().collect();
@@ -1159,7 +1194,7 @@ impl App {
                 }
                 Tab::Downloads => {
                     let rows = self.download_rows();
-                    let (row, button) = self.downloads_focus;
+                    let (row, button) = self.downloads_focus_in(&rows);
                     let mut hints = Vec::new();
                     if rows.len() > 1 {
                         hints.push((vec![Glyph::Navigate], "Browse".to_string()));
@@ -1394,6 +1429,9 @@ impl App {
                             Loadable::Loaded(collections) if collections.is_empty() => {
                                 ui::placeholder(ui, &m, "No collections")
                             }
+                            Loadable::Failed(_) => {
+                                ui::placeholder(ui, &m, "Couldn't load collections")
+                            }
                             // Scoped so the rows' scroll state does not share
                             // egui ids with the Library tab's rows.
                             Loadable::Loaded(_) => {
@@ -1418,13 +1456,7 @@ impl App {
                         },
                         Tab::Downloads => {
                             let rows = self.download_rows();
-                            let (row, button) = self.downloads_focus;
-                            let row = row.min(rows.len().saturating_sub(1));
-                            let button = button.min(
-                                rows.get(row)
-                                    .map_or(0, |r| r.buttons.len())
-                                    .saturating_sub(1),
-                            );
+                            let (row, button) = self.downloads_focus_in(&rows);
                             let mut actions = Vec::new();
                             ui::downloads(
                                 ui,
