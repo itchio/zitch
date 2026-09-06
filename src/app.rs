@@ -28,6 +28,11 @@ pub struct App {
     collections: Loadable<Vec<CollectionGames>>,
     /// Show only installed games on the Collections tab.
     collections_installed_only: bool,
+    /// Installed games per collection from butler's filter, or `None` while
+    /// unknown. Cleared whenever the installs change.
+    collection_installed: Option<std::collections::HashMap<i64, Vec<Game>>>,
+    /// Collections with a page request in flight.
+    collection_loading: std::collections::HashSet<i64>,
     /// The Collections tab's carousels, one per collection.
     pub collection_rows: ui::Rows,
     /// Every game the screen can show, owned or installed, by id.
@@ -200,6 +205,8 @@ impl App {
             tab: Tab::default(),
             collections: Loadable::default(),
             collections_installed_only: false,
+            collection_installed: None,
+            collection_loading: Default::default(),
             collection_rows: ui::Rows::default(),
             downloads_focus: (0, 0),
             finished: Vec::new(),
@@ -312,13 +319,18 @@ impl App {
         for game in self.caves.iter().filter_map(|cave| cave.game.as_ref()) {
             catalog.entry(game.id).or_insert_with(|| game.clone());
         }
-        for game in self
+        let collection_games = self
             .collections
             .get()
             .into_iter()
             .flatten()
-            .flat_map(|c| &c.games)
-        {
+            .flat_map(|c| &c.games);
+        let installed_games = self
+            .collection_installed
+            .iter()
+            .flat_map(|m| m.values())
+            .flatten();
+        for game in collection_games.chain(installed_games) {
             catalog.entry(game.id).or_insert_with(|| game.clone());
         }
         self.catalog = catalog;
@@ -491,8 +503,34 @@ impl App {
             Action::SetCollectionsInstalledOnly(on) => {
                 if self.collections_installed_only != on {
                     self.collections_installed_only = on;
+                    self.request_collection_installed();
                     self.rebuild_collection_sections();
                     self.collection_rows.follow = true;
+                }
+            }
+            Action::MoreGames { row } => {
+                let Some(id) = self
+                    .collection_rows
+                    .sections
+                    .get(row)
+                    .and_then(|s| s.collection)
+                else {
+                    return;
+                };
+                let cursor = self
+                    .collections
+                    .get()
+                    .into_iter()
+                    .flatten()
+                    .find(|c| c.collection.id == id)
+                    .and_then(|c| c.next_cursor.clone());
+                if let Some(cursor) = cursor
+                    && self.collection_loading.insert(id)
+                {
+                    self.backend.send(Command::CollectionPage {
+                        collection_id: id,
+                        cursor,
+                    });
                 }
             }
             Action::SetTab(tab) => {
@@ -655,6 +693,8 @@ impl App {
                 title,
                 games: matches,
                 note: None,
+                more: false,
+                collection: None,
             }]);
             return;
         }
@@ -725,6 +765,8 @@ impl App {
             title: title(games.len()),
             games,
             note,
+            more: false,
+            collection: None,
         })
     }
 
@@ -763,37 +805,55 @@ impl App {
         let Some(collections) = self.collections.get() else {
             return;
         };
+        let installed_only = self.collections_installed_only;
         let mut sections: Vec<ui::Section> = collections
             .iter()
             .map(|c| {
-                let games: Vec<i64> = c
-                    .games
+                // Butler's answer covers the whole collection; until it
+                // arrives, the pages fetched so far stand in.
+                let exact = installed_only
+                    .then(|| self.collection_installed.as_ref()?.get(&c.collection.id))
+                    .flatten();
+                let listed = exact.unwrap_or(&c.games);
+                let games: Vec<i64> = listed
                     .iter()
                     .filter(|g| self.passes(g))
                     .map(|g| g.id)
-                    .filter(|id| !self.collections_installed_only || self.installed.contains(id))
+                    .filter(|id| !installed_only || self.installed.contains(id))
                     .collect();
-                let note = match (games.is_empty(), self.collections_installed_only) {
+                let more = exact.is_none() && c.next_cursor.is_some();
+                let note = match (games.is_empty(), installed_only) {
+                    _ if more => None,
                     _ if c.games.is_empty() => Some("Empty collection".to_string()),
                     (true, true) => Some("Nothing installed from this collection".to_string()),
                     (true, false) => Some("Nothing here runs on this computer".to_string()),
                     _ => None,
                 };
-                let title = if c.truncated {
-                    format!(
-                        "{} · first {} of {}",
-                        c.collection.title,
-                        c.games.len(),
-                        c.collection.games_count
-                    )
-                } else {
-                    format!("{} · {}", c.collection.title, c.collection.games_count)
-                };
-                ui::Section { title, games, note }
+                ui::Section {
+                    title: format!("{} · {}", c.collection.title, c.collection.games_count),
+                    games,
+                    note,
+                    more,
+                    collection: Some(c.collection.id),
+                }
             })
             .collect();
-        sections.sort_by_key(|s| s.games.is_empty());
+        sections.sort_by_key(|s| s.games.is_empty() && !s.more);
         self.collection_rows.set_sections(sections);
+    }
+
+    /// Asks butler which games in each collection are installed, when the
+    /// filter needs it and the answer is not already known.
+    fn request_collection_installed(&mut self) {
+        if !self.collections_installed_only || self.collection_installed.is_some() {
+            return;
+        }
+        let Some(collections) = self.collections.get() else {
+            return;
+        };
+        self.backend.send(Command::CollectionsInstalled {
+            collection_ids: collections.iter().map(|c| c.collection.id).collect(),
+        });
     }
 
     fn rebuild_installs(&mut self) {
@@ -932,12 +992,63 @@ impl App {
                 }
                 Event::Collections(collections) => {
                     self.collections = Loadable::Loaded(collections);
+                    self.collection_loading.clear();
+                    self.collection_installed = None;
+                    self.request_collection_installed();
+                    self.rebuild_catalog();
+                    self.rebuild_collection_sections();
+                }
+                Event::CollectionPage {
+                    collection_id,
+                    games,
+                    next_cursor,
+                } => {
+                    self.collection_loading.remove(&collection_id);
+                    if let Some(c) = self
+                        .collections
+                        .get_mut()
+                        .into_iter()
+                        .flatten()
+                        .find(|c| c.collection.id == collection_id)
+                    {
+                        let known: std::collections::HashSet<i64> =
+                            c.games.iter().map(|g| g.id).collect();
+                        c.games
+                            .extend(games.into_iter().filter(|g| !known.contains(&g.id)));
+                        c.next_cursor = next_cursor;
+                    }
+                    self.rebuild_catalog();
+                    self.rebuild_collection_sections();
+                }
+                Event::CollectionPageFailed {
+                    collection_id,
+                    error,
+                } => {
+                    log::error!("collection {collection_id} page: {error}");
+                    self.collection_loading.remove(&collection_id);
+                    // Stop asking; the spinner would otherwise never leave.
+                    if let Some(c) = self
+                        .collections
+                        .get_mut()
+                        .into_iter()
+                        .flatten()
+                        .find(|c| c.collection.id == collection_id)
+                    {
+                        c.next_cursor = None;
+                    }
+                    self.notice = Some(format!("Couldn't load more: {error}"));
+                    self.rebuild_collection_sections();
+                }
+                Event::CollectionsInstalled(lists) => {
+                    self.collection_installed = Some(lists.into_iter().collect());
                     self.rebuild_catalog();
                     self.rebuild_collection_sections();
                 }
                 Event::Caves(caves) => {
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
+                    self.collection_installed = None;
+                    self.request_collection_installed();
                     self.rebuild_catalog();
                     self.rebuild_sections();
                     self.rebuild_collection_sections();

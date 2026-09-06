@@ -18,9 +18,9 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
     AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
-    CheckUpdateParams, DownloadReason, DownloadsClearFinishedParams, DownloadsDiscardParams,
-    DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams, DownloadsRetryParams,
-    FetchCavesParams, FetchCollectionGamesParams, FetchGameUploadsParams,
+    CheckUpdateParams, CollectionGamesFilters, DownloadReason, DownloadsClearFinishedParams,
+    DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
+    DownloadsRetryParams, FetchCavesParams, FetchCollectionGamesParams, FetchGameUploadsParams,
     FetchProfileCollectionsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
     PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
@@ -48,6 +48,16 @@ pub struct Config {
 pub enum Command {
     Install {
         game: Box<Game>,
+    },
+    /// The next page of a collection's games.
+    CollectionPage {
+        collection_id: i64,
+        cursor: String,
+    },
+    /// Every installed game in each collection, from butler's own filter,
+    /// so the answer covers pages not fetched yet.
+    CollectionsInstalled {
+        collection_ids: Vec<i64>,
     },
     /// Discard a queued, running, or failed download.
     Discard {
@@ -84,6 +94,16 @@ pub enum Event {
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
     CollectionsFailed(String),
+    CollectionPage {
+        collection_id: i64,
+        games: Vec<Game>,
+        next_cursor: Option<String>,
+    },
+    CollectionPageFailed {
+        collection_id: i64,
+        error: String,
+    },
+    CollectionsInstalled(Vec<(i64, Vec<Game>)>),
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
     /// The whole download queue, after anything changed it.
@@ -312,6 +332,68 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     });
                 }
                 refresh_downloads(&client, emit);
+            }
+            Ok(Command::CollectionPage {
+                collection_id,
+                cursor,
+            }) => {
+                let profile_id = profile.id;
+                spawn_op(
+                    format!("collection-{collection_id}"),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    move |error| Event::CollectionPageFailed {
+                        collection_id,
+                        error: format!("{error:#}"),
+                    },
+                    move |client, emit| {
+                        let page =
+                            collection_page(client, profile_id, collection_id, Some(cursor), None)?;
+                        emit.send(Event::CollectionPage {
+                            collection_id,
+                            games: page.0,
+                            next_cursor: page.1,
+                        });
+                        Ok(())
+                    },
+                );
+            }
+            Ok(Command::CollectionsInstalled { collection_ids }) => {
+                let profile_id = profile.id;
+                spawn_op(
+                    "collections-installed".into(),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    |error| Event::Error(format!("{error:#}")),
+                    move |client, emit| {
+                        let filter = CollectionGamesFilters {
+                            installed: true,
+                            ..Default::default()
+                        };
+                        let mut lists = Vec::with_capacity(collection_ids.len());
+                        for id in collection_ids {
+                            let mut games = Vec::new();
+                            let mut cursor = None;
+                            loop {
+                                let (page, next) = collection_page(
+                                    client,
+                                    profile_id,
+                                    id,
+                                    cursor.take(),
+                                    Some(filter.clone()),
+                                )?;
+                                games.extend(page);
+                                match next {
+                                    Some(next) => cursor = Some(next),
+                                    None => break,
+                                }
+                            }
+                            lists.push((id, games));
+                        }
+                        emit.send(Event::CollectionsInstalled(lists));
+                        Ok(())
+                    },
+                );
             }
             Ok(Command::Discard { download_id }) => {
                 if let Err(error) = client.call(DownloadsDiscardParams {
@@ -1019,9 +1101,7 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
     Ok((games, stale && !fresh))
 }
 
-/// Long collections are cut here; the rows are for browsing, not
-/// exhausting, and each page is a round trip to the API when fresh.
-const COLLECTION_GAMES_MAX: usize = 300;
+const COLLECTION_PAGE: i64 = 100;
 
 /// Collections are slow to page through and not needed for the library, so
 /// they load beside it: the cached copy first, then a fresh one if butler
@@ -1072,38 +1152,55 @@ fn collections(
     }
     let mut shelves = Vec::with_capacity(collections.len());
     for collection in collections {
-        let mut games = Vec::new();
-        let mut cursor = None;
-        let mut truncated = false;
-        loop {
-            let page = client.call(FetchCollectionGamesParams {
-                profile_id,
-                collection_id: collection.id,
-                limit: Some(100),
-                cursor: cursor.take(),
-                fresh: Some(fresh),
-                ..Default::default()
-            })?;
-            stale |= page.stale == Some(true);
-            games.extend(page.items.into_iter().filter_map(|item| item.game));
-            match page.next_cursor {
-                Some(next) if !next.is_empty() => {
-                    if games.len() >= COLLECTION_GAMES_MAX {
-                        truncated = true;
-                        break;
-                    }
-                    cursor = Some(next);
-                }
-                _ => break,
-            }
-        }
+        // One page each; rows fetch the rest as they are scrolled. With
+        // `fresh`, butler pulls the whole collection into its database on
+        // this call, so later pages are local.
+        let page = client.call(FetchCollectionGamesParams {
+            profile_id,
+            collection_id: collection.id,
+            limit: Some(COLLECTION_PAGE),
+            fresh: Some(fresh),
+            ..Default::default()
+        })?;
+        stale |= page.stale == Some(true);
         shelves.push(CollectionGames {
             collection,
-            games,
-            truncated,
+            games: page
+                .items
+                .into_iter()
+                .filter_map(|item| item.game)
+                .collect(),
+            next_cursor: page.next_cursor.filter(|c| !c.is_empty()),
         });
     }
     Ok((shelves, stale && !fresh))
+}
+
+/// One page of a collection's games from butler's database, and the cursor
+/// for the page after it.
+fn collection_page(
+    client: &Client,
+    profile_id: i64,
+    collection_id: i64,
+    cursor: Option<String>,
+    filters: Option<CollectionGamesFilters>,
+) -> Result<(Vec<Game>, Option<String>)> {
+    let page = client.call(FetchCollectionGamesParams {
+        profile_id,
+        collection_id,
+        limit: Some(COLLECTION_PAGE),
+        cursor,
+        filters,
+        fresh: Some(false),
+        ..Default::default()
+    })?;
+    Ok((
+        page.items
+            .into_iter()
+            .filter_map(|item| item.game)
+            .collect(),
+        page.next_cursor.filter(|c| !c.is_empty()),
+    ))
 }
 
 fn all_caves(client: &Client) -> Result<Vec<Cave>> {

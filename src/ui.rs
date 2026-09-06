@@ -98,6 +98,10 @@ impl Metrics {
     }
 }
 
+/// How many tiles before a row's end the next page is asked for, so a
+/// steady scroll never reaches the spinner.
+const MORE_LOOKAHEAD: usize = 12;
+
 /// One finger on the home screen. egui's own drag-to-scroll would give the
 /// gesture to whichever row it started on and drop the vertical part, so
 /// the list decides the axis itself from the first few points of motion.
@@ -142,6 +146,11 @@ pub struct Section {
     pub games: Vec<i64>,
     /// Shown in place of the tiles when there are none.
     pub note: Option<String>,
+    /// The row has games past the last one listed; reaching the end asks
+    /// for them.
+    pub more: bool,
+    /// The collection this row lists, when it is one.
+    pub collection: Option<i64>,
 }
 
 /// The home screen's rows of carousels and which tile has focus. Drawing
@@ -373,7 +382,10 @@ pub fn library(
                 );
             });
 
-            if section.games.is_empty() {
+            if section.games.is_empty() && section.more {
+                actions.push(Action::MoreGames { row });
+            }
+            if section.games.is_empty() && !section.more {
                 if let Some(note) = &section.note {
                     ui.label(
                         egui::RichText::new(note)
@@ -410,7 +422,8 @@ pub fn library(
                 }
                 // egui shows an offset past the end for a frame before
                 // clamping it, which reads as a shake at the ends of the row.
-                let total = section.games.len() as f32 * stride - gap + 2.0 * ring;
+                let slots = section.games.len() + usize::from(section.more);
+                let total = slots as f32 * stride - gap + 2.0 * ring;
                 strip = strip.horizontal_scroll_offset(offset.clamp(0.0, (total - width).max(0.0)));
             }
             // The strip's clip region reaches into the page margin on both
@@ -420,7 +433,9 @@ pub fn library(
             let mut strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip_area));
             let out = strip.show_viewport(&mut strip_ui, |ui, viewport| {
                 let count = section.games.len();
-                let total = count as f32 * stride - gap + 2.0 * ring;
+                // A row with more to fetch ends in a spinner slot.
+                let slots = count + usize::from(section.more);
+                let total = slots as f32 * stride - gap + 2.0 * ring;
                 let (strip_rect, _) = ui.allocate_exact_size(
                     vec2(total.max(0.0), tile_height + 2.0 * ring),
                     Sense::hover(),
@@ -428,8 +443,22 @@ pub fn library(
                 // Only tiles inside the viewport get drawn; a row can hold
                 // the whole library.
                 let first = ((viewport.min.x - ring) / stride).floor().max(0.0) as usize;
-                let last = (((viewport.max.x - ring) / stride).ceil() as usize).min(count);
-                for col in first..last {
+                let last = (((viewport.max.x - ring) / stride).ceil() as usize).min(slots);
+                if section.more && (last > count || focused_col + MORE_LOOKAHEAD >= count) {
+                    actions.push(Action::MoreGames { row });
+                }
+                if section.more && last > count {
+                    let rect = Rect::from_min_size(
+                        strip_rect.min + vec2(ring + count as f32 * stride, ring),
+                        vec2(tile_width, cover_height),
+                    );
+                    ui.painter().rect_filled(rect, m.space(6.0), TILE_BG);
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(
+                        Rect::from_center_size(rect.center(), vec2(m.space(32.0), m.space(32.0))),
+                    ));
+                    child.add(egui::Spinner::new().size(m.space(28.0)).color(DIM));
+                }
+                for col in first..last.min(count) {
                     let Some(game) = games.get(&section.games[col]) else {
                         continue;
                     };

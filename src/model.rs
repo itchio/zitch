@@ -137,9 +137,10 @@ pub enum Page {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectionGames {
     pub collection: Collection,
+    /// The games fetched so far, in collection order.
     pub games: Vec<Game>,
-    /// Only the first page or so of a big collection was fetched.
-    pub truncated: bool,
+    /// Where the next page starts, while there is one.
+    pub next_cursor: Option<String>,
 }
 
 /// The top-level screens, switched with the bumpers.
@@ -185,6 +186,13 @@ impl<T> Loadable<T> {
             _ => None,
         }
     }
+
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Loadable::Loaded(value) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +218,10 @@ pub enum Action {
     FocusTile {
         row: usize,
         col: usize,
+    },
+    /// The row is near its end and has more games to fetch.
+    MoreGames {
+        row: usize,
     },
     /// Focus a detail-page button; the pointer is already there.
     FocusButton(usize),
