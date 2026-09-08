@@ -1190,6 +1190,7 @@ impl App {
                         self.error = Some(format!("Uninstall failed: {error}"));
                     }
                 }
+                Event::SyncFailed(error) => log::warn!("sync: {error}"),
                 Event::CollectionsFailed(error) => {
                     log::error!("loading collections: {error}");
                     if self.collections.get().is_none() {

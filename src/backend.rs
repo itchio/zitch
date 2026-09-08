@@ -99,6 +99,9 @@ pub enum Event {
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
     CollectionsFailed(String),
+    /// A background refresh failed for a reason other than being offline.
+    /// What is on screen came from the cache and stays; the loop retries.
+    SyncFailed(String),
     CollectionPage {
         collection_id: i64,
         games: Vec<Game>,
@@ -290,9 +293,11 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         profile_id: profile.id,
         online: Arc::new(AtomicBool::new(true)),
         stale: Arc::new(AtomicBool::new(stale)),
+        collections_loaded: Arc::new(AtomicBool::new(false)),
+        collections_stale: Arc::new(AtomicBool::new(false)),
+        retry: Arc::new(AtomicBool::new(false)),
     };
     sync.spawn(&link, emit);
-    spawn_collections(&link, emit, profile.id);
     let mut next_probe = Instant::now() + PROBE_EVERY;
 
     loop {
@@ -326,7 +331,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
             }
         }
-        if !sync.online.load(Ordering::Relaxed) && Instant::now() >= next_probe {
+        let due = !sync.online.load(Ordering::Relaxed) || sync.retry.load(Ordering::Relaxed);
+        if due && Instant::now() >= next_probe {
             sync.spawn(&link, emit);
             next_probe = Instant::now() + PROBE_EVERY;
         }
@@ -906,9 +912,13 @@ fn answer_launch_request(
 
 /// Runs a butlerd call on its own connection and thread, so the main loop
 /// keeps turning while it works.
-/// The work that needs itch.io: a fresh owned list when butler's cache is
-/// stale, and the update check. Runs at startup and again whenever the
-/// network comes back, and is what decides whether we are online.
+/// The background work: collections, a fresh owned list when butler's
+/// cache is stale, and the update check. Runs at startup and again
+/// whenever the network comes back, and is what decides whether we are
+/// online. Everything here runs on one thread, one step after another:
+/// butlerd handles requests concurrently and two large writes at once
+/// can fail on a stale sqlite snapshot, which is what happened when the
+/// owned list and the collections refetched side by side.
 #[derive(Clone)]
 struct Sync {
     profile_id: i64,
@@ -916,28 +926,50 @@ struct Sync {
     /// Whether butler flagged the cached owned list stale, so a fresh
     /// fetch is still owed.
     stale: Arc<AtomicBool>,
+    /// The cached collections have been sent once.
+    collections_loaded: Arc<AtomicBool>,
+    /// Butler flagged the cached collections stale.
+    collections_stale: Arc<AtomicBool>,
+    /// The last run failed for a reason other than being offline, so the
+    /// main loop should run it again at the next probe.
+    retry: Arc<AtomicBool>,
 }
 
 impl Sync {
     fn spawn(&self, link: &Link, emit: &Emitter) {
         let sync = self.clone();
+        self.retry.store(false, Ordering::Relaxed);
         spawn_op(
             "sync".into(),
             Arc::clone(link),
             emit.clone(),
-            |error| Event::Error(format!("{error:#}")),
+            |error| Event::SyncFailed(format!("{error:#}")),
             move |client, emit| match sync.run(client, emit) {
                 Ok(()) => Ok(()),
                 Err(error) if is_offline(&error) => {
                     sync.set_online(emit, false);
                     Ok(())
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    sync.retry.store(true, Ordering::Relaxed);
+                    Err(error)
+                }
             },
         );
     }
 
     fn run(&self, client: &Client, emit: &Emitter) -> Result<()> {
+        if !self.collections_loaded.load(Ordering::Relaxed) {
+            // Local reads only; the rows show before the network is probed.
+            match collections(client, self.profile_id, false) {
+                Ok((cached, stale)) => {
+                    emit.send(Event::Collections(cached));
+                    self.collections_loaded.store(true, Ordering::Relaxed);
+                    self.collections_stale.store(stale, Ordering::Relaxed);
+                }
+                Err(error) => emit.send(Event::CollectionsFailed(format!("{error:#}"))),
+            }
+        }
         // A one-item fresh fetch is the cheapest call that must reach the
         // API, so it doubles as the network probe.
         client.call(FetchProfileOwnedKeysParams {
@@ -953,6 +985,11 @@ impl Sync {
             let (games, _) = owned_games(client, self.profile_id, true)?;
             emit.send(Event::OwnedGames(games));
             self.stale.store(false, Ordering::Relaxed);
+        }
+        if self.collections_stale.load(Ordering::Relaxed) {
+            let (fresh, _) = collections(client, self.profile_id, true)?;
+            emit.send(Event::Collections(fresh));
+            self.collections_stale.store(false, Ordering::Relaxed);
         }
         check_updates(client, emit)
     }
@@ -1278,30 +1315,6 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
 }
 
 const COLLECTION_PAGE: i64 = 100;
-
-/// Collections are slow to page through and not needed for the library, so
-/// they load beside it: the cached copy first, then a fresh one if butler
-/// says the cache is stale.
-fn spawn_collections(link: &Link, emit: &Emitter, profile_id: i64) {
-    spawn_op(
-        "collections".into(),
-        Arc::clone(link),
-        emit.clone(),
-        |error| Event::CollectionsFailed(format!("{error:#}")),
-        move |client, emit| {
-            let (cached, stale) = collections(client, profile_id, false)?;
-            emit.send(Event::Collections(cached));
-            if stale {
-                match collections(client, profile_id, true) {
-                    Ok((fresh, _)) => emit.send(Event::Collections(fresh)),
-                    // The cached copy is already up; offline is not an error.
-                    Err(error) => log::warn!("refreshing collections: {error:#}"),
-                }
-            }
-            Ok(())
-        },
-    );
-}
 
 fn collections(
     client: &Client,
