@@ -23,14 +23,14 @@ use crate::butlerd::types::{
     DownloadsRetryParams, FetchCavesParams, FetchCollectionGamesParams, FetchGameUploadsParams,
     FetchProfileCollectionsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
-    PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
-    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload,
-    UploadType,
+    LogLevel, PickManifestActionResult, PrereqsFailedResult, ProfileListParams,
+    ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult,
+    UninstallPerformParams, Upload, UploadType,
 };
-use crate::butlerd::{Client, Daemon, Incoming, is_offline};
+use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::model::{
-    Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt,
-    UploadExt, UserExt, human_size,
+    Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
+    Prompt, UploadExt, UserExt, human_size,
 };
 
 pub struct Config {
@@ -73,6 +73,10 @@ pub enum Command {
         title: String,
     },
     Launch {
+        cave_id: String,
+    },
+    /// Kill a running game by ending its launch call.
+    QuitGame {
         cave_id: String,
     },
     /// Queue an update butler reported; the first choice is the one taken.
@@ -140,7 +144,7 @@ pub enum Event {
     /// The `Launch` call returned; the game has exited or never started.
     LaunchFinished {
         cave_id: String,
-        result: Result<(), String>,
+        result: Result<(), LaunchFailure>,
     },
     /// Updates butler found for installed games, one per cave.
     Updates(Vec<GameUpdate>),
@@ -280,6 +284,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let stopping = Arc::new(AtomicBool::new(false));
     let driver = spawn_driver(Arc::clone(&link), emit.clone(), Arc::clone(&stopping));
     let prompts = Prompts::default();
+    let launches = Launches::default();
     let config = Arc::new(config);
     let sync = Sync {
         profile_id: profile.id,
@@ -470,6 +475,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             Ok(Command::Launch { cave_id }) => {
                 let config = Arc::clone(&config);
                 let prompts = prompts.clone();
+                let launches = launches.clone();
                 let profile_id = profile.id;
                 spawn_op(
                     format!("launch-{cave_id}"),
@@ -479,23 +485,32 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         let cave_id = cave_id.clone();
                         move |error| Event::LaunchFinished {
                             cave_id: cave_id.clone(),
-                            // The innermost error is butler's own words.
-                            result: Err(error.root_cause().to_string()),
+                            result: Err(LaunchFailure {
+                                // The innermost error is butler's own words.
+                                message: error.root_cause().to_string(),
+                                log: Vec::new(),
+                            }),
                         }
                     },
                     move |client, emit| {
+                        let quit = launches.track(&cave_id, client)?;
                         let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
+                        launches.forget(&cave_id);
                         // Play time and last-played change with every run.
                         refresh_caves(client, emit);
-                        result?;
-                        emit.send(Event::LaunchFinished {
-                            cave_id,
-                            result: Ok(()),
-                        });
+                        // Ending the connection is how the user quits; the
+                        // call's failure is then the expected outcome.
+                        let result = if quit.load(Ordering::Relaxed) {
+                            Ok(())
+                        } else {
+                            result
+                        };
+                        emit.send(Event::LaunchFinished { cave_id, result });
                         Ok(())
                     },
                 );
             }
+            Ok(Command::QuitGame { cave_id }) => launches.quit(&cave_id),
             Ok(Command::Update { update }) => {
                 if update.direct {
                     if let Err(error) = queue_update(&client, &update, 0) {
@@ -688,8 +703,56 @@ impl Prompts {
     }
 }
 
+/// A launch's connection and the flag saying its end was asked for.
+type Launching = (Cancel, Arc<AtomicBool>);
+
+/// Launch calls in flight, so a running game can be quit from the loop.
+#[derive(Clone, Default)]
+struct Launches {
+    active: Arc<Mutex<HashMap<String, Launching>>>,
+}
+
+impl Launches {
+    /// Registers the connection carrying `cave_id`'s launch. Returns the
+    /// flag that `quit` sets, so the thread knows the drop was asked for.
+    fn track(&self, cave_id: &str, client: &Client) -> Result<Arc<AtomicBool>> {
+        let quit = Arc::new(AtomicBool::new(false));
+        let cancel = client
+            .cancel_handle()
+            .context("cloning launch connection")?;
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(cave_id.to_string(), (cancel, Arc::clone(&quit)));
+        Ok(quit)
+    }
+
+    fn forget(&self, cave_id: &str) {
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(cave_id);
+    }
+
+    fn quit(&self, cave_id: &str) {
+        let active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        match active.get(cave_id) {
+            Some((cancel, quit)) => {
+                log::info!("quitting {cave_id}");
+                quit.store(true, Ordering::Relaxed);
+                cancel.cancel();
+            }
+            None => log::warn!("quit: no launch in flight for {cave_id}"),
+        }
+    }
+}
+
+/// How many of the game's last lines to keep for a failed launch.
+const LAUNCH_LOG_TAIL: usize = 40;
+
 /// Runs a game and stays in the call until it exits, answering whatever
-/// butler asks along the way.
+/// butler asks along the way. A failure carries the tail of what butler
+/// logged at error level, which is where the game's stderr ends up.
 fn launch(
     client: &Client,
     config: &Config,
@@ -697,6 +760,31 @@ fn launch(
     profile_id: i64,
     cave_id: &str,
     emit: &Emitter,
+) -> Result<(), LaunchFailure> {
+    let mut errors: std::collections::VecDeque<String> = Default::default();
+    let result = launch_inner(client, config, prompts, profile_id, cave_id, emit, |line| {
+        if errors.len() == LAUNCH_LOG_TAIL {
+            errors.pop_front();
+        }
+        errors.push_back(line);
+    });
+    result.map_err(|error| LaunchFailure {
+        message: error.root_cause().to_string(),
+        log: errors
+            .into_iter()
+            .filter(|l| !l.starts_with("Relaying launch failure") && !l.starts_with("Had error"))
+            .collect(),
+    })
+}
+
+fn launch_inner(
+    client: &Client,
+    config: &Config,
+    prompts: &Prompts,
+    profile_id: i64,
+    cave_id: &str,
+    emit: &Emitter,
+    mut on_error_line: impl FnMut(String),
 ) -> Result<()> {
     std::fs::create_dir_all(&config.prereqs_dir)
         .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
@@ -722,7 +810,12 @@ fn launch(
                     n.status,
                     n.progress * 100.0
                 )),
-                Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
+                Ok(AnyNotification::Log(log)) => {
+                    log::debug!("butler: {}", log.message);
+                    if log.level == LogLevel::Error {
+                        on_error_line(log.message);
+                    }
+                }
                 Ok(other) => log::debug!("{other:?}"),
                 Err(error) => log::warn!("bad {method} notification: {error}"),
             }

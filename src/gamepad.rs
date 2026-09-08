@@ -61,8 +61,13 @@ impl Gamepad {
             return false;
         };
         if !focused {
-            rx.try_iter().for_each(drop);
-            return false;
+            // Only the Guide button reaches an unfocused window: it is the
+            // way back from a running game.
+            let guide = rx.try_iter().any(|a| matches!(a, Action::ToggleOverlay));
+            if guide {
+                actions.push(Action::ToggleOverlay);
+            }
+            return guide;
         }
         let before = actions.len();
         actions.extend(rx.try_iter());
@@ -159,6 +164,7 @@ fn button_action(button: Button) -> Option<Action> {
         Button::LeftTrigger => Action::CycleTab(-1),
         Button::RightTrigger => Action::CycleTab(1),
         Button::LeftTrigger2 | Button::RightTrigger2 => Action::ToggleFilter,
+        Button::Mode => Action::ToggleOverlay,
         _ => return None,
     })
 }

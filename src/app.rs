@@ -9,7 +9,8 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, Game,
-    GameUpdate, InstallState, Kind, Loadable, Page, Profile, Prompt, Tab, UserExt, playable_here,
+    GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab, UserExt,
+    playable_here,
 };
 use crate::ui;
 
@@ -58,7 +59,10 @@ pub struct App {
     /// What the interface shows per game, rebuilt from the fields above.
     pub installs: std::collections::HashMap<i64, InstallState>,
     /// Caves with a Launch call in flight.
-    running: std::collections::HashSet<String>,
+    /// Games in flight, by cave id, with when they were launched.
+    running: std::collections::HashMap<String, Instant>,
+    /// Why the last launch of a cave failed, until it is launched again.
+    launch_failures: std::collections::HashMap<String, LaunchFailure>,
     /// Updates butler found, by cave.
     updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
@@ -159,6 +163,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
+            "guide" => Ok(Step::Act(Action::ToggleOverlay)),
             "prompt" => Ok(Step::Act(Action::Answer {
                 prompt: 0,
                 choice: None,
@@ -213,6 +218,7 @@ impl App {
             discarding: Default::default(),
             installs: Default::default(),
             running: Default::default(),
+            launch_failures: Default::default(),
             updates: Default::default(),
             prompt: None,
             prompt_queue: Default::default(),
@@ -319,6 +325,21 @@ impl App {
     /// Owned games first, so their fresher records win over the copy each
     /// cave carries; then installed games with no key.
     /// The carousel rows the current tab shows, if it has any.
+    /// Brings the window to the front. Wayland compositors that refuse
+    /// ignore the request.
+    fn raise_window(&self) {
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Gets out of the game's way by minimizing, which every window system
+    /// answers by focusing what was behind.
+    fn hide_window(&self) {
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+
     fn active_rows(&mut self) -> Option<&mut ui::Rows> {
         match self.tab {
             Tab::Library => Some(&mut self.rows),
@@ -388,6 +409,7 @@ impl App {
                     self.prompt = self.prompt_queue.pop_front();
                     self.backend.send(Command::Answer { prompt: id, choice });
                 }
+                Action::ToggleOverlay => self.raise_window(),
                 _ => {}
             }
             return;
@@ -524,6 +546,12 @@ impl App {
                     self.collection_rows.follow = true;
                 }
             }
+            Action::ToggleOverlay => self.raise_window(),
+            Action::BackToGame => {
+                if !self.running.is_empty() {
+                    self.hide_window();
+                }
+            }
             Action::MoreGames { row } => {
                 let Some(id) = self
                     .collection_rows
@@ -603,8 +631,15 @@ impl App {
                     });
                 }
             }
+            Action::QuitGame { cave_id } => {
+                if self.running.contains_key(&cave_id) {
+                    self.backend.send(Command::QuitGame { cave_id });
+                }
+            }
             Action::Play { cave_id } => {
-                if self.running.insert(cave_id.clone()) {
+                if !self.running.contains_key(&cave_id) {
+                    self.running.insert(cave_id.clone(), Instant::now());
+                    self.launch_failures.remove(&cave_id);
                     self.backend.send(Command::Launch { cave_id });
                 }
             }
@@ -670,7 +705,7 @@ impl App {
     fn is_running(&self, game_id: i64) -> bool {
         self.caves
             .iter()
-            .any(|cave| cave.game_id() == Some(game_id) && self.running.contains(&cave.id))
+            .any(|cave| cave.game_id() == Some(game_id) && self.running.contains_key(&cave.id))
     }
 
     /// Lays the home screen out as carousels, the way the itch app's
@@ -1108,23 +1143,32 @@ impl App {
                 }
                 Event::LaunchRunning { .. } => {
                     if self.minimize_while_playing {
-                        self.ctx
-                            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        self.hide_window();
                     }
                 }
                 Event::LaunchFinished { cave_id, result } => {
                     self.running.remove(&cave_id);
-                    if let Err(error) = result {
-                        self.error = Some(format!("Couldn't launch: {error}"));
+                    if let Err(failure) = result {
+                        // The game's page shows the failure in full; the
+                        // header line is for when the user is elsewhere.
+                        let game_id = self
+                            .caves
+                            .iter()
+                            .find(|c| c.id == cave_id)
+                            .and_then(CaveExt::game_id);
+                        let on_page =
+                            matches!(&self.page, Page::Game { id, .. } if Some(*id) == game_id);
+                        if !on_page {
+                            self.error = Some(format!("Couldn't launch: {}", failure.message));
+                        }
+                        self.launch_failures.insert(cave_id.clone(), failure);
                     }
                     // Take the screen back. Most window systems already hand
                     // focus to the last focused window when the game's goes
                     // away; this covers the ones that do not, and Wayland
                     // compositors that refuse simply ignore it.
-                    if self.minimize_while_playing {
-                        self.ctx
-                            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    }
+                    self.ctx
+                        .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 Event::Online(online) => self.online = online,
@@ -1440,9 +1484,9 @@ impl App {
                         ) {
                             self.actions.push(Action::SetTab(tab));
                         }
-                    } else if self.input_mode == InputMode::Touch {
-                        // No footer hint on touch, so the strip's slot holds
-                        // the way back instead.
+                    } else if self.input_mode != InputMode::Gamepad {
+                        // A pointer has no Back key; the strip's slot holds
+                        // the way back. The pad's footer hint covers it.
                         if ui::back_button(ui, &m).clicked() {
                             self.actions.push(Action::Back);
                         }
@@ -1608,7 +1652,14 @@ impl App {
                                     .filter(|cave| cave.game_id() == Some(game.id))
                                     .collect();
                                 let running = self.is_running(game.id);
+                                let running_since = caves
+                                    .iter()
+                                    .find_map(|cave| self.running.get(&cave.id))
+                                    .copied();
                                 let update = self.update_for(game.id).cloned();
+                                let failure = caves
+                                    .iter()
+                                    .find_map(|cave| self.launch_failures.get(&cave.id));
                                 ui::game_detail(
                                     ui,
                                     &m,
@@ -1618,9 +1669,11 @@ impl App {
                                         caves: &caves,
                                         install: self.installs.get(&game.id),
                                         running,
+                                        running_since,
                                         update: update.as_ref(),
                                         online: self.online,
                                         focused_button: button,
+                                        failure,
                                     },
                                     &mut self.actions,
                                 );

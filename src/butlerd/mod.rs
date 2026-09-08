@@ -208,6 +208,23 @@ pub struct Client {
     incoming: Mutex<mpsc::Receiver<Incoming>>,
 }
 
+/// Ends a connection from another thread. butlerd cancels the call in
+/// flight when its connection closes; for `Launch` that kills the game.
+pub struct Cancel(TcpStream);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl Client {
+    pub fn cancel_handle(&self) -> std::io::Result<Cancel> {
+        let stream = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        stream.try_clone().map(Cancel)
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         // The reader thread holds a clone of this socket and would otherwise

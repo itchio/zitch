@@ -9,7 +9,8 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 pub use crate::model::human_size;
 use crate::model::{
-    Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, Tab, UploadExt,
+    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, Prompt, Tab,
+    UploadExt, platform_names, playable_here,
 };
 
 // The itch app's palette (renderer/styles.ts): codGray, itemBackground,
@@ -213,16 +214,6 @@ fn focus_ring(ui: &Ui, rect: Rect, radii: [f32; 4], m: &Metrics) {
         Color32::TRANSPARENT,
         Stroke::new(width, ACCENT),
     ));
-}
-
-/// Text with the app's 1px drop shadow.
-fn shadowed_text(ui: &Ui, pos: egui::Pos2, galley: Arc<egui::Galley>, color: Color32) {
-    ui.painter().galley(
-        pos + vec2(0.0, 1.0),
-        galley.clone(),
-        Color32::from_black_alpha(0x66),
-    );
-    ui.painter().galley(pos, galley, color);
 }
 
 /// itch.io covers are 315x250; tiles keep that shape.
@@ -1026,7 +1017,18 @@ pub fn game_buttons(
     online: bool,
 ) -> Vec<(&'static str, Action)> {
     if running {
-        return Vec::new();
+        let Some(cave) = caves.first() else {
+            return Vec::new();
+        };
+        return vec![
+            ("Back to game", Action::BackToGame),
+            (
+                "Quit game",
+                Action::QuitGame {
+                    cave_id: cave.id.clone(),
+                },
+            ),
+        ];
     }
     if let Some(install) = install {
         if install.cancelling {
@@ -1064,7 +1066,11 @@ pub fn game_buttons(
             ));
             buttons
         }
-        None if online => vec![("Install", Action::Install { game_id: game.id })],
+        // Butler only installs uploads tagged for this platform, so the
+        // button follows the same tags rather than failing on the press.
+        None if online && playable_here(game) => {
+            vec![("Install", Action::Install { game_id: game.id })]
+        }
         None => Vec::new(),
     }
 }
@@ -1076,9 +1082,13 @@ pub struct GameView<'a> {
     pub caves: &'a [&'a Cave],
     pub install: Option<&'a InstallState>,
     pub running: bool,
+    /// When the running game was launched.
+    pub running_since: Option<Instant>,
     pub update: Option<&'a GameUpdate>,
     pub online: bool,
     pub focused_button: usize,
+    /// Why the last launch failed, shown under the buttons.
+    pub failure: Option<&'a LaunchFailure>,
 }
 
 pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
@@ -1088,9 +1098,11 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
         caves,
         install,
         running,
+        running_since,
         update,
         online,
         focused_button,
+        failure,
     } = view;
     let buttons = game_buttons(game, caves, install, running, update, online);
     let width = ui.available_width();
@@ -1154,11 +1166,20 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                     progress_bar(ui, bar, install.progress as f32);
                 }
                 (None, Some(_)) if running => {
+                    let line = match running_since {
+                        Some(since) => format!(
+                            "Running for {}",
+                            human_duration(since.elapsed().as_secs() as i64)
+                        ),
+                        None => "Running".to_string(),
+                    };
                     ui.label(
-                        egui::RichText::new("Running")
+                        egui::RichText::new(line)
                             .font(FontId::proportional(m.caption))
                             .color(GREEN),
                     );
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs(30));
                 }
                 (None, Some(cave)) => {
                     let mut line = String::from("Installed");
@@ -1202,6 +1223,18 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                         );
                     }
                 }
+                (None, None) if !playable_here(game) => {
+                    let platforms = platform_names(game);
+                    let line = if platforms.is_empty() {
+                        "No download for this computer".to_string()
+                    } else {
+                        format!(
+                            "No download for this computer; available for {}",
+                            platforms.join(", ")
+                        )
+                    };
+                    subtle(ui, m, &line);
+                }
                 (None, None) if online => subtle(ui, m, "Not installed"),
                 (None, None) => subtle(ui, m, "Not installed; offline"),
             }
@@ -1224,6 +1257,27 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                     }
                 }
             });
+            if let Some(failure) = failure {
+                ui.add_space(m.space(20.0));
+                ui.label(
+                    egui::RichText::new(format!("Couldn't launch: {}", failure.message))
+                        .font(bold(m.caption))
+                        .color(ACCENT),
+                );
+                if !failure.log.is_empty() {
+                    ui.add_space(m.space(6.0));
+                    let text = failure.log.join("\n");
+                    egui::ScrollArea::vertical()
+                        .max_height(m.space(120.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .font(FontId::monospace(m.caption * 0.9))
+                                    .color(DIM),
+                            );
+                        });
+                }
+            }
         });
     });
 }
@@ -1313,7 +1367,8 @@ fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> 
     if focused {
         focus_ring(ui, rect, radii, m);
     }
-    shadowed_text(ui, rect.center() - galley.size() / 2.0, galley, color);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

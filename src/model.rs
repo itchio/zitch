@@ -82,6 +82,13 @@ pub struct InstallState {
 
 /// A question the backend needs answered before a call can go on, shown as
 /// a modal. The backend maps the chosen index back to the typed reply.
+/// Why a launch did not run, with the tail of what the game printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchFailure {
+    pub message: String,
+    pub log: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
     pub id: u64,
@@ -138,6 +145,23 @@ pub fn playable_here(game: &Game) -> bool {
     } else {
         p.windows.is_some()
     }
+}
+
+/// The platforms a game has downloads for, as words, for saying why it
+/// cannot be installed here.
+pub fn platform_names(game: &Game) -> Vec<&'static str> {
+    let p = &game.platforms;
+    let mut names = Vec::new();
+    if p.windows.is_some() {
+        names.push("Windows");
+    }
+    if p.osx.is_some() {
+        names.push("macOS");
+    }
+    if p.linux.is_some() {
+        names.push("Linux");
+    }
+    names
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +264,8 @@ pub enum Action {
     MoreGames {
         row: usize,
     },
+    /// The Guide button: bring the window over the running game.
+    ToggleOverlay,
     /// Focus a detail-page button; the pointer is already there.
     FocusButton(usize),
     Activate,
@@ -248,6 +274,12 @@ pub enum Action {
     Play {
         cave_id: String,
     },
+    /// Kill the running game.
+    QuitGame {
+        cave_id: String,
+    },
+    /// Get the window out of the running game's way.
+    BackToGame,
     /// Answer the open prompt with a choice, or dismiss it with `None`.
     Answer {
         prompt: u64,
