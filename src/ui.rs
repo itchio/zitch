@@ -7,6 +7,7 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
+pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, Page, Prompt, Tab, UploadExt,
 };
@@ -1316,22 +1317,6 @@ fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-pub fn human_size(bytes: i64) -> String {
-    let bytes = bytes.max(0) as f64;
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes;
-    let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{value:.0} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 /// Short remaining-time text for progress lines.
 pub fn human_duration_seconds(seconds: i64) -> String {
     if seconds < 60 {
@@ -1650,6 +1635,11 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
         );
         ui.add_space(m.space(14.0));
     }
+}
+
+/// The strip's height, for the page that hides it.
+pub fn tab_strip_height(ui: &Ui, m: &Metrics) -> f32 {
+    ui.fonts_mut(|f| f.row_height(&bold(m.section))) + m.space(12.0)
 }
 
 pub fn tab_strip(

@@ -37,6 +37,23 @@ impl UploadExt for Upload {
     }
 }
 
+/// "1.2 GB" style sizes.
+pub fn human_size(bytes: i64) -> String {
+    let bytes = bytes.max(0) as f64;
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{value:.0} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 pub trait CaveExt {
     fn game_id(&self) -> Option<i64>;
 }

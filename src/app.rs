@@ -73,7 +73,6 @@ pub struct App {
     page: Page,
     error: Option<String>,
     /// Something the user just did, shown in the header.
-    notice: Option<String>,
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
     shot: Option<Shot>,
@@ -215,7 +214,6 @@ impl App {
             blur_search: false,
             page: Page::Library,
             error: None,
-            notice: None,
             actions: Vec::new(),
             rows: ui::Rows::default(),
             shot,
@@ -535,7 +533,7 @@ impl App {
             Action::SetTab(tab) => {
                 if self.page.is_library() {
                     self.tab = tab;
-                    self.notice = None;
+                    self.error = None;
                     self.blur_search = true;
                     self.rows.follow = true;
                     self.collection_rows.follow = true;
@@ -567,7 +565,7 @@ impl App {
                     self.actions.push(Action::SetTab(Tab::Library))
                 }
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
-                Page::Library => self.notice = None,
+                Page::Library => self.error = None,
                 Page::Game { id, .. } => {
                     if let Some(rows) = self.active_rows() {
                         rows.focus_game(id);
@@ -576,13 +574,11 @@ impl App {
                 }
             },
             Action::Open(page) => {
-                self.notice = None;
+                self.error = None;
                 self.page = page;
             }
             Action::Update { cave_id } => {
                 if let Some(update) = self.updates.get(&cave_id) {
-                    let title = update.game.as_ref().map_or("game", |g| g.title.as_str());
-                    self.notice = Some(format!("Updating {title}"));
                     self.backend.send(Command::Update {
                         update: Box::new(update.clone()),
                     });
@@ -590,7 +586,6 @@ impl App {
             }
             Action::Play { cave_id } => {
                 if self.running.insert(cave_id.clone()) {
-                    self.notice = Some("Launching".into());
                     self.backend.send(Command::Launch { cave_id });
                 }
             }
@@ -606,7 +601,6 @@ impl App {
                 // Shown as installing from this instant; the queue listing
                 // that follows replaces it.
                 self.pending_installs.insert(game_id);
-                self.notice = Some(format!("Installing {}", game.title));
                 self.backend.send(Command::Install {
                     game: Box::new(game),
                 });
@@ -1035,7 +1029,7 @@ impl App {
                     {
                         c.next_cursor = None;
                     }
-                    self.notice = Some(format!("Couldn't load more: {error}"));
+                    self.error = Some(format!("Couldn't load more: {error}"));
                     self.rebuild_collection_sections();
                 }
                 Event::CollectionsInstalled(lists) => {
@@ -1073,13 +1067,7 @@ impl App {
                     self.rebuild_installs();
                 }
                 Event::DownloadFinished(download) => {
-                    let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
-                    let updated = self.updates.remove(&download.cave_id).is_some();
-                    self.notice = Some(if updated {
-                        format!("Updated {title}")
-                    } else {
-                        format!("Installed {title}")
-                    });
+                    self.updates.remove(&download.cave_id);
                     self.finished.retain(|d| d.id != download.id);
                     self.finished.insert(0, download);
                 }
@@ -1097,25 +1085,16 @@ impl App {
                         .as_deref()
                         .or(download.error.as_deref())
                         .unwrap_or("unknown error");
-                    self.notice = Some(format!("Install of {title} failed: {error}"));
+                    self.error = Some(format!("Install of {title} failed: {error}"));
                 }
-                Event::LaunchRunning { .. } => self.notice = Some("Running".into()),
+                Event::LaunchRunning { .. } => {}
                 Event::LaunchFinished { cave_id, result } => {
                     self.running.remove(&cave_id);
-                    self.notice = Some(match result {
-                        Ok(()) => "Game exited".to_string(),
-                        Err(error) => format!("Couldn't launch: {error}"),
-                    });
-                }
-                Event::Online(online) => {
-                    if self.online && !online {
-                        self.notice =
-                            Some("Offline: installs and updates need a connection".into());
-                    } else if !self.online && online {
-                        self.notice = Some("Back online".into());
+                    if let Err(error) = result {
+                        self.error = Some(format!("Couldn't launch: {error}"));
                     }
-                    self.online = online;
                 }
+                Event::Online(online) => self.online = online,
                 Event::Prompt(prompt) => {
                     if self.prompt.is_some() {
                         self.prompt_queue.push_back(prompt);
@@ -1130,10 +1109,9 @@ impl App {
                     }
                 }
                 Event::UninstallFinished { result, .. } => {
-                    self.notice = Some(match result {
-                        Ok(()) => "Uninstalled".to_string(),
-                        Err(error) => format!("Uninstall failed: {error}"),
-                    });
+                    if let Err(error) = result {
+                        self.error = Some(format!("Uninstall failed: {error}"));
+                    }
                 }
                 Event::CollectionsFailed(error) => {
                     log::error!("loading collections: {error}");
@@ -1141,16 +1119,20 @@ impl App {
                         self.collections = Loadable::Failed(error);
                     }
                 }
+                Event::InstallDeclined { game_id } => {
+                    self.pending_installs.remove(&game_id);
+                    self.rebuild_installs();
+                }
                 Event::InstallFailed { game_id, error } => {
                     self.pending_installs.remove(&game_id);
                     self.rebuild_installs();
                     let title = self.game(game_id).map_or("game", |g| g.title.as_str());
-                    self.notice = Some(format!("Couldn't install {title}: {error}"));
+                    self.error = Some(format!("Couldn't install {title}: {error}"));
                 }
                 Event::DiscardFailed { download_id, error } => {
                     self.discarding.remove(&download_id);
                     self.rebuild_installs();
-                    self.notice = Some(format!("Couldn't cancel: {error}"));
+                    self.error = Some(format!("Couldn't cancel: {error}"));
                 }
                 Event::Error(message) => {
                     if self.owned.get().is_none() {
@@ -1425,26 +1407,19 @@ impl App {
                         ) {
                             self.actions.push(Action::SetTab(tab));
                         }
-                    } else {
-                        // The heading doubles as the way back for touch.
-                        let back = ui::back_button(ui, &m);
-                        ui.add_space(m.space(6.0));
-                        let label = ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(self.tab.label())
-                                        .font(egui::FontId::new(
-                                            m.heading,
-                                            egui::FontFamily::Name("black".into()),
-                                        ))
-                                        .color(ui::TEXT),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if back.clicked() || label.clicked() {
+                    } else if self.input_mode == InputMode::Touch {
+                        // No footer hint on touch, so the strip's slot holds
+                        // the way back instead.
+                        if ui::back_button(ui, &m).clicked() {
                             self.actions.push(Action::Back);
                         }
+                    } else {
+                        // The strip's slot stays empty at the strip's height,
+                        // so the frame around the page does not move.
+                        ui.allocate_exact_size(
+                            egui::vec2(0.0, ui::tab_strip_height(ui, &m)),
+                            egui::Sense::hover(),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = m.space(12.0);
@@ -1518,13 +1493,12 @@ impl App {
                         }
                     });
                 }
-                match (&self.owned, &self.notice) {
-                    (Loadable::Loaded(_), Some(notice)) => ui::subtle(ui, &m, notice),
+                // One line under the header: progress while loading, then
+                // only failures. Its space is kept so the page never jumps.
+                match (&self.owned, &self.error) {
+                    (_, Some(error)) => ui::error(ui, &m, error),
                     (Loadable::Loaded(_), None) => ui::subtle(ui, &m, ""),
                     _ => ui::subtle(ui, &m, &self.status),
-                }
-                if let Some(error) = &self.error {
-                    ui::error(ui, &m, error);
                 }
                 ui.add_space(m.space(16.0));
                 match (&self.owned, self.page.clone()) {

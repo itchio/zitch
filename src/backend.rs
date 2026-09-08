@@ -24,12 +24,13 @@ use crate::butlerd::types::{
     FetchProfileCollectionsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
     PickManifestActionResult, PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
-    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams,
+    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload,
+    UploadType,
 };
 use crate::butlerd::{Client, Daemon, Incoming, is_offline};
 use crate::model::{
     Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, Profile, Prompt,
-    UploadExt, UserExt,
+    UploadExt, UserExt, human_size,
 };
 
 pub struct Config {
@@ -118,6 +119,10 @@ pub enum Event {
     InstallFailed {
         game_id: i64,
         error: String,
+    },
+    /// The user backed out of the upload picker.
+    InstallDeclined {
+        game_id: i64,
     },
     /// The download stays in the queue as it was.
     DiscardFailed {
@@ -323,15 +328,27 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Command::Install { game }) => {
+                // Picking an upload blocks on the answer, which arrives
+                // through this loop, so the install runs on its own thread.
+                let config = Arc::clone(&config);
+                let prompts = prompts.clone();
                 let game_id = game.id;
-                if let Err(error) = queue_install(&client, &config, *game) {
-                    log::error!("{error:#}");
-                    emit.send(Event::InstallFailed {
+                spawn_op(
+                    format!("install-{game_id}"),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    move |error| Event::InstallFailed {
                         game_id,
                         error: format!("{error:#}"),
-                    });
-                }
-                refresh_downloads(&client, emit);
+                    },
+                    move |client, emit| {
+                        if !queue_install(client, &config, &prompts, emit, *game)? {
+                            emit.send(Event::InstallDeclined { game_id });
+                        }
+                        refresh_downloads(client, emit);
+                        Ok(())
+                    },
+                );
             }
             Ok(Command::CollectionPage {
                 collection_id,
@@ -928,20 +945,35 @@ fn refresh_downloads(client: &Client, emit: &Emitter) {
 }
 
 /// Puts a game on the download queue; the driver takes it from there.
-fn queue_install(client: &Client, config: &Config, game: Game) -> Result<()> {
+/// Queues an install, asking which upload when the game has more than one
+/// for this computer. `Ok(false)` when the user backed out.
+fn queue_install(
+    client: &Client,
+    config: &Config,
+    prompts: &Prompts,
+    emit: &Emitter,
+    game: Game,
+) -> Result<bool> {
     let location = install_location(client, config)?;
-    let uploads = client
+    let mut uploads = client
         .call(FetchGameUploadsParams {
             game_id: game.id,
             compatible: true,
             fresh: Some(true),
         })?
         .uploads;
-    // TODO: let the user pick when there is more than one.
-    let upload = uploads
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("{} has no download for this computer", game.title))?;
+    if uploads.is_empty() {
+        bail!("{} has no download for this computer", game.title);
+    }
+    let index = if uploads.len() == 1 {
+        0
+    } else {
+        match pick_upload(prompts, emit, &game, &uploads) {
+            Some(index) => index,
+            None => return Ok(false),
+        }
+    };
+    let upload = uploads.swap_remove(index);
     let queued = client.call(InstallQueueParams {
         game: Some(game.clone()),
         upload: Some(upload),
@@ -951,7 +983,58 @@ fn queue_install(client: &Client, config: &Config, game: Game) -> Result<()> {
         ..Default::default()
     })?;
     log::info!("queued {} as download {}", game.title, queued.id);
-    Ok(())
+    Ok(true)
+}
+
+/// One line per upload for the picker: its name, size, and what marks it
+/// out when the name alone does not.
+fn upload_label(upload: &Upload) -> String {
+    let mut label = upload.name().to_string();
+    let mut notes = Vec::new();
+    if upload.size > 0 {
+        notes.push(human_size(upload.size));
+    }
+    if upload.demo {
+        notes.push("demo".to_string());
+    }
+    let kind = match upload.r#type {
+        UploadType::Default | UploadType::Other | UploadType::Unknown => None,
+        UploadType::Flash => Some("flash"),
+        UploadType::Unity => Some("unity web player"),
+        UploadType::Java => Some("java"),
+        UploadType::HTML => Some("html"),
+        UploadType::Soundtrack => Some("soundtrack"),
+        UploadType::Book => Some("book"),
+        UploadType::Video => Some("video"),
+        UploadType::Documentation => Some("documentation"),
+        UploadType::Mod => Some("mod"),
+        UploadType::AudioAssets => Some("audio assets"),
+        UploadType::GraphicalAssets => Some("graphical assets"),
+        UploadType::Sourcecode => Some("source code"),
+    };
+    notes.extend(kind.map(str::to_string));
+    if !notes.is_empty() {
+        label.push_str(&format!(" ({})", notes.join(", ")));
+    }
+    label
+}
+
+/// Asks which upload to install. `None` when the user backs out.
+fn pick_upload(
+    prompts: &Prompts,
+    emit: &Emitter,
+    game: &Game,
+    uploads: &[Upload],
+) -> Option<usize> {
+    let labels: Vec<String> = uploads.iter().map(upload_label).collect();
+    let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
+    choices.push("Cancel");
+    let body = format!(
+        "{} has more than one download for this computer.",
+        game.title
+    );
+    let picked = prompts.ask(emit, "Which download?", &body, &choices)?;
+    (picked < labels.len()).then_some(picked)
 }
 
 /// Asks which of an indirect update's uploads to install. `None` when the
