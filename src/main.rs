@@ -72,6 +72,16 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     low_spec: Option<bool>,
 
+    /// Cover the screen, borderless, like a console home screen.
+    #[arg(long, env = "ZITCH_FULLSCREEN")]
+    fullscreen: bool,
+
+    /// Minimize while a game runs and come back when it exits, so a game
+    /// that starts windowed sits over the desktop rather than over zitch.
+    /// Leave off in a session where zitch is the only window.
+    #[arg(long, env = "ZITCH_MINIMIZE_WHILE_PLAYING")]
+    minimize_while_playing: bool,
+
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
@@ -155,7 +165,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("zitch")
-            .with_inner_size([cli.window.0, cli.window.1]),
+            .with_inner_size([cli.window.0, cli.window.1])
+            .with_fullscreen(cli.fullscreen),
         ..Default::default()
     };
     eframe::run_native(
@@ -167,9 +178,12 @@ fn main() -> eframe::Result<()> {
                 backend,
                 covers,
                 &cc.egui_ctx,
-                cli.zoom,
-                cli.emulate,
-                cli.low_spec,
+                app::Options {
+                    zoom: cli.zoom,
+                    emulate: cli.emulate,
+                    low_spec: cli.low_spec,
+                    minimize_while_playing: cli.minimize_while_playing,
+                },
                 shot,
             )))
         }),

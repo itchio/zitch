@@ -13,6 +13,16 @@ use crate::model::{
 };
 use crate::ui;
 
+/// How the window presents itself, from the command line.
+pub struct Options {
+    /// Extra magnification on top of the screen-derived layout.
+    pub zoom: f32,
+    /// Lay out for a display of this many points and letterbox it.
+    pub emulate: Option<(f32, f32)>,
+    pub low_spec: Option<bool>,
+    pub minimize_while_playing: bool,
+}
+
 pub struct App {
     backend: Backend,
     covers: CoverLoader,
@@ -80,6 +90,9 @@ pub struct App {
     emulate: Option<(f32, f32)>,
     /// Force the cover policy instead of picking it by screen size.
     low_spec: Option<bool>,
+    minimize_while_playing: bool,
+    /// For window commands raised from events, outside a frame.
+    ctx: egui::Context,
 }
 
 /// A debugging capture: write the window to a PNG once the library has
@@ -170,11 +183,15 @@ impl App {
         backend: Backend,
         covers: CoverLoader,
         ctx: &egui::Context,
-        zoom: f32,
-        emulate: Option<(f32, f32)>,
-        low_spec: Option<bool>,
+        options: Options,
         shot: Option<Shot>,
     ) -> Self {
+        let Options {
+            zoom,
+            emulate,
+            low_spec,
+            minimize_while_playing,
+        } = options;
         ui::install_fonts(ctx);
         ctx.set_visuals(ui::visuals());
         ctx.set_zoom_factor(zoom);
@@ -219,6 +236,8 @@ impl App {
             shot,
             emulate,
             low_spec,
+            minimize_while_playing,
+            ctx: ctx.clone(),
         }
     }
 
@@ -1087,12 +1106,26 @@ impl App {
                         .unwrap_or("unknown error");
                     self.error = Some(format!("Install of {title} failed: {error}"));
                 }
-                Event::LaunchRunning { .. } => {}
+                Event::LaunchRunning { .. } => {
+                    if self.minimize_while_playing {
+                        self.ctx
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                }
                 Event::LaunchFinished { cave_id, result } => {
                     self.running.remove(&cave_id);
                     if let Err(error) = result {
                         self.error = Some(format!("Couldn't launch: {error}"));
                     }
+                    // Take the screen back. Most window systems already hand
+                    // focus to the last focused window when the game's goes
+                    // away; this covers the ones that do not, and Wayland
+                    // compositors that refuse simply ignore it.
+                    if self.minimize_while_playing {
+                        self.ctx
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    }
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 Event::Online(online) => self.online = online,
                 Event::Prompt(prompt) => {

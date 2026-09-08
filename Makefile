@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld shot shots check fmt clean help sync-butler
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -17,6 +17,7 @@ help:
 	@echo "make run          build and launch the app"
 	@echo "make run-verbose  same, logging every JSON-RPC message"
 	@echo "make run-handheld lay out for a 640x480 screen (RG35XX H), scaled to the window"
+	@echo "make run-tv       fullscreen, minimized while a game runs"
 	@echo "make shot         launch, write a screenshot to \$$SHOT ($(SHOT)), exit"
 	@echo "                  SCRIPT=\"down,right,enter\" plays input first"
 	@echo "make shots        the same at 640x480, 1280x720 and 1920x1080, to /tmp/zitch-*.png"
@@ -44,6 +45,9 @@ run-verbose: build
 
 run-handheld: build
 	./target/debug/zitch --app-name $(APP) --emulate 640x480 $(ARGS)
+
+run-tv: build
+	./target/debug/zitch --app-name $(APP) --fullscreen --minimize-while-playing $(ARGS)
 
 shot: build
 	./target/debug/zitch --app-name $(APP) --screenshot $(SHOT) $(if $(SCRIPT),--screenshot-script "$(SCRIPT)") $(ARGS)
