@@ -1555,8 +1555,10 @@ impl App {
                         if !self.online {
                             ui::offline(ui, &m);
                         }
-                        // Progress while loading, then only failures, on the
-                        // header's free space rather than a line of its own.
+                        // Failures, and while loading the backend's status
+                        // text: an escape hatch for messages nothing else
+                        // presents, rare enough to borrow the header's free
+                        // space rather than keep a line of its own.
                         match (&self.owned, &self.error) {
                             (_, Some(error)) => ui::error(ui, &m, error),
                             (Loadable::Loaded(_), None) => {}

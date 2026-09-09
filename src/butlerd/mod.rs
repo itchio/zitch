@@ -272,8 +272,10 @@ impl Client {
         Ok(client)
     }
 
-    /// Sends a request and blocks until its reply arrives. Notifications and
-    /// server requests that arrive meanwhile queue up for [`Self::poll`].
+    /// Sends a request and blocks until its reply arrives. Server requests
+    /// that arrive meanwhile are refused as unsupported, so a call the
+    /// daemon wants to ask a question during fails instead of hanging;
+    /// notifications are logged. Use [`Self::call_streaming`] to answer.
     pub fn call<R: Request>(&self, params: R) -> Result<R::Result> {
         self.call_raw(R::METHOD, params)
     }
@@ -285,9 +287,47 @@ impl Client {
     pub fn call_streaming<R: Request>(
         &self,
         params: R,
-        mut on_incoming: impl FnMut(Incoming),
+        on_incoming: impl FnMut(Incoming),
     ) -> Result<R::Result> {
-        let method = R::METHOD;
+        self.call_inner(R::METHOD, params, false, on_incoming)
+    }
+
+    /// [`Self::call`] for a method these bindings do not know.
+    pub fn call_raw<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R> {
+        let redact = method.starts_with("Profile.Login");
+        self.call_inner(method, params, redact, |incoming| self.refuse(incoming))
+    }
+
+    /// The default handling for what arrives during a blocking call: the
+    /// same answer the main loop gives unsolicited requests.
+    fn refuse(&self, incoming: Incoming) {
+        match incoming {
+            Incoming::Notification { method, params } => {
+                if method == "Log" {
+                    let message = params["message"].as_str().unwrap_or_default();
+                    log::debug!("butler: {message}");
+                } else {
+                    log::debug!("{method} {params}");
+                }
+            }
+            Incoming::Request { id, method, .. } => {
+                log::warn!("{method} asked during a blocking call; refused");
+                let _ = self.reply_error(&id, -32601, "not supported by this client");
+            }
+        }
+    }
+
+    fn call_inner<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        redact: bool,
+        mut on_incoming: impl FnMut(Incoming),
+    ) -> Result<R> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.pending
@@ -295,7 +335,11 @@ impl Client {
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, tx);
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        log::trace!("-> {method} {}", message["params"]);
+        if redact {
+            log::trace!("-> {method} <credentials redacted>");
+        } else {
+            log::trace!("-> {method} {}", message["params"]);
+        }
         self.send(&message)?;
         let result = loop {
             match rx.try_recv() {
@@ -310,33 +354,6 @@ impl Client {
             }
         };
         let result = result.with_context(|| format!("{method} failed"))?;
-        log::trace!("<- {method} {result}");
-        serde_json::from_value(result).with_context(|| format!("decoding {method} result"))
-    }
-
-    /// [`Self::call`] for a method these bindings do not know.
-    pub fn call_raw<P: Serialize, R: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: P,
-    ) -> Result<R> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, tx);
-        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        if method.starts_with("Profile.Login") {
-            log::trace!("-> {method} <credentials redacted>");
-        } else {
-            log::trace!("-> {method} {}", message["params"]);
-        }
-        self.send(&message)?;
-        let result = rx
-            .recv()
-            .map_err(|_| anyhow!("butlerd connection closed while waiting for {method}"))?
-            .with_context(|| format!("{method} failed"))?;
         log::trace!("<- {method} {result}");
         serde_json::from_value(result).with_context(|| format!("decoding {method} result"))
     }
