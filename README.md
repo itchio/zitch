@@ -17,6 +17,12 @@ If you have any other ideas that could be fun, drop them in the issues tracker.
 Once we get a bit further along, we'll publish signed builds to itch.io, and on
 [Broth](https://broth.itch.zone).
 
+## Handhelds
+
+zitch also runs on the RG35XX H under muOS through an SDL2 host. See
+[handheld/README.md](handheld/README.md) for building, deploying and
+testing on the device.
+
 ## Credits
 
 Button glyphs are from Kenney's [Input Prompts](https://kenney.nl/assets/input-prompts) pack (CC0); see `assets/prompts/LICENSE-kenney.txt`.

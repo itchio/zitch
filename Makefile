@@ -24,7 +24,7 @@ help:
 	@echo "make check        format, lint, and type-check without running"
 	@echo "make clean        remove build output"
 	@echo "make sync-butler  regenerate src/butlerd/types.rs from \$$BUTLER_DIR ($(BUTLER_DIR))"
-	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first)"
+	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first; see handheld/README.md)"
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
 	@echo "make run-sdl      the SDL host on the desktop"
