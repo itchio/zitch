@@ -268,6 +268,11 @@ pub enum Action {
     ToggleOverlay,
     /// Focus a detail-page button; the pointer is already there.
     FocusButton(usize),
+    /// Focus a download row's button; the pointer is already there.
+    FocusDownload {
+        row: usize,
+        button: usize,
+    },
     Activate,
     Back,
     Open(Page),

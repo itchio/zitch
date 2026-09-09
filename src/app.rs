@@ -470,6 +470,7 @@ impl App {
                     rows.focus_tile(row, col);
                 }
             }
+            Action::FocusDownload { row, button } => self.downloads_focus = (row, button),
             Action::FocusButton(button) => {
                 if let Page::Game { id, .. } = self.page {
                     self.page = Page::Game { id, button };

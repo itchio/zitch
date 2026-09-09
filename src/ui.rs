@@ -1990,10 +1990,24 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                 }
                 let focused_row = index == view.focus.0;
                 let width = ui.available_width() - 2.0 * m.ring;
-                let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
                 let rect = rect.translate(vec2(m.ring, 0.0));
-                if focused_row {
+                // A moving pointer takes focus, as it does over tiles; a
+                // pointer resting on a row leaves keyboard focus alone.
+                let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+                if response.hovered() && pointer_moved && !focused_row {
+                    actions.push(Action::FocusDownload {
+                        row: index,
+                        button: 0,
+                    });
+                }
+                // A row under the pointer is already in view; scrolling it
+                // would move the list under the mouse and shift the hover.
+                if focused_row && !response.hovered() {
                     ui.scroll_to_rect(rect.expand(m.ring), None);
+                }
+                if focused_row {
                     ui.painter().rect_stroke(
                         rect.expand(2.0),
                         CornerRadius::same(8),
@@ -2034,6 +2048,9 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                             let focused = focused_row && button == view.focus.1;
                             let response = pill(ui, m, label, focused, false);
                             buttons_left = buttons_left.min(response.rect.left());
+                            if response.hovered() && pointer_moved && !focused {
+                                actions.push(Action::FocusDownload { row: index, button });
+                            }
                             if response.clicked() {
                                 actions.push(action.clone());
                             }
