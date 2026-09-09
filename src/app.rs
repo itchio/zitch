@@ -303,10 +303,18 @@ impl App {
         });
     }
 
-    fn apply_actions(&mut self) {
-        let actions = std::mem::take(&mut self.actions);
-        for action in actions {
-            self.apply(action);
+    /// Actions queued while drawing land after the frame was drawn, so it
+    /// takes another frame to show them.
+    fn apply_actions(&mut self, ctx: &egui::Context) {
+        let mut applied = false;
+        while !self.actions.is_empty() {
+            for action in std::mem::take(&mut self.actions) {
+                self.apply(action);
+                applied = true;
+            }
+        }
+        if applied {
+            ctx.request_repaint();
         }
     }
 
@@ -1477,6 +1485,8 @@ impl App {
             self.input_mode = InputMode::Touch;
         }
         self.drive_shot(ctx);
+        // Before drawing, so the frame that reads a press already shows it.
+        self.apply_actions(ctx);
     }
 
     pub fn update_ui(&mut self, ui: &mut egui::Ui) {
@@ -1759,7 +1769,7 @@ impl App {
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), prompt, &mut self.actions);
         }
-        self.apply_actions();
+        self.apply_actions(ui.ctx());
         self.covers.end_frame();
         if !self.installs.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
