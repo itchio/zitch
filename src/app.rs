@@ -1505,7 +1505,12 @@ impl App {
             ui::footer(ui, &m, &self.glyphs, self.input_mode, &hints);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ui::BG).inner_margin(m.margin))
+            .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin {
+                left: m.margin as i8,
+                right: m.margin as i8,
+                top: m.frame(18.0) as i8,
+                bottom: m.frame(6.0) as i8,
+            }))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui::logo(ui, &m, &self.glyphs);
@@ -1550,11 +1555,18 @@ impl App {
                         if !self.online {
                             ui::offline(ui, &m);
                         }
+                        // Progress while loading, then only failures, on the
+                        // header's free space rather than a line of its own.
+                        match (&self.owned, &self.error) {
+                            (_, Some(error)) => ui::error(ui, &m, error),
+                            (Loadable::Loaded(_), None) => {}
+                            _ => ui::subtle(ui, &m, &self.status),
+                        }
                     });
                 });
                 if self.page.is_library() && self.tab == Tab::Library && self.owned.get().is_some()
                 {
-                    ui.add_space(m.space(10.0));
+                    ui.add_space(m.frame(8.0));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = m.space(8.0);
                         if ui::filter_group(ui, &m, &[("Playable here", self.playable_only)])
@@ -1591,7 +1603,7 @@ impl App {
                     && self.tab == Tab::Collections
                     && self.collections.get().is_some()
                 {
-                    ui.add_space(m.space(10.0));
+                    ui.add_space(m.frame(8.0));
                     ui.horizontal(|ui| {
                         let installed = self.collections_installed_only;
                         if let Some(picked) = ui::filter_group(
@@ -1611,14 +1623,7 @@ impl App {
                         }
                     });
                 }
-                // One line under the header: progress while loading, then
-                // only failures. Its space is kept so the page never jumps.
-                match (&self.owned, &self.error) {
-                    (_, Some(error)) => ui::error(ui, &m, error),
-                    (Loadable::Loaded(_), None) => ui::subtle(ui, &m, ""),
-                    _ => ui::subtle(ui, &m, &self.status),
-                }
-                ui.add_space(m.space(16.0));
+                ui.add_space(m.frame(12.0));
                 match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
                     (Loadable::Failed(_), _) => {}

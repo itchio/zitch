@@ -226,6 +226,11 @@ const COVER_ASPECT: f32 = 315.0 / 250.0;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub scale: f32,
+    /// A damped scale for the frame around the content: margins, spacers,
+    /// heading rows, the footer. Tiles and text grow with `scale`, but the
+    /// chrome grows slower, so a big screen spends its height on covers
+    /// rather than on bars that were already big enough.
+    pub chrome: f32,
     /// Space between the page edge and content.
     pub margin: f32,
     pub tile_width: f32,
@@ -257,8 +262,10 @@ impl Metrics {
 
     pub fn for_screen(screen: Rect) -> Self {
         let scale = (screen.height() / Self::DESIGN_HEIGHT).clamp(0.8, 2.4);
+        let chrome = scale.sqrt();
         // Whole points keep widget edges on pixels at 1x density.
         let space = |base: f32| (base * scale).round();
+        let frame = |base: f32| (base * chrome).round();
         let margin = (screen.width() * 0.03).clamp(12.0, 48.0).round();
         let gap = space(14.0);
         let usable = screen.width() - 2.0 * margin;
@@ -268,13 +275,14 @@ impl Metrics {
         let font = |base: f32, floor: f32| (base * scale).max(floor);
         Self {
             scale,
+            chrome,
             margin,
             tile_width,
             gap,
             ring: space(6.0),
             title_height: space(26.0),
-            header_height: space(34.0),
-            section_gap: space(22.0),
+            header_height: frame(30.0),
+            section_gap: frame(16.0),
             heading: font(30.0, 20.0),
             title: font(26.0, 18.0),
             dialog: font(22.0, 16.0),
@@ -291,6 +299,12 @@ impl Metrics {
     /// points.
     pub fn space(&self, base: f32) -> f32 {
         (base * self.scale).round()
+    }
+
+    /// A length of the frame around the content, scaled with the damped
+    /// `chrome` factor in whole points.
+    pub fn frame(&self, base: f32) -> f32 {
+        (base * self.chrome).round()
     }
 }
 
@@ -360,6 +374,9 @@ pub struct Rows {
     cols: Vec<usize>,
     /// Scroll so the focused tile is in view on the next frame.
     pub follow: bool,
+    /// The sizes the rows were last laid out with. Scroll offsets are in
+    /// points of that layout; when the window is resized they are stale.
+    laid_out: Option<Metrics>,
     vscroll: f32,
     hscroll: Vec<f32>,
     /// How far each area can scroll, as last laid out, so a swipe stops at
@@ -501,6 +518,23 @@ pub fn library(
     let tile_height = cover_height + m.title_height;
     let stride = tile_width + gap;
     let follow = std::mem::take(&mut rows.follow);
+    // The window changed size after the offsets were taken, so the saved
+    // offsets point into a layout that no longer exists. Every length
+    // scales with `m.scale`, so scale them along and hand them to the
+    // areas, then follow the focus once this frame's measurements are in.
+    let relaid = match rows.laid_out {
+        Some(old) if old != *m => {
+            let ratio = m.scale / old.scale;
+            rows.vscroll *= ratio;
+            for offset in &mut rows.hscroll {
+                *offset *= ratio;
+            }
+            rows.follow = true;
+            true
+        }
+        _ => false,
+    };
+    rows.laid_out = Some(*m);
 
     let viewport_height = ui.available_height();
     let list_rect = ui.available_rect_before_wrap();
@@ -519,13 +553,17 @@ pub fn library(
         .scroll_bar_visibility(scroll_bar(ui, scrollbar));
     if let Some(offset) = set_vscroll {
         area = area.vertical_scroll_offset(offset);
+    } else if relaid {
+        area = area.vertical_scroll_offset(rows.vscroll);
     } else if follow && let Some(&(top, height)) = rows.row_spans.get(rows.row) {
+        // A row that is not wholly in view goes to the top, heading and
+        // all, the way console home screens settle on a row. Aligning
+        // its bottom instead would leave the row above it with its
+        // heading cut off.
         let bottom = top + height;
         let mut offset = rows.vscroll;
-        if top < offset {
+        if top < offset || bottom > offset + viewport_height {
             offset = top;
-        } else if bottom > offset + viewport_height {
-            offset = bottom - viewport_height;
         }
         area = area.vertical_scroll_offset(offset.max(0.0));
     }
@@ -606,6 +644,8 @@ pub fn library(
                 && swiped == row
             {
                 strip = strip.horizontal_scroll_offset(offset);
+            } else if relaid {
+                strip = strip.horizontal_scroll_offset(rows.hscroll[row]);
             } else if follow && is_focused_row {
                 let left = ring + focused_col as f32 * stride;
                 let right = left + tile_width;
@@ -689,6 +729,11 @@ pub fn library(
             rows.hmax[row] = (out.content_size.x - out.inner_rect.width()).max(0.0);
             rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
             ui.add_space(m.section_gap - m.space(6.0));
+        }
+        // Room under the last row so it can settle at the top like any
+        // other, instead of stopping short with the row above it cut off.
+        if let Some(&(_, height)) = rows.row_spans.last() {
+            ui.add_space((viewport_height - height).max(0.0));
         }
     });
     rows.vscroll = output.state.offset.y;
@@ -1585,7 +1630,7 @@ pub fn footer(
         .frame(
             egui::Frame::new()
                 .fill(BG)
-                .inner_margin(egui::Margin::symmetric(m.margin as i8, m.space(10.0) as i8)),
+                .inner_margin(egui::Margin::symmetric(m.margin as i8, m.frame(8.0) as i8)),
         )
         .show_separator_line(false)
         .show(ui, |ui| {
@@ -1756,7 +1801,7 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
 
 /// The strip's height, for the page that hides it.
 pub fn tab_strip_height(ui: &Ui, m: &Metrics) -> f32 {
-    ui.fonts_mut(|f| f.row_height(&bold(m.section))) + m.space(12.0)
+    ui.fonts_mut(|f| f.row_height(&bold(m.section))) + m.frame(12.0)
 }
 
 pub fn tab_strip(
