@@ -1420,6 +1420,68 @@ fn progress_bar(ui: &Ui, rect: Rect, fraction: f32) {
     }
 }
 
+/// Seconds since the Unix epoch for an RFC 3339 timestamp as butler
+/// writes them: `2026-09-03T19:06:45.123Z` or with a `+hh:mm` offset.
+pub fn rfc3339_to_unix(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (date, rest) = text.split_at_checked(10)?;
+    let mut parts = date.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    let rest = rest.strip_prefix(['T', 't', ' '])?;
+    let (time, zone) = match rest.find(['Z', 'z', '+', '-']) {
+        Some(at) => rest.split_at(at),
+        None => (rest, "Z"),
+    };
+    let time = time.split('.').next()?;
+    let mut parts = time.split(':');
+    let hour: i64 = parts.next()?.parse().ok()?;
+    let minute: i64 = parts.next()?.parse().ok()?;
+    let second: i64 = parts.next().unwrap_or("0").parse().ok()?;
+    let offset = match zone {
+        "Z" | "z" => 0,
+        _ => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let mut parts = zone[1..].split(':');
+            let hours: i64 = parts.next()?.parse().ok()?;
+            let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    // Days from civil, Howard Hinnant's algorithm.
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// "just now", "5 min ago", "3h ago", "2 days ago".
+pub fn human_time_ago(unix: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let seconds = (now - unix).max(0);
+    if seconds < 60 {
+        "just now".to_string()
+    } else if seconds < 3600 {
+        format!("{} min ago", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else if seconds < 2 * 86400 {
+        "yesterday".to_string()
+    } else {
+        format!("{} days ago", seconds / 86400)
+    }
+}
+
 pub fn human_duration(seconds: i64) -> String {
     let minutes = seconds / 60;
     if minutes < 60 {
@@ -1796,6 +1858,8 @@ pub struct DownloadRow<'a> {
     /// 0 to 1 while butler is working on it.
     pub progress: Option<f32>,
     pub failed: bool,
+    /// Listed under Recent activity rather than the queue.
+    pub finished: bool,
     pub buttons: Vec<(&'static str, Action)>,
 }
 
@@ -1836,6 +1900,32 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
             // Room for the focus ring, which is painted outside the row.
             ui.add_space(m.ring);
             for (index, row) in view.rows.iter().enumerate() {
+                let first_of_kind = index == 0 || view.rows[index - 1].finished != row.finished;
+                if first_of_kind {
+                    if index > 0 {
+                        ui.add_space(m.section_gap);
+                    }
+                    let title = if row.finished {
+                        "Recent activity"
+                    } else {
+                        "Downloads"
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_space(m.ring);
+                        ui.label(egui::RichText::new(title).font(bold(m.section)).color(TEXT));
+                        if row.finished {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.add_space(m.ring);
+                                    if pill(ui, m, "Clear all", false, false).clicked() {
+                                        actions.push(Action::ClearFinished);
+                                    }
+                                },
+                            );
+                        }
+                    });
+                }
                 let focused_row = index == view.focus.0;
                 let width = ui.available_width() - 2.0 * m.ring;
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
@@ -1926,4 +2016,24 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
             }
             ui.add_space(m.ring);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339_to_unix;
+
+    #[test]
+    fn parses_butler_timestamps() {
+        assert_eq!(rfc3339_to_unix("2026-09-03T19:06:45Z"), Some(1788462405));
+        assert_eq!(
+            rfc3339_to_unix("2026-09-03T19:06:45.123456789Z"),
+            Some(1788462405)
+        );
+        assert_eq!(
+            rfc3339_to_unix("2026-09-03T12:06:45-07:00"),
+            Some(1788462405)
+        );
+        assert_eq!(rfc3339_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_to_unix("nope"), None);
+    }
 }

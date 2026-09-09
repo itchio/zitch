@@ -2,8 +2,8 @@
 //! the generated butlerd bindings; these are the app's own.
 
 pub use crate::butlerd::types::{
-    Cave, Collection, Download, DownloadProgress, Game, GameClassification, GameUpdate, Profile,
-    Upload, User,
+    Cave, Collection, Download, DownloadProgress, DownloadReason, Game, GameClassification,
+    GameUpdate, Profile, Upload, User,
 };
 
 pub trait UserExt {
@@ -312,6 +312,9 @@ pub enum Action {
     RetryInstall {
         game_id: i64,
     },
+    /// Drop finished downloads from the Downloads tab, as butler keeps
+    /// them listed until asked.
+    ClearFinished,
     /// Queue the update butler found for this cave.
     Update {
         cave_id: String,

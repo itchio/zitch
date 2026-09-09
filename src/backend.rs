@@ -67,6 +67,8 @@ pub enum Command {
     Retry {
         download_id: String,
     },
+    /// Drop finished downloads, done or failed, from butler's queue.
+    ClearFinished,
     /// Asks first; the title names the game in the question.
     Uninstall {
         cave_id: String,
@@ -441,6 +443,12 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
                 refresh_downloads(&client, emit);
             }
+            Ok(Command::ClearFinished) => {
+                if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
+                    log::warn!("clearing finished downloads: {error:#}");
+                }
+                refresh_downloads(&client, emit);
+            }
             Ok(Command::Uninstall { cave_id, title }) => {
                 let prompts = prompts.clone();
                 spawn_op(
@@ -632,11 +640,8 @@ fn drive_incoming(client: &Client, emit: &Emitter, incoming: Incoming) {
             if let Some(download) = n.download {
                 emit.send(Event::DownloadFinished(download));
             }
-            // Finished entries only clutter the queue; the cave is the
-            // record of the install now.
-            if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
-                log::warn!("clearing finished downloads: {error:#}");
-            }
+            // Finished entries stay listed, as in the itch app, until the
+            // user clears them.
             refresh_downloads(client, emit);
         }
         Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),

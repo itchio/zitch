@@ -8,9 +8,9 @@ use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, Game,
-    GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab, UserExt,
-    playable_here,
+    Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
+    Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
+    UserExt, playable_here,
 };
 use crate::ui;
 
@@ -74,9 +74,6 @@ pub struct App {
     tab: Tab,
     /// Row and button with focus on the Downloads tab.
     downloads_focus: (usize, usize),
-    /// Downloads that completed this session. butler drops them from its
-    /// queue as soon as they finish, so the tab remembers them itself.
-    finished: Vec<Download>,
     /// Hide games with no upload for this computer, on every tab.
     playable_only: bool,
     query: String,
@@ -230,7 +227,6 @@ impl App {
             collection_loading: Default::default(),
             collection_rows: ui::Rows::default(),
             downloads_focus: (0, 0),
-            finished: Vec::new(),
             playable_only: false,
             query: String::new(),
             focus_search: false,
@@ -536,8 +532,14 @@ impl App {
                         !self.collections_installed_only,
                     ));
                 }
+                (true, Tab::Downloads)
+                    if self.downloads.iter().any(|d| d.finished_at.is_some()) =>
+                {
+                    self.actions.push(Action::ClearFinished);
+                }
                 _ => {}
             },
+            Action::ClearFinished => self.backend.send(Command::ClearFinished),
             Action::SetCollectionsInstalledOnly(on) => {
                 if self.collections_installed_only != on {
                     self.collections_installed_only = on;
@@ -1122,8 +1124,6 @@ impl App {
                 }
                 Event::DownloadFinished(download) => {
                     self.updates.remove(&download.cave_id);
-                    self.finished.retain(|d| d.id != download.id);
-                    self.finished.insert(0, download);
                 }
                 Event::Updates(updates) => {
                     self.updates = updates
@@ -1225,8 +1225,6 @@ impl App {
 
 impl App {
     /// What the footer offers on the current page, in reading order.
-    /// What the Downloads tab lists: butler's queue first, in its order,
-    /// then what finished this session.
     /// The stored focus, clamped to rows that still exist. The queue changes
     /// underneath the focus, so every reader clamps rather than trusting it.
     fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> (usize, usize) {
@@ -1236,90 +1234,123 @@ impl App {
         (row, button.min(buttons.saturating_sub(1)))
     }
 
+    /// What the Downloads tab lists, split the way the itch app splits it:
+    /// butler's pending queue in its order, then everything with a
+    /// `finished_at`, done or failed, newest first. Finished entries stay
+    /// in butler's queue until the user clears them.
     fn download_rows(&self) -> Vec<ui::DownloadRow<'_>> {
+        let mut pending: Vec<&Download> = Vec::new();
+        let mut finished: Vec<&Download> = Vec::new();
+        for download in &self.downloads {
+            if download.finished_at.is_some() {
+                finished.push(download);
+            } else {
+                pending.push(download);
+            }
+        }
+        pending.sort_by_key(|d| d.position);
+        finished.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+
         let mut rows = Vec::new();
-        let mut queue: Vec<&Download> = self.downloads.iter().collect();
-        queue.sort_by_key(|d| (d.error.is_some(), d.position));
-        for download in queue {
+        for download in pending {
             let game = download.game.as_ref();
             let game_id = game.map(|g| g.id);
             let title = game.map_or_else(|| "Download".to_string(), |g| g.title.clone());
             let updating = self.caves.iter().any(|cave| cave.id == download.cave_id);
             let prefix = if updating { "Update: " } else { "" };
-            let error = download
-                .error_message
-                .as_deref()
-                .or(download.error.as_deref());
             let mut buttons = Vec::new();
-            let (detail, progress, failed) = if let Some(error) = error {
-                if let Some(game_id) = game_id {
-                    buttons.push(("Retry", Action::RetryInstall { game_id }));
-                    buttons.push(("Dismiss", Action::CancelInstall { game_id }));
-                }
-                (format!("{prefix}Failed, {error}"), None, true)
-            } else {
-                if let Some(game_id) = game_id {
-                    let label = if self.discarding.contains(&download.id) {
-                        "Cancelling"
-                    } else {
-                        "Cancel"
-                    };
-                    buttons.push((label, Action::CancelInstall { game_id }));
-                }
-                match self.progress.get(&download.id) {
-                    Some(p) if p.bps > 0.0 => (
-                        format!(
-                            "{prefix}{}, {:.0}%, {}/s, {} left",
-                            capitalize(&p.stage),
-                            p.progress * 100.0,
-                            ui::human_size(p.bps as i64),
-                            ui::human_duration_seconds(p.eta as i64),
-                        ),
-                        Some(p.progress as f32),
-                        false,
+            if let Some(game_id) = game_id {
+                let label = if self.discarding.contains(&download.id) {
+                    "Cancelling"
+                } else {
+                    "Cancel"
+                };
+                buttons.push((label, Action::CancelInstall { game_id }));
+            }
+            let (detail, progress) = match self.progress.get(&download.id) {
+                Some(p) if p.bps > 0.0 => (
+                    format!(
+                        "{prefix}{}, {:.0}%, {}/s, {} left",
+                        capitalize(&p.stage),
+                        p.progress * 100.0,
+                        ui::human_size(p.bps as i64),
+                        ui::human_duration_seconds(p.eta as i64),
                     ),
-                    Some(p) if !p.stage.is_empty() => (
-                        format!(
-                            "{prefix}{}, {:.0}%",
-                            capitalize(&p.stage),
-                            p.progress * 100.0
-                        ),
-                        Some(p.progress as f32),
-                        false,
+                    Some(p.progress as f32),
+                ),
+                Some(p) if !p.stage.is_empty() => (
+                    format!(
+                        "{prefix}{}, {:.0}%",
+                        capitalize(&p.stage),
+                        p.progress * 100.0
                     ),
-                    _ if download.started_at.is_some() => {
-                        (format!("{prefix}Starting"), Some(0.0), false)
-                    }
-                    _ => (format!("{prefix}Queued"), None, false),
-                }
+                    Some(p.progress as f32),
+                ),
+                _ if download.started_at.is_some() => (format!("{prefix}Starting"), Some(0.0)),
+                _ => (format!("{prefix}Queued"), None),
             };
             rows.push(ui::DownloadRow {
                 game,
                 title,
                 detail,
                 progress,
-                failed,
+                failed: false,
+                finished: false,
                 buttons,
             });
         }
-        for download in &self.finished {
+        for download in finished {
             let game = download.game.as_ref();
+            let game_id = game.map(|g| g.id);
+            let title = game.map_or_else(|| "Download".to_string(), |g| g.title.clone());
+            let error = download
+                .error_message
+                .as_deref()
+                .or(download.error.as_deref());
             let mut buttons = Vec::new();
-            if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
-                buttons.push((
-                    "Open",
-                    Action::Open(Page::Game {
-                        id: game.id,
-                        button: 0,
-                    }),
-                ));
-            }
+            let (detail, failed) = if let Some(error) = error {
+                if let Some(game_id) = game_id {
+                    buttons.push(("Retry", Action::RetryInstall { game_id }));
+                    buttons.push(("Dismiss", Action::CancelInstall { game_id }));
+                }
+                (format!("Failed, {error}"), true)
+            } else {
+                if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
+                    buttons.push((
+                        "Open",
+                        Action::Open(Page::Game {
+                            id: game.id,
+                            button: 0,
+                        }),
+                    ));
+                }
+                let outcome = match download.reason {
+                    DownloadReason::Install => "Installed",
+                    DownloadReason::Update => "Updated",
+                    DownloadReason::Reinstall => "Reinstalled",
+                    DownloadReason::VersionSwitch => "Switched version",
+                    DownloadReason::Unknown => "Finished",
+                };
+                let when = download
+                    .finished_at
+                    .as_deref()
+                    .and_then(ui::rfc3339_to_unix)
+                    .map(ui::human_time_ago);
+                (
+                    match when {
+                        Some(when) => format!("{outcome}, {when}"),
+                        None => outcome.to_string(),
+                    },
+                    false,
+                )
+            };
             rows.push(ui::DownloadRow {
                 game,
-                title: game.map_or_else(|| "Download".to_string(), |g| g.title.clone()),
-                detail: "Finished".to_string(),
+                title,
+                detail,
                 progress: None,
-                failed: false,
+                failed,
+                finished: true,
                 buttons,
             });
         }
@@ -1371,6 +1402,12 @@ impl App {
                     }
                     if let Some((label, _)) = rows.get(row).and_then(|r| r.buttons.get(button)) {
                         hints.push((vec![Glyph::Confirm], label.to_string()));
+                    }
+                    if rows.iter().any(|r| r.finished) {
+                        hints.push((
+                            vec![Glyph::FilterLeft, Glyph::FilterRight],
+                            "Clear finished".to_string(),
+                        ));
                     }
                     hints.push((vec![Glyph::Back], "Back".to_string()));
                     hints
@@ -1473,8 +1510,11 @@ impl App {
                 ui.horizontal(|ui| {
                     ui::logo(ui, &m, &self.glyphs);
                     if self.page.is_library() {
-                        let downloading =
-                            self.downloads.iter().filter(|d| d.error.is_none()).count();
+                        let downloading = self
+                            .downloads
+                            .iter()
+                            .filter(|d| d.finished_at.is_none())
+                            .count();
                         if let Some(tab) = ui::tab_strip(
                             ui,
                             &m,
