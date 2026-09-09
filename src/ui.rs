@@ -1801,7 +1801,14 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
 
 /// The strip's height, for the page that hides it.
 pub fn tab_strip_height(ui: &Ui, m: &Metrics) -> f32 {
-    ui.fonts_mut(|f| f.row_height(&bold(m.section))) + m.frame(12.0)
+    ui.fonts_mut(|f| f.row_height(&bold(m.section))) + 2.0 * tab_pad_y(m)
+}
+
+/// Room above and below a tab's label. The underline sits inside the
+/// lower half, and the label is centered, so the row's middle is the
+/// text's middle and the logo and key glyphs line up with it.
+fn tab_pad_y(m: &Metrics) -> f32 {
+    m.frame(6.0)
 }
 
 pub fn tab_strip(
@@ -1813,73 +1820,83 @@ pub fn tab_strip(
     downloading: usize,
 ) -> Option<Tab> {
     let mut picked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = m.space(18.0);
-        let glyph = |ui: &mut Ui, glyph: Glyph| {
-            if let Some(texture) = glyphs.get(mode, glyph) {
-                let size = m.space(20.0);
-                ui.add(
-                    egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                        .fit_to_exact_size(vec2(size, size)),
+    // A row of the strip's full height from the start, so the glyph placed
+    // before the tabs is centered on the same line as they are. A plain
+    // `horizontal` starts one text line tall and grows as items land.
+    let row = vec2(ui.available_width(), tab_strip_height(ui, m));
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = m.space(18.0);
+            let text_height = ui.fonts_mut(|f| f.row_height(&bold(m.section)));
+            let glyph = |ui: &mut Ui, glyph: Glyph| {
+                if let Some(texture) = glyphs.get(mode, glyph) {
+                    let size = (text_height * 0.9).round();
+                    ui.add(
+                        egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                            .fit_to_exact_size(vec2(size, size)),
+                    );
+                }
+            };
+            glyph(ui, Glyph::TabLeft);
+            for tab in Tab::ALL {
+                let selected = tab == active;
+                let color = if selected { TEXT } else { DIM };
+                let galley =
+                    ui.painter()
+                        .layout_no_wrap(tab.label().to_string(), bold(m.section), color);
+                let count = (tab == Tab::Downloads && downloading > 0).then(|| {
+                    ui.painter().layout_no_wrap(
+                        downloading.to_string(),
+                        FontId::proportional(m.caption),
+                        BG,
+                    )
+                });
+                let pad = m.space(3.0);
+                let pad_y = tab_pad_y(m);
+                let count_width = count
+                    .as_ref()
+                    .map_or(0.0, |c| c.size().x + m.space(12.0) + m.space(8.0));
+                let size = vec2(
+                    galley.size().x + 2.0 * pad + count_width,
+                    galley.size().y + 2.0 * pad_y,
                 );
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                let text_height = galley.size().y;
+                let text_pos = pos2(rect.left() + pad, rect.center().y - text_height / 2.0);
+                let text_right = text_pos.x + galley.size().x;
+                ui.painter().galley(text_pos, galley, color);
+                if let Some(count) = count {
+                    let height = text_height * 0.8;
+                    let pill = Rect::from_min_size(
+                        pos2(text_right + m.space(8.0), rect.center().y - height / 2.0),
+                        vec2(count.size().x + m.space(12.0), height),
+                    );
+                    ui.painter().rect_filled(
+                        pill,
+                        CornerRadius::same((height / 2.0) as u8),
+                        ACCENT,
+                    );
+                    ui.painter()
+                        .galley(pill.center() - count.size() / 2.0, count, BG);
+                }
+                if selected {
+                    let line = Rect::from_min_max(
+                        pos2(rect.left(), rect.bottom() - m.space(3.0)),
+                        rect.right_bottom(),
+                    );
+                    ui.painter()
+                        .rect_filled(line, CornerRadius::same(2), ACCENT);
+                }
+                if response.clicked() {
+                    picked = Some(tab);
+                }
+                response.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
-        };
-        glyph(ui, Glyph::TabLeft);
-        for tab in Tab::ALL {
-            let selected = tab == active;
-            let color = if selected { TEXT } else { DIM };
-            let galley =
-                ui.painter()
-                    .layout_no_wrap(tab.label().to_string(), bold(m.section), color);
-            let count = (tab == Tab::Downloads && downloading > 0).then(|| {
-                ui.painter().layout_no_wrap(
-                    downloading.to_string(),
-                    FontId::proportional(m.caption),
-                    BG,
-                )
-            });
-            let pad = m.space(3.0);
-            let count_width = count
-                .as_ref()
-                .map_or(0.0, |c| c.size().x + m.space(12.0) + m.space(8.0));
-            let size = vec2(
-                galley.size().x + 2.0 * pad + count_width,
-                galley.size().y + m.space(12.0),
-            );
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-            let text_pos = pos2(rect.left() + pad, rect.top());
-            let text_height = galley.size().y;
-            let text_right = text_pos.x + galley.size().x;
-            ui.painter().galley(text_pos, galley, color);
-            if let Some(count) = count {
-                let height = text_height * 0.8;
-                let pill = Rect::from_min_size(
-                    pos2(
-                        text_right + m.space(8.0),
-                        rect.top() + (text_height - height) / 2.0,
-                    ),
-                    vec2(count.size().x + m.space(12.0), height),
-                );
-                ui.painter()
-                    .rect_filled(pill, CornerRadius::same((height / 2.0) as u8), ACCENT);
-                ui.painter()
-                    .galley(pill.center() - count.size() / 2.0, count, BG);
-            }
-            if selected {
-                let line = Rect::from_min_max(
-                    pos2(rect.left(), rect.bottom() - m.space(3.0)),
-                    rect.right_bottom(),
-                );
-                ui.painter()
-                    .rect_filled(line, CornerRadius::same(2), ACCENT);
-            }
-            if response.clicked() {
-                picked = Some(tab);
-            }
-            response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        }
-        glyph(ui, Glyph::TabRight);
-    });
+            glyph(ui, Glyph::TabRight);
+        },
+    );
     picked
 }
 

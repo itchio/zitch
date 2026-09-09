@@ -1512,7 +1512,11 @@ impl App {
                 bottom: m.frame(6.0) as i8,
             }))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // A row of the strip's height from the start, so the logo
+                // and the right-hand text center on the tabs' line.
+                let row = egui::vec2(ui.available_width(), ui::tab_strip_height(ui, &m));
+                let centered = egui::Layout::left_to_right(egui::Align::Center);
+                ui.allocate_ui_with_layout(row, centered, |ui| {
                     ui::logo(ui, &m, &self.glyphs);
                     if self.page.is_library() {
                         let downloading = self
