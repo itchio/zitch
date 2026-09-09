@@ -1,0 +1,12 @@
+# Cross-compiling for the handheld (RG35XX H, muOS): `make handheld`.
+# Needs the aarch64-linux-gnu-gcc package. Its glibc is newer than the
+# device's, so linking uses the device's own libraries instead, copied to
+# target/handheld-sysroot by `make handheld-sysroot`: -L puts them ahead of
+# the package's and -B takes the startup objects from there too.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = ["-L", "target/handheld-sysroot/lib", "-C", "link-arg=-Btarget/handheld-sysroot/lib"]
+
+[env]
+CC_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-gcc"
+AR_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-ar"
