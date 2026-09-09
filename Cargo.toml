@@ -13,16 +13,27 @@ env_logger = { version = "0.11", default-features = false, features = ["auto-col
 directories = "6"
 clap = { version = "4.5", features = ["derive", "env"] }
 # glow keeps the binary small; a 2D launcher does not need wgpu.
-eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"], optional = true }
 egui = "0.36"
+# The handheld host: no window system, so SDL2 (the firmware's own build,
+# which knows the Mali framebuffer) opens the screen and egui_glow draws.
+sdl2 = { version = "0.38", optional = true }
+egui_glow = { version = "0.36", default-features = false, optional = true }
 # Cover formats itch.io serves, plus png for --screenshot captures.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Cover downloads. Blocking on a few worker threads is all a launcher needs.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Gamepad input, polled each frame on the interface thread.
-gilrs = "0.11"
+gilrs = { version = "0.11", optional = true }
 # Hands files and URLs a game launch asks to open to the desktop.
 open = "5"
+
+[features]
+default = ["eframe-host", "gilrs"]
+# Desktop window through winit, as before.
+eframe-host = ["dep:eframe"]
+# SDL2 window and GLES2 drawing; controllers come through SDL too.
+sdl-host = ["dep:sdl2", "dep:egui_glow"]
 
 [profile.dev.package."*"]
 opt-level = 2

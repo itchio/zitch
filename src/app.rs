@@ -22,6 +22,8 @@ pub struct Options {
     pub emulate: Option<(f32, f32)>,
     pub low_spec: Option<bool>,
     pub minimize_while_playing: bool,
+    /// A controller the host reads itself; otherwise gilrs is used.
+    pub gamepad: Option<Gamepad>,
 }
 
 pub struct App {
@@ -193,6 +195,7 @@ impl App {
             emulate,
             low_spec,
             minimize_while_playing,
+            gamepad,
         } = options;
         ui::install_fonts(ctx);
         ctx.set_visuals(ui::visuals());
@@ -200,7 +203,7 @@ impl App {
         Self {
             backend,
             covers,
-            gamepad: Gamepad::new(ctx.clone()),
+            gamepad: gamepad.unwrap_or_else(|| Gamepad::new(ctx.clone())),
             glyphs: Glyphs::load(ctx),
             input_mode: InputMode::Keyboard,
             status: String::new(),
@@ -1439,8 +1442,10 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+/// One frame, for whichever host drives the window: input and actions
+/// first, then drawing into the whole viewport.
+impl App {
+    pub fn update_logic(&mut self, ctx: &egui::Context) {
         if let Some((width, height)) = self.emulate {
             // Pick the density that fits the emulated display in the window,
             // so the layout always sees that many points and resizing only
@@ -1474,7 +1479,7 @@ impl eframe::App for App {
         self.drive_shot(ctx);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub fn update_ui(&mut self, ui: &mut egui::Ui) {
         let Some((width, height)) = self.emulate else {
             self.draw(ui);
             return;
@@ -1488,8 +1493,23 @@ impl eframe::App for App {
         self.draw(&mut inner);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    pub fn on_close(&mut self) {
         self.backend.shutdown();
+    }
+}
+
+#[cfg(feature = "eframe-host")]
+impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_logic(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_ui(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.on_close();
     }
 }
 

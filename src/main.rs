@@ -3,6 +3,8 @@ mod backend;
 mod butlerd;
 mod gamepad;
 mod glyphs;
+#[cfg(feature = "sdl-host")]
+mod host_sdl;
 mod images;
 mod model;
 mod ui;
@@ -95,7 +97,7 @@ fn parse_size(text: &str) -> Result<(f32, f32), String> {
     Ok((parse(w)?, parse(h)?))
 }
 
-fn main() -> eframe::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(if cli.verbose {
@@ -162,32 +164,52 @@ fn main() -> eframe::Result<()> {
         .map(|path| app::Shot::new(path, std::time::Duration::from_secs(8), script));
     let waker = backend::Waker::default();
     let backend = backend::Backend::spawn(config, waker.clone());
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("zitch")
-            .with_inner_size([cli.window.0, cli.window.1])
-            .with_fullscreen(cli.fullscreen),
-        ..Default::default()
+    let options = app::Options {
+        zoom: cli.zoom,
+        emulate: cli.emulate,
+        low_spec: cli.low_spec,
+        minimize_while_playing: cli.minimize_while_playing,
+        gamepad: None,
     };
-    eframe::run_native(
-        "zitch",
-        options,
-        Box::new(move |cc| {
-            waker.attach(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(
-                backend,
-                covers,
-                &cc.egui_ctx,
-                app::Options {
-                    zoom: cli.zoom,
-                    emulate: cli.emulate,
-                    low_spec: cli.low_spec,
-                    minimize_while_playing: cli.minimize_while_playing,
-                },
-                shot,
-            )))
-        }),
-    )
+    #[cfg(feature = "sdl-host")]
+    {
+        host_sdl::run(
+            backend,
+            covers,
+            waker,
+            options,
+            shot,
+            host_sdl::Window {
+                size: cli.window,
+                fullscreen: cli.fullscreen,
+            },
+        )
+    }
+    #[cfg(not(feature = "sdl-host"))]
+    {
+        let native = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_title("zitch")
+                .with_inner_size([cli.window.0, cli.window.1])
+                .with_fullscreen(cli.fullscreen),
+            ..Default::default()
+        };
+        eframe::run_native(
+            "zitch",
+            native,
+            Box::new(move |cc| {
+                waker.attach(&cc.egui_ctx);
+                Ok(Box::new(app::App::new(
+                    backend,
+                    covers,
+                    &cc.egui_ctx,
+                    options,
+                    shot,
+                )))
+            }),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))
+    }
 }
 
 /// Finds butler the way the itch app's broth does: the version named by
