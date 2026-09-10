@@ -264,8 +264,13 @@ pub enum Action {
     MoreGames {
         row: usize,
     },
-    /// The Guide button: bring the window over the running game.
-    ToggleOverlay,
+    /// Guide, Start or Escape: bring the window up over a running game
+    /// and open or close the menu drawer.
+    Menu,
+    /// Focus a menu drawer item; the pointer is already there.
+    MenuFocus(usize),
+    /// Close the window; the hosts shut the backend down on the way out.
+    Quit,
     /// Focus a detail-page button; the pointer is already there.
     FocusButton(usize),
     /// Focus a download row's button; the pointer is already there.

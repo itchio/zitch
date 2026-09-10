@@ -29,6 +29,7 @@ pub enum PadButton {
     LeftTrigger,
     RightTrigger,
     Guide,
+    Start,
 }
 
 pub fn button_action(button: PadButton) -> Option<Action> {
@@ -39,7 +40,7 @@ pub fn button_action(button: PadButton) -> Option<Action> {
         PadButton::LeftBumper => Action::CycleTab(-1),
         PadButton::RightBumper => Action::CycleTab(1),
         PadButton::LeftTrigger | PadButton::RightTrigger => Action::ToggleFilter,
-        PadButton::Guide => Action::ToggleOverlay,
+        PadButton::Guide | PadButton::Start => Action::Menu,
     })
 }
 
@@ -81,9 +82,9 @@ impl Gamepad {
         if !focused {
             // Only the Guide button reaches an unfocused window: it is the
             // way back from a running game.
-            let guide = rx.try_iter().any(|a| matches!(a, Action::ToggleOverlay));
+            let guide = rx.try_iter().any(|a| matches!(a, Action::Menu));
             if guide {
-                actions.push(Action::ToggleOverlay);
+                actions.push(Action::Menu);
             }
             return guide;
         }
@@ -259,6 +260,7 @@ mod reader {
             Button::LeftTrigger2 => PadButton::LeftTrigger,
             Button::RightTrigger2 => PadButton::RightTrigger,
             Button::Mode => PadButton::Guide,
+            Button::Start => PadButton::Start,
             _ => return None,
         };
         button_action(pad)

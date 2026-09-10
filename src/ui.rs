@@ -1616,6 +1616,101 @@ pub fn prompt(
         });
 }
 
+/// The menu drawer: a list down the left edge over a dimmed page, sliding
+/// in and out. `focus` is `None` while it is closed, when this only draws
+/// the tail of the closing animation.
+pub fn drawer(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    items: &[(&str, Action)],
+    focus: Option<usize>,
+    actions: &mut Vec<Action>,
+) {
+    let open = ctx.animate_bool_with_time(egui::Id::new("drawer-open"), focus.is_some(), 0.15);
+    if open <= 0.0 {
+        return;
+    }
+    let width = (screen.width() * 0.34).clamp(m.space(200.0), m.space(320.0));
+    egui::Area::new(egui::Id::new("drawer-dim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let response = ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha((170.0 * open) as u8));
+            if response.clicked() && focus.is_some() {
+                actions.push(Action::Back);
+            }
+        });
+    let panel = Rect::from_min_size(
+        egui::pos2(screen.min.x - width * (1.0 - open), screen.min.y),
+        vec2(width, screen.height()),
+    );
+    egui::Area::new(egui::Id::new("drawer"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(panel.min)
+        .show(ctx, |ui| {
+            ui.painter().rect_filled(panel, 0.0, TILE_BG);
+            ui.painter()
+                .vline(panel.max.x, panel.y_range(), Stroke::new(1.0, BORDER));
+            let pad = m.space(16.0);
+            let mut cursor = panel.min.y + m.header_height;
+            let row_height = m.space(44.0);
+            for (index, (label, action)) in items.iter().enumerate() {
+                let row =
+                    Rect::from_min_size(egui::pos2(panel.min.x, cursor), vec2(width, row_height));
+                let response = ui.allocate_rect(row, Sense::click());
+                let focused = focus == Some(index);
+                if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    actions.push(Action::MenuFocus(index));
+                }
+                if focused {
+                    ui.painter().rect_filled(row, 0.0, TILE_HOVER);
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(row.min, vec2(m.space(4.0), row_height)),
+                        0.0,
+                        ACCENT,
+                    );
+                }
+                ui.painter().text(
+                    egui::pos2(row.min.x + pad + m.space(4.0), row.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    bold(m.button),
+                    if focused { TEXT } else { DIM },
+                );
+                if response.clicked() {
+                    actions.push(Action::Back);
+                    actions.push(action.clone());
+                }
+                cursor += row_height;
+            }
+        });
+}
+
+/// Covers everything while the app shuts down, so the frame that stays on
+/// screen during the backend's exit says what is happening.
+pub fn quitting(ctx: &egui::Context, m: &Metrics, screen: Rect) {
+    egui::Area::new(egui::Id::new("quitting"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(200));
+            ui.painter().text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Quitting\u{2026}",
+                bold(m.dialog),
+                TEXT,
+            );
+        });
+}
+
 /// The hint bar along the bottom: a glyph and a word for each thing the
 /// current page lets the user do.
 pub fn footer(

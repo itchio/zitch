@@ -33,6 +33,13 @@ pub struct App {
     glyphs: Glyphs,
     /// The device the user touched last, which picks the footer's glyphs.
     input_mode: InputMode,
+    /// The focused item while the menu drawer is open.
+    menu: Option<usize>,
+    /// Frames of the "Quitting" overlay left to show before the window is
+    /// asked to close. The backend join that follows the close blocks the
+    /// last frame on screen, so it must be one that already says Quitting;
+    /// a few frames also let a pending screenshot read back first.
+    quitting: Option<u32>,
     status: String,
     profile: Option<Profile>,
     /// Games the profile has a key for, in butler's order (newest first).
@@ -162,7 +169,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
-            "guide" => Ok(Step::Act(Action::ToggleOverlay)),
+            "guide" => Ok(Step::Act(Action::Menu)),
             "prompt" => Ok(Step::Act(Action::Answer {
                 prompt: 0,
                 choice: None,
@@ -183,6 +190,10 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
 }
 
 impl App {
+    /// Frames the "Quitting" overlay is held before the window closes.
+    /// Long enough to paint and to finish a screenshot readback.
+    const QUIT_FRAMES: u32 = 3;
+
     pub fn new(
         backend: Backend,
         covers: CoverLoader,
@@ -236,6 +247,8 @@ impl App {
             blur_search: false,
             page: Page::Library,
             error: None,
+            menu: None,
+            quitting: None,
             actions: Vec::new(),
             rows: ui::Rows::default(),
             shot,
@@ -381,6 +394,9 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        if self.quitting.is_some() {
+            return;
+        }
         if let (None, Action::Answer { prompt: 0, .. }) = (&self.prompt, &action) {
             self.prompt = Some(Prompt {
                 id: 0,
@@ -416,7 +432,30 @@ impl App {
                     self.prompt = self.prompt_queue.pop_front();
                     self.backend.send(Command::Answer { prompt: id, choice });
                 }
-                Action::ToggleOverlay => self.raise_window(),
+                Action::Menu => self.raise_window(),
+                _ => {}
+            }
+            return;
+        }
+        if let Some(focus) = self.menu {
+            let items = self.menu_items();
+            match action {
+                Action::MoveFocus(Direction::Up) => self.menu = Some(focus.saturating_sub(1)),
+                Action::MoveFocus(Direction::Down) => {
+                    self.menu = Some((focus + 1).min(items.len().saturating_sub(1)))
+                }
+                Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
+                Action::Activate => {
+                    if let Some((_, action)) = items.into_iter().nth(focus) {
+                        // Quit keeps the drawer in place under the overlay.
+                        if !matches!(action, Action::Quit) {
+                            self.menu = None;
+                        }
+                        self.actions.push(action);
+                    }
+                }
+                Action::Back | Action::Menu => self.menu = None,
+                Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
                 _ => {}
             }
             return;
@@ -560,7 +599,10 @@ impl App {
                     self.collection_rows.follow = true;
                 }
             }
-            Action::ToggleOverlay => self.raise_window(),
+            Action::Menu => {
+                self.raise_window();
+                self.menu = Some(0);
+            }
             Action::BackToGame => {
                 if !self.running.is_empty() {
                     self.hide_window();
@@ -626,7 +668,8 @@ impl App {
                     self.actions.push(Action::SetTab(Tab::Library))
                 }
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
-                Page::Library => self.error = None,
+                Page::Library if self.error.is_some() => self.error = None,
+                Page::Library => self.actions.push(Action::Menu),
                 Page::Game { id, .. } => {
                     if let Some(rows) = self.active_rows() {
                         rows.focus_game(id);
@@ -634,6 +677,8 @@ impl App {
                     self.page = Page::Library;
                 }
             },
+            Action::MenuFocus(_) => {}
+            Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
             Action::Open(page) => {
                 self.error = None;
                 self.page = page;
@@ -1369,7 +1414,24 @@ impl App {
         rows
     }
 
+    /// What the menu drawer offers, top to bottom.
+    fn menu_items(&self) -> Vec<(&'static str, Action)> {
+        vec![("Quit", Action::Quit)]
+    }
+
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
+        if let Some(focus) = self.menu {
+            let items = self.menu_items();
+            let mut hints = Vec::new();
+            if items.len() > 1 {
+                hints.push((vec![Glyph::Navigate], "Choose".to_string()));
+            }
+            if let Some((label, _)) = items.get(focus) {
+                hints.push((vec![Glyph::Confirm], label.to_string()));
+            }
+            hints.push((vec![Glyph::Back], "Close".to_string()));
+            return hints;
+        }
         if let Some(prompt) = &self.prompt {
             let mut hints = Vec::new();
             if prompt.choices.len() > 1 {
@@ -1392,6 +1454,7 @@ impl App {
                         "Filter".to_string(),
                     ),
                     (vec![Glyph::Search], "Search".to_string()),
+                    (vec![Glyph::Menu], "Menu".to_string()),
                 ],
                 Tab::Collections => {
                     let mut hints = vec![(vec![Glyph::Navigate], "Browse".to_string())];
@@ -1768,6 +1831,24 @@ impl App {
             });
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), prompt, &mut self.actions);
+        }
+        let items = self.menu_items();
+        ui::drawer(
+            ui.ctx(),
+            &m,
+            ui.max_rect(),
+            &items,
+            self.menu,
+            &mut self.actions,
+        );
+        if let Some(frames) = self.quitting {
+            ui::quitting(ui.ctx(), &m, ui.max_rect());
+            if frames == 0 {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.quitting = Some(frames - 1);
+                ui.ctx().request_repaint();
+            }
         }
         self.apply_actions(ui.ctx());
         self.covers.end_frame();

@@ -26,6 +26,8 @@ pub enum Glyph {
     FilterLeft,
     FilterRight,
     Search,
+    /// Start on a pad, Escape on a keyboard.
+    Menu,
 }
 
 pub struct Glyphs {
@@ -64,6 +66,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Gamepad, FilterLeft => "xbox_lt.png",
     Gamepad, FilterRight => "xbox_rt.png",
     Gamepad, Search => "xbox_button_color_y.png",
+    Gamepad, Menu => "xbox_button_menu.png",
     Keyboard, Confirm => "keyboard_enter.png",
     Keyboard, Back => "keyboard_escape.png",
     Keyboard, Navigate => "keyboard_arrows_all.png",
@@ -72,6 +75,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Keyboard, TabRight => "keyboard_e.png",
     Keyboard, FilterRight => "keyboard_tab.png",
     Keyboard, Search => "keyboard_slash_forward.png",
+    Keyboard, Menu => "keyboard_escape.png",
 ];
 
 impl Glyphs {

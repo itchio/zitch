@@ -419,6 +419,7 @@ impl Pads {
             Button::LeftShoulder => PadButton::LeftBumper,
             Button::RightShoulder => PadButton::RightBumper,
             Button::Guide => PadButton::Guide,
+            Button::Start => PadButton::Start,
             _ => return None,
         };
         button_action(pad)
