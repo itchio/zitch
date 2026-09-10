@@ -154,8 +154,15 @@ pub fn launch(name: &str, system: System, rom: &Path) -> Result<()> {
         rom.display(),
         system.label()
     );
+    // The app's own config and cache live next to its binary (see
+    // mux_launch.sh); the emulator has to find the firmware's instead, or
+    // it starts with no button mappings.
     let status = Command::new("/bin/sh")
         .arg(LAUNCH_SCRIPT)
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_DATA_HOME")
         .status()
         .with_context(|| format!("running {LAUNCH_SCRIPT}"))?;
     // The script's status is that of its last housekeeping line (a test
