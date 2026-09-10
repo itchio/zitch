@@ -4,7 +4,7 @@
 //! host links against that SDL2 and lets it open the screen. Controllers
 //! come through SDL too, mapped by the firmware's game controller database.
 
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -26,9 +26,43 @@ pub struct Window {
 
 /// SDL treats a trigger as an axis; past this it counts as pressed.
 const TRIGGER_PRESSED: i16 = 16_000;
-/// egui asks for a repaint "never" as a very long delay; SDL takes
-/// milliseconds in a u32.
+/// egui asks for a repaint "never" as a very long delay; keep the
+/// arithmetic on it finite.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
+/// How often the idle loop pumps SDL for input. SDL's own timed wait can
+/// only block on drivers with a window system; on the framebuffer drivers
+/// this host exists for it falls back to polling every millisecond, which
+/// cost 5% of a core doing nothing. A frame's worth of latency on input
+/// is not felt in a menu, and brings idle down to 0.6%.
+const POLL: Duration = Duration::from_millis(16);
+
+/// Wakes the frame loop from another thread, between input polls.
+#[derive(Default)]
+struct Wake {
+    flag: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl Wake {
+    fn signal(&self) {
+        *self.flag.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        self.ready.notify_one();
+    }
+
+    /// Sleeps until signalled or `timeout` passes. Whether it was signalled,
+    /// now or since the last call.
+    fn wait(&self, timeout: Duration) -> bool {
+        let mut flag = self.flag.lock().unwrap_or_else(|p| p.into_inner());
+        if !*flag {
+            flag = self
+                .ready
+                .wait_timeout(flag, timeout)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+        std::mem::take(&mut *flag)
+    }
+}
 
 /// Runs the interface until the window closes.
 pub fn run(
@@ -44,7 +78,6 @@ pub fn run(
     let controllers = sdl
         .game_controller()
         .map_err(|e| anyhow!("SDL controllers: {e}"))?;
-    let events = sdl.event().map_err(|e| anyhow!("SDL events: {e}"))?;
     log::info!("SDL video driver: {}", video.current_video_driver());
     {
         let attr = video.gl_attr();
@@ -78,19 +111,13 @@ pub fn run(
     video.text_input().start();
 
     let ctx = egui::Context::default();
-    // The backend and gilrs-less callers wake the frame loop by posting an
-    // SDL event; a delayed request is served by the loop's own timeout.
-    let sender = events.event_sender();
+    // The backend and the cover loader wake the frame loop through `wake`;
+    // a delayed request is served by the loop's own timeout.
+    let wake = Arc::new(Wake::default());
+    let waker_wake = Arc::clone(&wake);
     ctx.set_request_repaint_callback(move |info| {
         if info.delay.is_zero() {
-            let _ = sender.push_event(Event::User {
-                timestamp: 0,
-                window_id: 0,
-                type_: sdl2::sys::SDL_EventType::SDL_USEREVENT as u32,
-                code: 0,
-                data1: std::ptr::null_mut(),
-                data2: std::ptr::null_mut(),
-            });
+            waker_wake.signal();
         }
     });
     waker.attach(&ctx);
@@ -113,13 +140,15 @@ pub fn run(
         if let Some(deadline) = deadline {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
-        let first = if wait.is_zero() {
-            event_pump.poll_event()
-        } else {
-            let ms = wait.min(LONGEST_WAIT).as_millis().max(1) as u32;
-            event_pump.wait_event_timeout(ms)
-        };
-        let sdl_events: Vec<Event> = first.into_iter().chain(event_pump.poll_iter()).collect();
+        let due = Instant::now() + wait.min(LONGEST_WAIT);
+        let mut sdl_events: Vec<Event> = event_pump.poll_iter().collect();
+        while sdl_events.is_empty() {
+            let now = Instant::now();
+            if now >= due || wake.wait(POLL.min(due - now)) {
+                break;
+            }
+            sdl_events = event_pump.poll_iter().collect();
+        }
         let (w, _) = sdl_window.size();
         let (pw, ph) = sdl_window.drawable_size();
         let native_ppp = if w > 0 { pw as f32 / w as f32 } else { 1.0 };
