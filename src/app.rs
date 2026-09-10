@@ -1654,10 +1654,9 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = m.space(12.0);
                         if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
-                            ui::subtle(ui, &m, user.name());
-                        }
-                        if let Loadable::Loaded(games) = &self.owned {
-                            ui::subtle(ui, &m, &format!("{} owned", games.len()));
+                            // Elide rather than wrap: on a 640-wide screen a
+                            // long display name meets the tab strip.
+                            ui::subtle_truncated(ui, &m, user.name());
                         }
                         if !self.online {
                             ui::offline(ui, &m);

@@ -1005,6 +1005,18 @@ pub fn subtle(ui: &mut Ui, m: &Metrics, text: &str) {
     );
 }
 
+/// [`subtle`], but elided with an ellipsis where it would otherwise wrap.
+pub fn subtle_truncated(ui: &mut Ui, m: &Metrics, text: &str) {
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(FontId::proportional(m.body))
+                .color(DIM),
+        )
+        .truncate(),
+    );
+}
+
 pub fn offline(ui: &mut Ui, m: &Metrics) {
     ui.label(
         egui::RichText::new("Offline")
