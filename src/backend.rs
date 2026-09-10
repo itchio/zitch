@@ -1013,15 +1013,9 @@ fn check_updates(client: &Client, emit: &Emitter) -> Result<()> {
         log::warn!("update check: {warning}");
     }
     log::info!("{} updates available", result.updates.len());
-    // Same-channel updates apply themselves, as in the itch app; the
-    // rest wait for the user to pick.
-    for update in result.updates.iter().filter(|u| u.direct) {
-        if let Err(error) = queue_update(client, update, 0) {
-            log::warn!("queueing update: {error:#}");
-        }
-    }
+    // Nothing is queued here: every update waits for the user, direct or
+    // not. The interface advertises them and Command::Update applies one.
     emit.send(Event::Updates(result.updates));
-    refresh_downloads(client, emit);
     Ok(())
 }
 
