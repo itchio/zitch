@@ -526,6 +526,11 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         }
                     },
                     move |client, emit| {
+                        if let Some(result) = launch_rom(client, &cave_id, emit) {
+                            refresh_caves(client, emit);
+                            emit.send(Event::LaunchFinished { cave_id, result });
+                            return Ok(());
+                        }
                         let quit = launches.track(&cave_id, client)?;
                         let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
                         launches.forget(&cave_id);
@@ -815,6 +820,35 @@ impl Launches {
 
 /// How many of the game's last lines to keep for a failed launch.
 const LAUNCH_LOG_TAIL: usize = 40;
+
+/// On muOS, runs the cave's ROM in the firmware's emulator and stays in
+/// the call until it exits. `None` when this is not muOS or the install
+/// holds no ROM, in which case butler launches it as usual.
+fn launch_rom(client: &Client, cave_id: &str, emit: &Emitter) -> Option<Result<(), LaunchFailure>> {
+    if !crate::muos::available() {
+        return None;
+    }
+    let failure = |error: anyhow::Error| LaunchFailure {
+        message: error.root_cause().to_string(),
+        log: Vec::new(),
+    };
+    let cave = match client.call(FetchCaveParams {
+        cave_id: cave_id.to_string(),
+        profile_id: None,
+    }) {
+        Ok(result) => result.cave?,
+        Err(error) => return Some(Err(failure(error))),
+    };
+    let folder = PathBuf::from(cave.install_info.as_ref()?.install_folder.as_str());
+    let (rom, system) = crate::muos::find_rom(&folder)?;
+    let name = cave.game.as_ref().map_or("itch.io", |g| g.title.as_str());
+    emit.send(Event::LaunchRunning {
+        cave_id: cave_id.to_string(),
+    });
+    // The interface hides on that event so the emulator has the screen to
+    // itself; its next frame is drawn well before the script gets that far.
+    Some(crate::muos::launch(name, system, &rom).map_err(failure))
+}
 
 /// Runs a game and stays in the call until it exits, answering whatever
 /// butler asks along the way. A failure carries the tail of what butler
@@ -1152,15 +1186,21 @@ fn queue_install(
     game: Game,
 ) -> Result<bool> {
     let location = install_location(client, config)?;
+    // butler's compatibility filter goes by platform tags, which a ROM
+    // does not carry; on muOS every upload is fetched and judged by name.
+    let muos = crate::muos::available();
     let mut uploads = client
         .call(FetchGameUploadsParams {
             game_id: game.id,
-            compatible: true,
+            compatible: !muos,
             fresh: Some(true),
         })?
         .uploads;
+    if muos {
+        uploads.retain(upload_runs_here);
+    }
     if uploads.is_empty() {
-        bail!("{} has no download for this computer", game.title);
+        bail!("{} has no download for this device", game.title);
     }
     let index = if uploads.len() == 1 {
         0

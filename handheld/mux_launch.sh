@@ -23,4 +23,4 @@ ARGS=""
 [ -f "$APP_DIR/args" ] && ARGS=$(cat "$APP_DIR/args")
 
 # shellcheck disable=SC2086
-./zitch --fullscreen --low-spec --butler "$APP_DIR/butler" $ARGS >"$APP_DIR/zitch.log" 2>&1
+./zitch --fullscreen --low-spec --minimize-while-playing --butler "$APP_DIR/butler" $ARGS >"$APP_DIR/zitch.log" 2>&1

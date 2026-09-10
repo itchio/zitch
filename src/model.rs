@@ -135,14 +135,22 @@ impl Kind {
     }
 }
 
-/// Whether the game has an upload for this operating system.
+/// Whether the game has an upload for this operating system. On muOS the
+/// platform tags say nothing (a ROM is tagged for nothing, or for whatever
+/// the page's web player runs on), so every game is worth trying and the
+/// install decides once it sees the files.
 pub fn playable_here(game: &Game) -> bool {
-    runs_here(&game.platforms)
+    crate::muos::available() || runs_here(&game.platforms)
 }
 
-/// Whether an upload is built for this computer.
+/// Whether an upload is built for this computer: a ROM for one of the
+/// firmware's emulators on muOS, an upload tagged for the OS elsewhere.
 pub fn upload_runs_here(upload: &Upload) -> bool {
-    runs_here(&upload.platforms)
+    if crate::muos::available() {
+        crate::muos::System::for_file(std::path::Path::new(&upload.filename)).is_some()
+    } else {
+        runs_here(&upload.platforms)
+    }
 }
 
 fn runs_here(p: &Platforms) -> bool {

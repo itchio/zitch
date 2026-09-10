@@ -36,6 +36,9 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// is not felt in a menu, and brings idle down to 0.6%.
 const POLL: Duration = Duration::from_millis(16);
 
+/// Dark enough not to flash, and unlike any tile the interface draws.
+const SCRUB_COLOR: [f32; 4] = [0.02, 0.0, 0.03, 1.0];
+
 /// Wakes the frame loop from another thread, between input polls.
 #[derive(Default)]
 struct Wake {
@@ -134,6 +137,17 @@ pub fn run(
     let started = Instant::now();
     let mut wait = Duration::ZERO;
     let mut shots: Vec<egui::UserData> = Vec::new();
+    // Set while a game has the screen: the interface keeps running but
+    // draws nothing and lets the controller through to the game. Minimize
+    // is the closest thing egui has for a window that owns the screen.
+    let mut hidden = false;
+    // Set when the window comes back from behind a game. The game drew to
+    // the same screen memory, and Mali's transaction elimination skips
+    // tiles it thinks are unchanged since its last frame there, so the
+    // first frame back only lands where the interface itself changed.
+    // Two frames of a colour nothing else uses, one per buffer, make every
+    // tile different from what the GPU remembers.
+    let mut scrub = false;
 
     'frames: loop {
         let deadline = pads.stick.deadline().or(pads.dpad.deadline());
@@ -160,6 +174,7 @@ pub fn run(
                 Event::Quit { .. } => break 'frames,
                 Event::ControllerDeviceAdded { which, .. } => pads.open(&controllers, which),
                 Event::ControllerDeviceRemoved { which, .. } => pads.close(which),
+                _ if hidden => {}
                 Event::ControllerButtonDown { button, .. } => {
                     if let Some(action) = pads.press(button) {
                         let _ = pad_tx.send(action);
@@ -175,7 +190,9 @@ pub fn run(
             }
         }
         for direction in pads.repeat() {
-            let _ = pad_tx.send(Action::MoveFocus(direction));
+            if !hidden {
+                let _ = pad_tx.send(Action::MoveFocus(direction));
+            }
         }
 
         let screen =
@@ -217,8 +234,15 @@ pub fn run(
                 match command {
                     egui::ViewportCommand::Close => close = true,
                     egui::ViewportCommand::Screenshot(data) => shots.push(data.clone()),
-                    // Minimize, Focus and the rest mean nothing on a
-                    // single-window screen.
+                    egui::ViewportCommand::Minimized(minimized) => {
+                        if hidden && !*minimized {
+                            scrub = true;
+                            wait = Duration::ZERO;
+                        }
+                        hidden = *minimized;
+                    }
+                    // Focus and the rest mean nothing on a single-window
+                    // screen.
                     _ => {}
                 }
             }
@@ -230,7 +254,27 @@ pub fn run(
                 log::warn!("opening {}: {error}", url.url);
             }
         }
+        if hidden && !close {
+            // Nothing is drawn, but egui's textures move on (the font
+            // atlas grows, covers arrive) and the painter has to follow or
+            // the next visible frame draws with stale ones.
+            for (id, deltas) in &textures_delta.set {
+                for delta in deltas {
+                    painter.set_texture(*id, delta);
+                }
+            }
+            for id in &textures_delta.free {
+                painter.free_texture(*id);
+            }
+            continue;
+        }
         let primitives = ctx.tessellate(shapes, pixels_per_point);
+        if std::mem::take(&mut scrub) {
+            for _ in 0..2 {
+                painter.clear([pw, ph], SCRUB_COLOR);
+                sdl_window.gl_swap_window();
+            }
+        }
         painter.clear([pw, ph], [0.0, 0.0, 0.0, 1.0]);
         painter.paint_and_update_textures(
             [pw, ph],

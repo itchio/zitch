@@ -7,6 +7,7 @@ mod glyphs;
 mod host_sdl;
 mod images;
 mod model;
+mod muos;
 mod ui;
 
 use std::path::{Path, PathBuf};

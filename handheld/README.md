@@ -43,6 +43,23 @@ are in `home/.config/zitch` in that folder, covers in `home/.cache/zitch`.
 `mux_launch.sh` reads extra flags from an `args` file next to it (one line,
 no quotes). `handheld-shot` writes and removes it.
 
+## Playing ROMs
+
+The device runs homebrew ROMs, not Linux builds, so on muOS zitch judges an
+upload by its file name (`.nes`, `.gb`, `.gbc`, `.gba`, `.md`, `.prg`/`.d64`,
+`.adf`, `.z64`) instead of by itch's platform tags, and every game gets an
+Install button. Play finds the ROM in the install folder and launches it
+the way the muOS menu does: `src/muos.rs` writes `/tmp/rom_go`,
+`/tmp/gov_go` and `/tmp/flt_go`, runs `/opt/muos/script/mux/launch.sh`,
+and waits for RetroArch to exit. The core per system is the firmware's
+`default=` from `/opt/muos/share/info/assign/<system>/global.ini`.
+
+While the game runs the SDL host stops drawing and drops controller input
+(`--minimize-while-playing`, set in `mux_launch.sh`). On return it draws
+two throwaway frames first: RetroArch overwrote the framebuffer and Mali's
+transaction elimination would otherwise skip every tile the interface
+didn't change, leaving the game's last frame showing through.
+
 ## Sign in
 
 First run needs `ARGS="--api-key-file <path on device>"`, the file is just
