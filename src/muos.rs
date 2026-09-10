@@ -29,6 +29,7 @@ const SEARCH_DEPTH: usize = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum System {
     Nes,
+    Snes,
     GameBoy,
     GameBoyColor,
     GameBoyAdvance,
@@ -44,6 +45,7 @@ impl System {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         Some(match ext.as_str() {
             "nes" | "unf" | "unif" => System::Nes,
+            "sfc" | "smc" | "swc" => System::Snes,
             "gb" => System::GameBoy,
             "gbc" => System::GameBoyColor,
             "gba" => System::GameBoyAdvance,
@@ -58,6 +60,7 @@ impl System {
     pub fn label(self) -> &'static str {
         match self {
             System::Nes => "NES",
+            System::Snes => "Super Nintendo",
             System::GameBoy => "Game Boy",
             System::GameBoyColor => "Game Boy Color",
             System::GameBoyAdvance => "Game Boy Advance",
@@ -76,6 +79,7 @@ impl System {
     fn assignment(self) -> (&'static str, &'static str, &'static str) {
         match self {
             System::Nes => ("Nintendo NES - Famicom", "fceumm", "fceumm_libretro.so"),
+            System::Snes => ("Nintendo SNES - SFC", "snes9x", "snes9x_libretro.so"),
             System::GameBoy => ("Nintendo Game Boy", "gambatte", "gambatte_libretro.so"),
             System::GameBoyColor => (
                 "Nintendo Game Boy Color",
@@ -195,6 +199,7 @@ mod tests {
             System::for_file(Path::new("a/b/game.gbc")),
             Some(System::GameBoyColor)
         );
+        assert_eq!(System::for_file(Path::new("game.SFC")), Some(System::Snes));
         assert_eq!(System::for_file(Path::new("setup.exe")), None);
         assert_eq!(System::for_file(Path::new("README")), None);
     }
