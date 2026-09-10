@@ -20,17 +20,17 @@ use crate::butlerd::types::{
     AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
     CheckUpdateParams, CollectionGamesFilters, DownloadReason, DownloadsClearFinishedParams,
     DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
-    DownloadsRetryParams, FetchCavesParams, FetchCollectionGamesParams, FetchGameUploadsParams,
-    FetchProfileCollectionsParams, FetchProfileOwnedKeysParams, HTMLLaunchResult,
-    InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams, LaunchParams,
-    LogLevel, PickManifestActionResult, PrereqsFailedResult, ProfileListParams,
+    DownloadsRetryParams, FetchCaveParams, FetchCavesParams, FetchCollectionGamesParams,
+    FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
+    HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
+    LaunchParams, LogLevel, PickManifestActionResult, PrereqsFailedResult, ProfileListParams,
     ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult,
     UninstallPerformParams, Upload, UploadType,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::model::{
     Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
-    Prompt, UploadExt, UserExt, human_size,
+    Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
 };
 
 pub struct Config {
@@ -85,6 +85,8 @@ pub enum Command {
     Update {
         update: Box<GameUpdate>,
     },
+    /// Check for updates now, on the user's request, and say what came of it.
+    CheckUpdates,
     /// The user's pick for a [`Event::Prompt`], or `None` when dismissed.
     Answer {
         prompt: u64,
@@ -176,6 +178,9 @@ fn connect(link: &Link) -> Result<Client> {
 
 /// How often to look for the network again while offline.
 const PROBE_EVERY: Duration = Duration::from_secs(60);
+/// How often to ask itch.io for updates while online. The itch app's
+/// intended cadence.
+const UPDATE_EVERY: Duration = Duration::from_secs(30 * 60);
 /// How long to wait before trying to start butler again after it died.
 const RESPAWN_DELAY: Duration = Duration::from_secs(5);
 
@@ -301,6 +306,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     };
     sync.spawn(&link, emit);
     let mut next_probe = Instant::now() + PROBE_EVERY;
+    let mut next_update_check = Instant::now() + UPDATE_EVERY;
 
     loop {
         // Anything can take butler down: the kernel's memory killer on a
@@ -337,6 +343,19 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         if due && Instant::now() >= next_probe {
             sync.spawn(&link, emit);
             next_probe = Instant::now() + PROBE_EVERY;
+        }
+        if Instant::now() >= next_update_check {
+            next_update_check = Instant::now() + UPDATE_EVERY;
+            // The sync pass checks on its own once the network is back.
+            if sync.online.load(Ordering::Relaxed) {
+                spawn_op(
+                    "update-check".into(),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    |error| Event::SyncFailed(format!("{error:#}")),
+                    |client, emit| check_updates(client, emit).map(|_| ()),
+                );
+            }
         }
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -525,6 +544,42 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 );
             }
             Ok(Command::QuitGame { cave_id }) => launches.quit(&cave_id),
+            Ok(Command::CheckUpdates) => {
+                next_update_check = Instant::now() + UPDATE_EVERY;
+                let prompts = prompts.clone();
+                spawn_op(
+                    "update-check".into(),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    |error| Event::Error(format!("Couldn't check for updates: {error:#}")),
+                    move |client, emit| {
+                        let updates = check_updates(client, emit)?;
+                        let direct = updates.iter().filter(|u| u.direct).count();
+                        let indirect = updates.len() - direct;
+                        let mut lines = Vec::new();
+                        match direct {
+                            0 => {}
+                            1 => lines.push("1 game has an update.".to_string()),
+                            n => lines.push(format!("{n} games have updates.")),
+                        }
+                        match indirect {
+                            0 => {}
+                            1 => lines.push(
+                                "1 game has a newer upload that may replace it; see its page."
+                                    .to_string(),
+                            ),
+                            n => lines.push(format!(
+                                "{n} games have newer uploads that may replace them; see their pages."
+                            )),
+                        }
+                        if lines.is_empty() {
+                            lines.push("Everything installed is up to date.".to_string());
+                        }
+                        prompts.ask(emit, "Updates", &lines.join("\n"), &["OK"]);
+                        Ok(())
+                    },
+                );
+            }
             Ok(Command::Update { update }) => {
                 if update.direct {
                     if let Err(error) = queue_update(&client, &update, 0) {
@@ -543,7 +598,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         emit.clone(),
                         |error| Event::Error(format!("{error:#}")),
                         move |client, emit| {
-                            if let Some(choice) = pick_update(&prompts, emit, &update) {
+                            if let Some(choice) = pick_update(client, &prompts, emit, &update) {
                                 queue_update(client, &update, choice)?;
                                 refresh_downloads(client, emit);
                             }
@@ -984,6 +1039,9 @@ impl Sync {
             ..Default::default()
         })?;
         self.set_online(emit, true);
+        // Before the slow refetches below, so updates show within seconds
+        // of the library.
+        check_updates(client, emit)?;
         if self.stale.load(Ordering::Relaxed) {
             // The cached list is shown already; the itch app also refetches
             // when butler flags it stale, so new purchases appear.
@@ -996,7 +1054,7 @@ impl Sync {
             emit.send(Event::Collections(fresh));
             self.collections_stale.store(false, Ordering::Relaxed);
         }
-        check_updates(client, emit)
+        Ok(())
     }
 
     fn set_online(&self, emit: &Emitter, online: bool) {
@@ -1007,16 +1065,26 @@ impl Sync {
     }
 }
 
-fn check_updates(client: &Client, emit: &Emitter) -> Result<()> {
+/// Asks itch.io what is newer than the installs and hands the list to
+/// the interface. Nothing is queued here: every update waits for the
+/// user, direct or not. Indirect updates are butler's guesses that some
+/// other upload replaced the installed one, so those are narrowed to
+/// uploads that run here and dropped when none does.
+fn check_updates(client: &Client, emit: &Emitter) -> Result<Vec<GameUpdate>> {
     let result = client.call(CheckUpdateParams::default())?;
     for warning in &result.warnings {
         log::warn!("update check: {warning}");
     }
-    log::info!("{} updates available", result.updates.len());
-    // Nothing is queued here: every update waits for the user, direct or
-    // not. The interface advertises them and Command::Update applies one.
-    emit.send(Event::Updates(result.updates));
-    Ok(())
+    let mut updates = result.updates;
+    for update in updates.iter_mut().filter(|u| !u.direct) {
+        update
+            .choices
+            .retain(|c| c.upload.as_ref().is_some_and(upload_runs_here));
+    }
+    updates.retain(|u| !u.choices.is_empty());
+    log::info!("{} updates available", updates.len());
+    emit.send(Event::Updates(updates.clone()));
+    Ok(updates)
 }
 
 fn spawn_op<F, E>(name: String, link: Link, emit: Emitter, fail: E, op: F)
@@ -1168,27 +1236,61 @@ fn pick_upload(
 
 /// Asks which of an indirect update's uploads to install. `None` when the
 /// user backs out.
-fn pick_update(prompts: &Prompts, emit: &Emitter, update: &GameUpdate) -> Option<usize> {
+/// Asks which of an indirect update's uploads to install, showing what is
+/// installed now beside what is offered.
+fn pick_update(
+    client: &Client,
+    prompts: &Prompts,
+    emit: &Emitter,
+    update: &GameUpdate,
+) -> Option<usize> {
     let title = update.game.as_ref().map_or("game", |g| g.title.as_str());
+    let installed = client
+        .call(FetchCaveParams {
+            cave_id: update.cave_id.clone(),
+            profile_id: None,
+        })
+        .ok()
+        .and_then(|r| r.cave)
+        .and_then(|cave| cave.upload)
+        .map(|upload| describe_upload(&upload));
     let names: Vec<String> = update
         .choices
         .iter()
         .map(|c| {
             c.upload
                 .as_ref()
-                .map_or("upload", UploadExt::name)
-                .to_string()
+                .map_or("upload".to_string(), describe_upload)
         })
         .collect();
-    let mut choices: Vec<&str> = names.iter().map(String::as_str).collect();
+    // One offer needs no naming on its button; the body already names it.
+    let mut choices: Vec<&str> = if names.len() == 1 {
+        vec!["Install"]
+    } else {
+        names.iter().map(String::as_str).collect()
+    };
     choices.push("Cancel");
-    let body = format!(
-        "Newer uploads for {title} appeared after it was installed. They may be a new \
-         version or something else, like extra content. Installing one replaces the \
-         current install."
+    let mut body = format!(
+        "A newer upload of {title} appeared after it was installed. It may be a new \
+         version or something else, like extra content. Installing it replaces the \
+         current install.\n"
     );
+    if let Some(installed) = installed {
+        body.push_str(&format!("\nInstalled: {installed}"));
+    }
+    body.push_str(&format!("\nOffered: {}", names.join(", ")));
     let picked = prompts.ask(emit, "Update?", &body, &choices)?;
     (picked < names.len()).then_some(picked)
+}
+
+/// "name (Linux)" for telling uploads apart in a prompt.
+fn describe_upload(upload: &Upload) -> String {
+    let platforms = upload_platform_names(upload);
+    if platforms.is_empty() {
+        upload.name().to_string()
+    } else {
+        format!("{} ({})", upload.name(), platforms.join(", "))
+    }
 }
 
 fn queue_update(client: &Client, update: &GameUpdate, choice: usize) -> Result<()> {

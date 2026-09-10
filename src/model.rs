@@ -3,7 +3,7 @@
 
 pub use crate::butlerd::types::{
     Cave, Collection, Download, DownloadProgress, DownloadReason, Game, GameClassification,
-    GameUpdate, Profile, Upload, User,
+    GameUpdate, Platforms, Profile, Upload, User,
 };
 
 pub trait UserExt {
@@ -137,7 +137,15 @@ impl Kind {
 
 /// Whether the game has an upload for this operating system.
 pub fn playable_here(game: &Game) -> bool {
-    let p = &game.platforms;
+    runs_here(&game.platforms)
+}
+
+/// Whether an upload is built for this computer.
+pub fn upload_runs_here(upload: &Upload) -> bool {
+    runs_here(&upload.platforms)
+}
+
+fn runs_here(p: &Platforms) -> bool {
     if cfg!(target_os = "linux") {
         p.linux.is_some()
     } else if cfg!(target_os = "macos") {
@@ -150,7 +158,14 @@ pub fn playable_here(game: &Game) -> bool {
 /// The platforms a game has downloads for, as words, for saying why it
 /// cannot be installed here.
 pub fn platform_names(game: &Game) -> Vec<&'static str> {
-    let p = &game.platforms;
+    platform_words(&game.platforms)
+}
+
+pub fn upload_platform_names(upload: &Upload) -> Vec<&'static str> {
+    platform_words(&upload.platforms)
+}
+
+fn platform_words(p: &Platforms) -> Vec<&'static str> {
     let mut names = Vec::new();
     if p.windows.is_some() {
         names.push("Windows");
@@ -329,6 +344,8 @@ pub enum Action {
     Update {
         cave_id: String,
     },
+    /// Ask butler for updates now and report what it found.
+    CheckUpdates,
     Uninstall {
         cave_id: String,
     },

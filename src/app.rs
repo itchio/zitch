@@ -591,6 +591,7 @@ impl App {
                 _ => {}
             },
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
+            Action::CheckUpdates => self.backend.send(Command::CheckUpdates),
             Action::SetCollectionsInstalledOnly(on) => {
                 if self.collections_installed_only != on {
                     self.collections_installed_only = on;
@@ -746,10 +747,13 @@ impl App {
     }
 
     /// Games with an update waiting, for the grid's badges.
+    /// Games with a direct update: the installed upload has a newer
+    /// version. Indirect updates are guesses, mentioned only on the game
+    /// page.
     fn updatable(&self) -> std::collections::HashSet<i64> {
         self.caves
             .iter()
-            .filter(|cave| self.updates.contains_key(&cave.id))
+            .filter(|cave| self.updates.get(&cave.id).is_some_and(|u| u.direct))
             .filter_map(CaveExt::game_id)
             .collect()
     }
@@ -1416,7 +1420,12 @@ impl App {
 
     /// What the menu drawer offers, top to bottom.
     fn menu_items(&self) -> Vec<(&'static str, Action)> {
-        vec![("Quit", Action::Quit)]
+        let mut items = Vec::new();
+        if self.online {
+            items.push(("Check for updates", Action::CheckUpdates));
+        }
+        items.push(("Quit", Action::Quit));
+        items
     }
 
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {

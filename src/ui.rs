@@ -1095,9 +1095,16 @@ pub fn game_buttons(
                     cave_id: cave.id.clone(),
                 },
             )];
-            if update.is_some() && online {
+            if let Some(update) = update.filter(|_| online) {
+                let label = if update.direct {
+                    "Update"
+                } else if update.choices.len() > 1 {
+                    "Newer uploads"
+                } else {
+                    "Newer upload"
+                };
                 buttons.push((
-                    "Update",
+                    label,
                     Action::Update {
                         cave_id: cave.id.clone(),
                     },
@@ -1254,17 +1261,26 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                             .first()
                             .and_then(|c| c.upload.as_ref())
                             .map_or("newer version", UploadExt::name);
-                        let line = if update.direct {
-                            format!("Update available: {name}")
+                        // A direct update is the installed upload, newer.
+                        // An indirect one is butler's guess that another
+                        // upload took its place, so it gets a quieter line.
+                        let (line, color) = if update.direct {
+                            (format!("Update available: {name}"), AMBER)
                         } else if update.choices.len() > 1 {
-                            format!("{} newer uploads available", update.choices.len())
+                            (
+                                format!(
+                                    "{} newer uploads, maybe replacements",
+                                    update.choices.len()
+                                ),
+                                DIM,
+                            )
                         } else {
-                            format!("Newer upload available: {name}")
+                            (format!("Newer upload, maybe a replacement: {name}"), DIM)
                         };
                         ui.label(
                             egui::RichText::new(line)
                                 .font(FontId::proportional(m.caption))
-                                .color(AMBER),
+                                .color(color),
                         );
                     }
                 }
