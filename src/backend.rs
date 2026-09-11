@@ -781,9 +781,25 @@ struct Prompts {
 }
 
 impl Prompts {
-    /// Shows a prompt and waits for the pick. `None` means dismissed, or the
-    /// interface went away.
+    /// Shows a question and waits for the answer, with the first choice as
+    /// the primary one. `None` means dismissed, or the interface went away.
     fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
+        self.show(emit, title, body, choices, Some(0))
+    }
+
+    /// Shows a pick between equals, none drawn as primary.
+    fn pick(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
+        self.show(emit, title, body, choices, None)
+    }
+
+    fn show(
+        &self,
+        emit: &Emitter,
+        title: &str,
+        body: &str,
+        choices: &[&str],
+        primary: Option<usize>,
+    ) -> Option<usize> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel();
         self.waiting
@@ -796,6 +812,7 @@ impl Prompts {
             body: body.to_string(),
             choices: choices.iter().map(|c| c.to_string()).collect(),
             focus: 0,
+            primary,
         }));
         let choice = rx.recv().ok().flatten();
         self.waiting
@@ -1000,7 +1017,7 @@ fn answer_launch_request(
             let picked = if names.len() == 1 {
                 Some(0)
             } else {
-                prompts.ask(emit, "What do you want to launch?", "", &names)
+                prompts.pick(emit, "What do you want to launch?", "", &names)
             };
             match picked {
                 Some(index) => client.reply(
@@ -1333,7 +1350,7 @@ fn pick_upload(
     let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
     choices.push("Cancel");
     let body = format!("{} has more than one download for this device.", game.title);
-    let picked = prompts.ask(emit, "Which download?", &body, &choices)?;
+    let picked = prompts.pick(emit, "Which download?", &body, &choices)?;
     (picked < labels.len()).then_some(picked)
 }
 
@@ -1382,7 +1399,7 @@ fn pick_update(
         body.push_str(&format!("\nInstalled: {installed}"));
     }
     body.push_str(&format!("\nOffered: {}", names.join(", ")));
-    let picked = prompts.ask(emit, "Update?", &body, &choices)?;
+    let picked = prompts.pick(emit, "Update?", &body, &choices)?;
     (picked < names.len()).then_some(picked)
 }
 

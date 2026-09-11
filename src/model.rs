@@ -96,6 +96,9 @@ pub struct Prompt {
     pub body: String,
     pub choices: Vec<String>,
     pub focus: usize,
+    /// The choice drawn as the primary button: the expected or safe answer
+    /// to a question. A pick from a list of equals has none.
+    pub primary: Option<usize>,
 }
 
 /// Which part of the library the main row shows.

@@ -1765,7 +1765,8 @@ pub fn prompt(
                                 ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
                                 for (index, label) in prompt.choices.iter().enumerate() {
                                     let focused = index == prompt.focus;
-                                    let response = pill(ui, m, label, focused, index == 0);
+                                    let primary = prompt.primary == Some(index);
+                                    let response = pill(ui, m, label, focused, primary);
                                     if focused {
                                         ui.scroll_to_rect(response.rect.expand(m.ring), None);
                                     }

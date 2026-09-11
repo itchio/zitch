@@ -524,6 +524,7 @@ impl App {
                         .map(|i| format!("Sample - Linux - build {i} (135.9 MB)"))
                         .collect(),
                     focus: 0,
+                    primary: None,
                 },
                 None => Prompt {
                     id: 0,
@@ -531,6 +532,7 @@ impl App {
                     body: "This is a sample license shown by the screenshot script. ".repeat(12),
                     choices: vec!["Accept".into(), "Decline".into()],
                     focus: 0,
+                    primary: Some(0),
                 },
             });
             return;
