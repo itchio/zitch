@@ -1311,10 +1311,10 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                 (None, None) if !playable_here(game) => {
                     let platforms = platform_names(game);
                     let line = if platforms.is_empty() {
-                        "No download for this computer".to_string()
+                        "No download for this device".to_string()
                     } else {
                         format!(
-                            "No download for this computer; available for {}",
+                            "No download for this device; available for {}",
                             platforms.join(", ")
                         )
                     };
@@ -1713,7 +1713,7 @@ pub fn prompt(
                 .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
         });
     let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
-    egui::Area::new(egui::Id::new("prompt"))
+    let shown = egui::Area::new(egui::Id::new("prompt"))
         .order(egui::Order::Foreground)
         .anchor(
             egui::Align2::CENTER_CENTER,
@@ -1786,6 +1786,15 @@ pub fn prompt(
                         });
                 });
         });
+    // A centered area and a shrinking list settle over a few frames. A host
+    // that redraws only on input would show the first frame's layout, so
+    // ask for frames until the dialog holds still.
+    let id = egui::Id::new("prompt-rect");
+    let rect = shown.response.rect;
+    if ctx.data(|d| d.get_temp::<Rect>(id)) != Some(rect) {
+        ctx.data_mut(|d| d.insert_temp(id, rect));
+        ctx.request_repaint();
+    }
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.

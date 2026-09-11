@@ -60,9 +60,12 @@ pub enum Command {
     CollectionsInstalled {
         collection_ids: Vec<i64>,
     },
-    /// Discard a queued, running, or failed download.
+    /// Discard a queued, running, or failed download. With `confirm`, the
+    /// game's title, the user is asked first and [`Event::Discarding`] says
+    /// they agreed.
     Discard {
         download_id: String,
+        confirm: Option<String>,
     },
     Retry {
         download_id: String,
@@ -137,6 +140,10 @@ pub enum Event {
     /// The user backed out of the upload picker.
     InstallDeclined {
         game_id: i64,
+    },
+    /// The user confirmed a cancel and the discard is under way.
+    Discarding {
+        download_id: String,
     },
     /// The download stays in the queue as it was.
     DiscardFailed {
@@ -447,17 +454,43 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     },
                 );
             }
-            Ok(Command::Discard { download_id }) => {
-                if let Err(error) = client.call(DownloadsDiscardParams {
-                    download_id: download_id.clone(),
-                }) {
-                    log::warn!("discard: {error:#}");
-                    emit.send(Event::DiscardFailed {
-                        download_id,
-                        error: format!("{error:#}"),
-                    });
-                }
-                refresh_downloads(&client, emit);
+            Ok(Command::Discard {
+                download_id,
+                confirm: None,
+            }) => discard(&client, emit, download_id),
+            Ok(Command::Discard {
+                download_id,
+                confirm: Some(title),
+            }) => {
+                let prompts = prompts.clone();
+                spawn_op(
+                    format!("discard-{download_id}"),
+                    Arc::clone(&link),
+                    emit.clone(),
+                    {
+                        let download_id = download_id.clone();
+                        move |error| Event::DiscardFailed {
+                            download_id: download_id.clone(),
+                            error: format!("{error:#}"),
+                        }
+                    },
+                    move |client, emit| {
+                        // Keep comes first so a reflex press keeps the download.
+                        let confirmed = prompts.ask(
+                            emit,
+                            &format!("Cancel downloading {title}?"),
+                            "What has downloaded so far is thrown away.",
+                            &["Keep downloading", "Cancel download"],
+                        ) == Some(1);
+                        if confirmed {
+                            emit.send(Event::Discarding {
+                                download_id: download_id.clone(),
+                            });
+                            discard(client, emit, download_id);
+                        }
+                        Ok(())
+                    },
+                );
             }
             Ok(Command::Retry { download_id }) => {
                 if let Err(error) = client.call(DownloadsRetryParams { download_id }) {
@@ -1173,6 +1206,19 @@ where
     }
 }
 
+fn discard(client: &Client, emit: &Emitter, download_id: String) {
+    if let Err(error) = client.call(DownloadsDiscardParams {
+        download_id: download_id.clone(),
+    }) {
+        log::warn!("discard: {error:#}");
+        emit.send(Event::DiscardFailed {
+            download_id,
+            error: format!("{error:#}"),
+        });
+    }
+    refresh_downloads(client, emit);
+}
+
 fn refresh_caves(client: &Client, emit: &Emitter) {
     match all_caves(client) {
         Ok(caves) => {
@@ -1192,7 +1238,7 @@ fn refresh_downloads(client: &Client, emit: &Emitter) {
 
 /// Puts a game on the download queue; the driver takes it from there.
 /// Queues an install, asking which upload when the game has more than one
-/// for this computer. `Ok(false)` when the user backed out.
+/// for this device. `Ok(false)` when the user backed out.
 fn queue_install(
     client: &Client,
     config: &Config,
@@ -1286,10 +1332,7 @@ fn pick_upload(
     let labels: Vec<String> = uploads.iter().map(upload_label).collect();
     let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
     choices.push("Cancel");
-    let body = format!(
-        "{} has more than one download for this computer.",
-        game.title
-    );
+    let body = format!("{} has more than one download for this device.", game.title);
     let picked = prompts.ask(emit, "Which download?", &body, &choices)?;
     (picked < labels.len()).then_some(picked)
 }

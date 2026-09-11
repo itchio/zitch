@@ -90,7 +90,7 @@ pub struct App {
     toolbar_focus: [Option<usize>; Tab::ALL.len()],
     /// The row and button with focus on the Downloads list.
     downloads_row: (usize, usize),
-    /// Hide games with no upload for this computer, on every tab.
+    /// Hide games with no upload for this device, on every tab.
     playable_only: bool,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
@@ -518,8 +518,8 @@ impl App {
             self.prompt = Some(match choice {
                 Some(count) => Prompt {
                     id: 0,
-                    title: "Sample has more than one download for this computer.".into(),
-                    body: String::new(),
+                    title: "Which download?".into(),
+                    body: "Sample has more than one download for this device.".into(),
                     choices: (1..=*count)
                         .map(|i| format!("Sample - Linux - build {i} (135.9 MB)"))
                         .collect(),
@@ -883,12 +883,26 @@ impl App {
                 self.rebuild_installs();
             }
             Action::CancelInstall { game_id } => {
-                let Some(download_id) = self.download_for(game_id).map(|d| d.id.clone()) else {
+                let Some(download) = self.download_for(game_id) else {
                     return;
                 };
-                self.discarding.insert(download_id.clone());
-                self.backend.send(Command::Discard { download_id });
-                self.rebuild_installs();
+                let download_id = download.id.clone();
+                // A live download is worth a question; dismissing a failed
+                // one is not.
+                let confirm = download.finished_at.is_none().then(|| {
+                    download
+                        .game
+                        .as_ref()
+                        .map_or_else(|| "this game".to_string(), |g| g.title.clone())
+                });
+                if confirm.is_none() {
+                    self.discarding.insert(download_id.clone());
+                    self.rebuild_installs();
+                }
+                self.backend.send(Command::Discard {
+                    download_id,
+                    confirm,
+                });
             }
             Action::RetryInstall { game_id } => {
                 let Some(download_id) = self.download_for(game_id).map(|d| d.id.clone()) else {
@@ -1032,7 +1046,7 @@ impl App {
             .collect();
         let note = games
             .is_empty()
-            .then(|| "Nothing here runs on this computer".to_string());
+            .then(|| "Nothing here runs on this device".to_string());
         Some(ui::Section {
             title: title(games.len()),
             games,
@@ -1098,7 +1112,7 @@ impl App {
                     _ if more => None,
                     _ if c.games.is_empty() => Some("Empty collection".to_string()),
                     (true, true) => Some("Nothing installed from this collection".to_string()),
-                    (true, false) => Some("Nothing here runs on this computer".to_string()),
+                    (true, false) => Some("Nothing here runs on this device".to_string()),
                     _ => None,
                 };
                 ui::Section {
@@ -1439,6 +1453,10 @@ impl App {
                     self.rebuild_installs();
                     let title = self.game(game_id).map_or("game", |g| g.title.as_str());
                     self.error = Some(format!("Couldn't install {title}: {error}"));
+                }
+                Event::Discarding { download_id } => {
+                    self.discarding.insert(download_id);
+                    self.rebuild_installs();
                 }
                 Event::DiscardFailed { download_id, error } => {
                     self.discarding.remove(&download_id);

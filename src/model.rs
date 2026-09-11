@@ -143,7 +143,7 @@ pub fn playable_here(game: &Game) -> bool {
     crate::muos::available() || runs_here(&game.platforms)
 }
 
-/// Whether an upload is built for this computer: on muOS a ROM for one of
+/// Whether an upload is built for this device: on muOS a ROM for one of
 /// the firmware's emulators or a `.love`, elsewhere an upload tagged for
 /// the OS.
 pub fn upload_runs_here(upload: &Upload) -> bool {
@@ -340,7 +340,7 @@ pub enum Action {
     },
     /// Focus a prompt button; the pointer is already there.
     PromptFocus(usize),
-    /// Hide games with no upload for this computer, on every tab.
+    /// Hide games with no upload for this device, on every tab.
     SetPlayableOnly(bool),
     SetTab(Tab),
     /// Narrow the Collections tab to installed games, or show everything.
