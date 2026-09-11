@@ -1693,10 +1693,13 @@ impl Page {
 /// go to it while it is up; the mouse can also pick a button.
 /// Draws the modal over `screen`, which is the whole window unless a
 /// smaller display is being emulated.
+/// A modal question. It dims the whole `screen` and centers itself in
+/// `page`, the part above the footer, whose hints are drawn over the dim.
 pub fn prompt(
     ctx: &egui::Context,
     m: &Metrics,
     screen: Rect,
+    page: Rect,
     prompt: &Prompt,
     actions: &mut Vec<Action>,
 ) {
@@ -1709,12 +1712,12 @@ pub fn prompt(
             ui.painter()
                 .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
         });
-    let width = (screen.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
+    let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
     egui::Area::new(egui::Id::new("prompt"))
         .order(egui::Order::Foreground)
         .anchor(
             egui::Align2::CENTER_CENTER,
-            screen.center() - ctx.content_rect().center(),
+            page.center() - ctx.content_rect().center(),
         )
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -1726,7 +1729,7 @@ pub fn prompt(
                     ui.set_width(width);
                     // The dialog never outgrows the screen: the body and the
                     // choices scroll inside what is left under the title.
-                    let budget = screen.height() * 0.9 - 2.0 * m.space(24.0);
+                    let budget = page.height() * 0.9 - 2.0 * m.space(24.0);
                     let top = ui.cursor().top();
                     ui.label(
                         egui::RichText::new(&prompt.title)
@@ -1881,12 +1884,15 @@ pub fn quitting(ctx: &egui::Context, m: &Metrics, screen: Rect) {
 
 /// The hint bar along the bottom: a glyph and a word for each thing the
 /// current page lets the user do.
+/// `raised` paints the hints above any modal's dim, so they stay readable
+/// while a dialog names them; the bar's own fill stays under it.
 pub fn footer(
     ui: &mut Ui,
     m: &Metrics,
     glyphs: &Glyphs,
     mode: InputMode,
     hints: &[(Vec<Glyph>, String)],
+    raised: bool,
 ) {
     egui::Panel::bottom("footer")
         .resizable(false)
@@ -1897,27 +1903,48 @@ pub fn footer(
         )
         .show_separator_line(false)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = m.space(8.0);
-                for (keys, label) in hints {
-                    for glyph in keys {
-                        if let Some(texture) = glyphs.get(mode, *glyph) {
-                            let size = m.icon(22.0);
-                            ui.add(
-                                egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                                    .fit_to_exact_size(vec2(size, size)),
-                            );
-                        }
-                    }
-                    ui.label(
-                        egui::RichText::new(label)
-                            .font(FontId::proportional(m.caption))
-                            .color(DIM),
-                    );
-                    ui.add_space(m.space(14.0));
-                }
-            });
+            if raised {
+                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("footer-hints"));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .layer_id(layer)
+                        .max_rect(ui.available_rect_before_wrap()),
+                );
+                footer_hints(&mut child, m, glyphs, mode, hints);
+                ui.allocate_rect(child.min_rect(), Sense::hover());
+            } else {
+                footer_hints(ui, m, glyphs, mode, hints);
+            }
         });
+}
+
+fn footer_hints(
+    ui: &mut Ui,
+    m: &Metrics,
+    glyphs: &Glyphs,
+    mode: InputMode,
+    hints: &[(Vec<Glyph>, String)],
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = m.space(8.0);
+        for (keys, label) in hints {
+            for glyph in keys {
+                if let Some(texture) = glyphs.get(mode, *glyph) {
+                    let size = m.icon(22.0);
+                    ui.add(
+                        egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                            .fit_to_exact_size(vec2(size, size)),
+                    );
+                }
+            }
+            ui.label(
+                egui::RichText::new(label)
+                    .font(FontId::proportional(m.caption))
+                    .color(DIM),
+            );
+            ui.add_space(m.space(14.0));
+        }
+    });
 }
 
 /// A round back button with a painted chevron, sized for a fingertip.

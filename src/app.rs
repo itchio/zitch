@@ -1766,9 +1766,16 @@ impl App {
         self.covers.set_policy(policy);
         if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
-            ui::footer(ui, &m, &self.glyphs, self.input_mode, &hints);
+            ui::footer(
+                ui,
+                &m,
+                &self.glyphs,
+                self.input_mode,
+                &hints,
+                self.prompt.is_some(),
+            );
         }
-        egui::CentralPanel::default()
+        let page = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin {
                 left: m.margin as i8,
                 right: m.margin as i8,
@@ -1991,9 +1998,11 @@ impl App {
                         }
                     }
                 }
-            });
+            })
+            .response
+            .rect;
         if let Some(prompt) = &self.prompt {
-            ui::prompt(ui.ctx(), &m, ui.max_rect(), prompt, &mut self.actions);
+            ui::prompt(ui.ctx(), &m, ui.max_rect(), page, prompt, &mut self.actions);
         }
         let items = self.menu_items();
         ui::drawer(
