@@ -256,6 +256,7 @@ pub struct Metrics {
 
 impl Metrics {
     const DESIGN_HEIGHT: f32 = 450.0;
+    const ICON_MIN_SCALE: f32 = 1.4;
     /// Tiles shrink below the design size rather than show fewer than this
     /// across, so a narrow screen still reads as a carousel.
     const MIN_COLUMNS: f32 = 3.5;
@@ -305,6 +306,14 @@ impl Metrics {
     /// `chrome` factor in whole points.
     pub fn frame(&self, base: f32) -> f32 {
         (base * self.chrome).round()
+    }
+
+    /// A glyph or logo size. Icons stop shrinking with the layout below a
+    /// 720p-ish scale: a handheld lays out near 1x on a screen a few
+    /// inches wide, where a text-sized glyph is a smudge, so they stay
+    /// chunky there and fit inside the rows they already have.
+    pub fn icon(&self, base: f32) -> f32 {
+        (base * self.scale.max(Self::ICON_MIN_SCALE)).round()
     }
 }
 
@@ -1842,7 +1851,7 @@ pub fn footer(
                 for (keys, label) in hints {
                     for glyph in keys {
                         if let Some(texture) = glyphs.get(mode, *glyph) {
-                            let size = m.space(22.0);
+                            let size = m.icon(22.0);
                             ui.add(
                                 egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                                     .fit_to_exact_size(vec2(size, size)),
@@ -1893,7 +1902,7 @@ pub fn filter_group(ui: &mut Ui, m: &Metrics, options: &[(&str, bool)]) -> Optio
     let mut picked = None;
     let radius = m.space(12.0);
     let border = m.space(1.25).max(1.0);
-    let icon = m.label * 0.8;
+    let icon = m.icon(12.0);
     let pad = vec2(m.label, m.label * 0.5);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -1992,7 +2001,7 @@ fn funnel_icon(ui: &Ui, rect: Rect, color: Color32) {
 /// The itch logo at the head of the page.
 pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
     if let Some(texture) = glyphs.logo() {
-        let height = m.space(26.0);
+        let height = m.icon(24.0);
         let size = texture.size_vec2();
         ui.add(
             egui::Image::new(egui::load::SizedTexture::from_handle(texture))
@@ -2035,7 +2044,7 @@ pub fn tab_strip(
             let text_height = ui.fonts_mut(|f| f.row_height(&bold(m.section)));
             let glyph = |ui: &mut Ui, glyph: Glyph| {
                 if let Some(texture) = glyphs.get(mode, glyph) {
-                    let size = (text_height * 0.9).round();
+                    let size = m.icon(17.0).min(text_height + 2.0 * tab_pad_y(m));
                     ui.add(
                         egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                             .fit_to_exact_size(vec2(size, size)),
