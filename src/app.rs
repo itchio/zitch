@@ -82,7 +82,7 @@ pub struct App {
     online: bool,
     tab: Tab,
     /// Row and button with focus on the Downloads tab.
-    downloads_focus: (usize, usize),
+    downloads_focus: ui::DownloadFocus,
     /// Hide games with no upload for this computer, on every tab.
     playable_only: bool,
     query: String,
@@ -243,7 +243,7 @@ impl App {
             collection_installed: None,
             collection_loading: Default::default(),
             collection_rows: ui::Rows::default(),
-            downloads_focus: (0, 0),
+            downloads_focus: ui::DownloadFocus::Row { row: 0, button: 0 },
             playable_only: false,
             query: String::new(),
             focus_search: false,
@@ -474,22 +474,8 @@ impl App {
                     }
                     Tab::Downloads => {
                         let rows = self.download_rows();
-                        let (row, button) = self.downloads_focus_in(&rows);
-                        let row = match direction {
-                            Direction::Up => row.saturating_sub(1),
-                            Direction::Down => (row + 1).min(rows.len().saturating_sub(1)),
-                            Direction::Home => 0,
-                            Direction::End => rows.len().saturating_sub(1),
-                            _ => row,
-                        };
-                        let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
-                        let button = match direction {
-                            Direction::Left => button.saturating_sub(1),
-                            Direction::Right => button + 1,
-                            _ => button,
-                        }
-                        .min(buttons.saturating_sub(1));
-                        self.downloads_focus = (row, button);
+                        self.downloads_focus =
+                            step_download_focus(self.downloads_focus_in(&rows), direction, &rows);
                     }
                 },
                 Page::Game { id, button } => {
@@ -524,7 +510,9 @@ impl App {
                     rows.focus_tile(row, col);
                 }
             }
-            Action::FocusDownload { row, button } => self.downloads_focus = (row, button),
+            Action::FocusDownload { row, button } => {
+                self.downloads_focus = ui::DownloadFocus::Row { row, button }
+            }
             Action::FocusButton(button) => {
                 if let Page::Game { id, .. } = self.page {
                     self.page = Page::Game { id, button };
@@ -544,10 +532,15 @@ impl App {
                     }
                     Tab::Downloads => {
                         let rows = self.download_rows();
-                        let (row, button) = self.downloads_focus_in(&rows);
-                        if let Some((_, action)) = rows.get(row).and_then(|r| r.buttons.get(button))
-                        {
-                            self.actions.push(action.clone());
+                        match self.downloads_focus_in(&rows) {
+                            ui::DownloadFocus::ClearAll => self.actions.push(Action::ClearFinished),
+                            ui::DownloadFocus::Row { row, button } => {
+                                if let Some((_, action)) =
+                                    rows.get(row).and_then(|r| r.buttons.get(button))
+                                {
+                                    self.actions.push(action.clone());
+                                }
+                            }
                         }
                     }
                 },
@@ -1292,11 +1285,23 @@ impl App {
     /// What the footer offers on the current page, in reading order.
     /// The stored focus, clamped to rows that still exist. The queue changes
     /// underneath the focus, so every reader clamps rather than trusting it.
-    fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> (usize, usize) {
-        let (row, button) = self.downloads_focus;
+    /// The remembered focus, clamped to what the list currently holds: rows
+    /// come and go as butler works, and Clear all goes with the last
+    /// finished row.
+    fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> ui::DownloadFocus {
+        let (row, button) = match self.downloads_focus {
+            ui::DownloadFocus::ClearAll if rows.iter().any(|r| r.finished) => {
+                return ui::DownloadFocus::ClearAll;
+            }
+            ui::DownloadFocus::ClearAll => (0, 0),
+            ui::DownloadFocus::Row { row, button } => (row, button),
+        };
         let row = row.min(rows.len().saturating_sub(1));
         let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
-        (row, button.min(buttons.saturating_sub(1)))
+        ui::DownloadFocus::Row {
+            row,
+            button: button.min(buttons.saturating_sub(1)),
+        }
     }
 
     /// What the Downloads tab lists, split the way the itch app splits it:
@@ -1488,15 +1493,22 @@ impl App {
                 }
                 Tab::Downloads => {
                     let rows = self.download_rows();
-                    let (row, button) = self.downloads_focus_in(&rows);
+                    let any_finished = rows.iter().any(|r| r.finished);
                     let mut hints = Vec::new();
-                    if rows.len() > 1 {
+                    if rows.len() + usize::from(any_finished) > 1 {
                         hints.push((vec![Glyph::Navigate], "Browse".to_string()));
                     }
-                    if let Some((label, _)) = rows.get(row).and_then(|r| r.buttons.get(button)) {
+                    let label = match self.downloads_focus_in(&rows) {
+                        ui::DownloadFocus::ClearAll => Some("Clear all"),
+                        ui::DownloadFocus::Row { row, button } => rows
+                            .get(row)
+                            .and_then(|r| r.buttons.get(button))
+                            .map(|(label, _)| *label),
+                    };
+                    if let Some(label) = label {
                         hints.push((vec![Glyph::Confirm], label.to_string()));
                     }
-                    if rows.iter().any(|r| r.finished) {
+                    if any_finished {
                         hints.push((
                             vec![Glyph::FilterLeft, Glyph::FilterRight],
                             "Clear finished".to_string(),
@@ -1792,7 +1804,7 @@ impl App {
                         },
                         Tab::Downloads => {
                             let rows = self.download_rows();
-                            let (row, button) = self.downloads_focus_in(&rows);
+                            let focus = self.downloads_focus_in(&rows);
                             let mut actions = Vec::new();
                             ui::downloads(
                                 ui,
@@ -1800,7 +1812,7 @@ impl App {
                                 ui::DownloadsView {
                                     rows: &rows,
                                     covers: &self.covers,
-                                    focus: (row, button),
+                                    focus,
                                     scrollbar: self.input_mode == InputMode::Keyboard,
                                 },
                                 &mut actions,
@@ -1891,5 +1903,112 @@ fn capitalize(text: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// One controller step through the Downloads tab: the rows top to bottom,
+/// with the Clear all pill as a stop of its own just before the first
+/// finished row. `focus` is already clamped to `rows`.
+fn step_download_focus(
+    focus: ui::DownloadFocus,
+    direction: Direction,
+    rows: &[ui::DownloadRow<'_>],
+) -> ui::DownloadFocus {
+    use ui::DownloadFocus::{ClearAll, Row};
+    let first_finished = rows.iter().position(|r| r.finished);
+    let last = rows.len().saturating_sub(1);
+    let at_row = |row: usize| Row { row, button: 0 };
+    match (focus, direction) {
+        (ClearAll, Direction::Up) => match first_finished {
+            Some(row) if row > 0 => at_row(row - 1),
+            _ => ClearAll,
+        },
+        (ClearAll, Direction::Down) => at_row(first_finished.unwrap_or(0)),
+        (ClearAll, Direction::Home) if first_finished != Some(0) => at_row(0),
+        (ClearAll, Direction::End) => at_row(last),
+        (ClearAll, _) => ClearAll,
+        (Row { row, .. }, Direction::Up) if first_finished == Some(row) => ClearAll,
+        (Row { .. }, Direction::Home) if first_finished == Some(0) => ClearAll,
+        (Row { row, button }, _) => {
+            let row = match direction {
+                Direction::Up => row.saturating_sub(1),
+                Direction::Down => (row + 1).min(last),
+                Direction::Home => 0,
+                Direction::End => last,
+                _ => row,
+            };
+            let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
+            let button = match direction {
+                Direction::Left => button.saturating_sub(1),
+                Direction::Right => button + 1,
+                _ => button,
+            }
+            .min(buttons.saturating_sub(1));
+            Row { row, button }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ui::DownloadFocus::{ClearAll, Row};
+
+    fn row(finished: bool) -> ui::DownloadRow<'static> {
+        ui::DownloadRow {
+            game: None,
+            title: String::new(),
+            detail: String::new(),
+            progress: None,
+            failed: false,
+            finished,
+            buttons: vec![
+                ("Retry", Action::CheckUpdates),
+                ("Dismiss", Action::CheckUpdates),
+            ],
+        }
+    }
+
+    fn at(row: usize) -> ui::DownloadFocus {
+        Row { row, button: 0 }
+    }
+
+    #[test]
+    fn clear_all_sits_between_queue_and_finished_rows() {
+        let rows = [row(false), row(false), row(true), row(true)];
+        let step = |focus, direction| step_download_focus(focus, direction, &rows);
+        assert_eq!(step(at(1), Direction::Down), at(2));
+        assert_eq!(step(at(2), Direction::Up), ClearAll);
+        assert_eq!(step(ClearAll, Direction::Up), at(1));
+        assert_eq!(step(ClearAll, Direction::Down), at(2));
+        assert_eq!(step(ClearAll, Direction::Home), at(0));
+        assert_eq!(step(ClearAll, Direction::End), at(3));
+        assert_eq!(step(ClearAll, Direction::Left), ClearAll);
+        assert_eq!(step(at(1), Direction::Up), at(0));
+        assert_eq!(step(at(3), Direction::Down), at(3));
+    }
+
+    #[test]
+    fn clear_all_is_the_top_when_nothing_is_queued() {
+        let rows = [row(true), row(true)];
+        let step = |focus, direction| step_download_focus(focus, direction, &rows);
+        assert_eq!(step(at(0), Direction::Up), ClearAll);
+        assert_eq!(step(at(1), Direction::Home), ClearAll);
+        assert_eq!(step(ClearAll, Direction::Up), ClearAll);
+        assert_eq!(step(ClearAll, Direction::Home), ClearAll);
+        assert_eq!(step(ClearAll, Direction::Down), at(0));
+    }
+
+    #[test]
+    fn without_finished_rows_there_is_no_clear_all_stop() {
+        let rows = [row(false), row(false)];
+        let step = |focus, direction| step_download_focus(focus, direction, &rows);
+        assert_eq!(step(at(0), Direction::Up), at(0));
+        assert_eq!(step(at(0), Direction::Right), Row { row: 0, button: 1 });
+        assert_eq!(
+            step(Row { row: 0, button: 1 }, Direction::Right),
+            Row { row: 0, button: 1 }
+        );
+        assert_eq!(step(at(1), Direction::Home), at(0));
     }
 }

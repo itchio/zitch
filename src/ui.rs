@@ -2048,11 +2048,20 @@ pub struct DownloadRow<'a> {
     pub buttons: Vec<(&'static str, Action)>,
 }
 
+/// Where controller focus rests on the Downloads tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadFocus {
+    /// A button on a row.
+    Row { row: usize, button: usize },
+    /// The Clear all pill in the Recent activity heading, reached by going
+    /// up from the first finished row.
+    ClearAll,
+}
+
 pub struct DownloadsView<'a> {
     pub rows: &'a [DownloadRow<'a>],
     pub covers: &'a CoverLoader,
-    /// Row and button with controller focus.
-    pub focus: (usize, usize),
+    pub focus: DownloadFocus,
     pub scrollbar: bool,
 }
 
@@ -2103,7 +2112,12 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.add_space(m.ring);
-                                    if pill(ui, m, "Clear all", false, false).clicked() {
+                                    let focused = view.focus == DownloadFocus::ClearAll;
+                                    let response = pill(ui, m, "Clear all", focused, false);
+                                    if focused {
+                                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                                    }
+                                    if response.clicked() {
                                         actions.push(Action::ClearFinished);
                                     }
                                 },
@@ -2111,7 +2125,8 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                         }
                     });
                 }
-                let focused_row = index == view.focus.0;
+                let focused_row =
+                    matches!(view.focus, DownloadFocus::Row { row, .. } if row == index);
                 let width = ui.available_width() - 2.0 * m.ring;
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
@@ -2168,7 +2183,7 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                     |ui| {
                         ui.spacing_mut().item_spacing.x = m.space(10.0);
                         for (button, (label, action)) in row.buttons.iter().enumerate().rev() {
-                            let focused = focused_row && button == view.focus.1;
+                            let focused = view.focus == DownloadFocus::Row { row: index, button };
                             let response = pill(ui, m, label, focused, false);
                             buttons_left = buttons_left.min(response.rect.left());
                             if response.hovered() && pointer_moved && !focused {
