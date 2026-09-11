@@ -45,8 +45,39 @@ pub fn button_action(button: PadButton) -> Option<Action> {
     })
 }
 
+/// What a controller reader tells the interface.
+pub enum PadEvent {
+    /// A controller is present, at startup or plugged in since.
+    Connected,
+    Action(Action),
+}
+
+/// The reader's end of the channel: presses and connections.
+#[derive(Clone)]
+pub struct PadSender(mpsc::Sender<PadEvent>);
+
+impl PadSender {
+    pub fn send(&self, action: Action) -> Result<(), mpsc::SendError<PadEvent>> {
+        self.0.send(PadEvent::Action(action))
+    }
+
+    pub fn connected(&self) -> Result<(), mpsc::SendError<PadEvent>> {
+        self.0.send(PadEvent::Connected)
+    }
+}
+
+/// What a frame's poll found.
+#[derive(Default)]
+pub struct Poll {
+    /// A press or stick move landed in the actions.
+    pub pressed: bool,
+    /// A controller announced itself; a hint to show its glyphs before
+    /// anything is pressed.
+    pub connected: bool,
+}
+
 pub struct Gamepad {
-    actions: Option<mpsc::Receiver<Action>>,
+    events: Option<mpsc::Receiver<PadEvent>>,
 }
 
 impl Gamepad {
@@ -61,37 +92,39 @@ impl Gamepad {
         #[cfg(not(feature = "gilrs"))]
         {
             let _ = ctx;
-            Self { actions: None }
+            Self { events: None }
         }
     }
 
     /// A gamepad fed by the host: whatever it sends arrives at the next
     /// [`Self::poll`].
-    pub fn external() -> (Self, mpsc::Sender<Action>) {
+    pub fn external() -> (Self, PadSender) {
         let (tx, rx) = mpsc::channel();
-        (Self { actions: Some(rx) }, tx)
+        (Self { events: Some(rx) }, PadSender(tx))
     }
 
-    /// Moves the controller's actions since the last frame into `actions`.
-    /// Returns whether there were any, so the interface can show controller
-    /// glyphs. An unfocused window drops them: the controller is driving
+    /// Moves the controller's actions since the last frame into `actions`
+    /// and reports what arrived, so the interface can show controller
+    /// glyphs. An unfocused window drops presses: the controller is driving
     /// whatever is in front, and nothing should fire on coming back.
-    pub fn poll(&mut self, focused: bool, actions: &mut Vec<Action>) -> bool {
-        let Some(rx) = &self.actions else {
-            return false;
+    pub fn poll(&mut self, focused: bool, actions: &mut Vec<Action>) -> Poll {
+        let mut poll = Poll::default();
+        let Some(rx) = &self.events else {
+            return poll;
         };
-        if !focused {
-            // Only the Guide button reaches an unfocused window: it is the
-            // way back from a running game.
-            let guide = rx.try_iter().any(|a| matches!(a, Action::Menu));
-            if guide {
-                actions.push(Action::Menu);
+        for event in rx.try_iter() {
+            match event {
+                PadEvent::Connected => poll.connected = true,
+                // Only the Guide button reaches an unfocused window: it is
+                // the way back from a running game.
+                PadEvent::Action(action) if focused || matches!(action, Action::Menu) => {
+                    actions.push(action);
+                    poll.pressed = true;
+                }
+                PadEvent::Action(_) => {}
             }
-            return guide;
         }
-        let before = actions.len();
-        actions.extend(rx.try_iter());
-        actions.len() > before
+        poll
     }
 }
 
@@ -167,7 +200,7 @@ mod reader {
 
     use gilrs::{Axis, Button, EventType, Gilrs};
 
-    use super::{Gamepad, PadButton, Stick, button_action};
+    use super::{Gamepad, PadButton, PadSender, Stick, button_action};
     use crate::model::{Action, Direction};
 
     /// How long the reader sleeps with nothing held. Hotplug and input both
@@ -180,25 +213,27 @@ mod reader {
             Ok(gilrs) => gilrs,
             Err(error) => {
                 log::warn!("no gamepad support: {error}");
-                return Gamepad { actions: None };
+                return Gamepad { events: None };
             }
         };
+        let (tx, rx) = mpsc::channel();
+        let tx = PadSender(tx);
         for (_, pad) in gilrs.gamepads() {
             log::info!("gamepad: {}", pad.name());
+            let _ = tx.connected();
         }
-        let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("gamepad".into())
             .spawn(move || read_loop(gilrs, &tx, &ctx));
         if let Err(error) = spawned {
             log::warn!("no gamepad support: spawning reader: {error}");
-            return Gamepad { actions: None };
+            return Gamepad { events: None };
         }
-        Gamepad { actions: Some(rx) }
+        Gamepad { events: Some(rx) }
     }
 
     /// Runs until the interface drops its receiver.
-    fn read_loop(mut gilrs: Gilrs, tx: &mpsc::Sender<Action>, ctx: &egui::Context) {
+    fn read_loop(mut gilrs: Gilrs, tx: &PadSender, ctx: &egui::Context) {
         let mut stick = Stick::default();
         loop {
             let wait = stick.deadline().map_or(IDLE_WAIT, |next| {
@@ -218,6 +253,10 @@ mod reader {
                     EventType::Connected => {
                         let name = gilrs.gamepad(event.id).name().to_string();
                         log::info!("gamepad connected: {name}");
+                        if tx.connected().is_err() {
+                            return;
+                        }
+                        sent = true;
                     }
                     EventType::Disconnected => log::info!("gamepad disconnected"),
                     _ => {}

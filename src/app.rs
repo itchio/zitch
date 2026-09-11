@@ -33,6 +33,9 @@ pub struct App {
     glyphs: Glyphs,
     /// The device the user touched last, which picks the footer's glyphs.
     input_mode: InputMode,
+    /// Something has been pressed or touched this session. Until then a
+    /// controller connecting picks the glyphs; after, only input does.
+    input_seen: bool,
     /// The focused item while the menu drawer is open.
     menu: Option<usize>,
     /// Frames of the "Quitting" overlay left to show before the window is
@@ -225,6 +228,7 @@ impl App {
             gamepad: gamepad.unwrap_or_else(|| Gamepad::new(ctx.clone())),
             glyphs: Glyphs::load(ctx),
             input_mode: InputMode::Keyboard,
+            input_seen: false,
             status: String::new(),
             profile: None,
             owned: Loadable::Loading,
@@ -1678,12 +1682,18 @@ impl App {
         self.handle_keys(ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let pad = self.gamepad.poll(focused, &mut self.actions);
-        if pad {
+        if pad.pressed {
             self.input_mode = InputMode::Gamepad;
         } else if keys {
             self.input_mode = InputMode::Keyboard;
         } else if touches {
             self.input_mode = InputMode::Touch;
+        } else if pad.connected && !self.input_seen {
+            // A handheld has a controller before it has a first press.
+            self.input_mode = InputMode::Gamepad;
+        }
+        if pad.pressed || keys || touches {
+            self.input_seen = true;
         }
         self.drive_shot(ctx);
         // Before drawing, so the frame that reads a press already shows it.

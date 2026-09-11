@@ -172,7 +172,11 @@ pub fn run(
         for event in sdl_events {
             match event {
                 Event::Quit { .. } => break 'frames,
-                Event::ControllerDeviceAdded { which, .. } => pads.open(&controllers, which),
+                Event::ControllerDeviceAdded { which, .. } => {
+                    if pads.open(&controllers, which) {
+                        let _ = pad_tx.connected();
+                    }
+                }
                 Event::ControllerDeviceRemoved { which, .. } => pads.close(which),
                 _ if hidden => {}
                 Event::ControllerButtonDown { button, .. } => {
@@ -456,22 +460,30 @@ impl Pads {
         }
     }
 
-    fn open(&mut self, controllers: &sdl2::GameControllerSubsystem, index: u32) {
+    /// Opens a newly seen controller; true when it is one and is new.
+    fn open(&mut self, controllers: &sdl2::GameControllerSubsystem, index: u32) -> bool {
         if !controllers.is_game_controller(index) {
             log::info!("joystick {index} has no controller mapping");
-            return;
+            return false;
         }
         match controllers.open(index) {
             Ok(pad)
                 if self
                     .open
                     .iter()
-                    .any(|p| p.instance_id() == pad.instance_id()) => {}
+                    .any(|p| p.instance_id() == pad.instance_id()) =>
+            {
+                false
+            }
             Ok(pad) => {
                 log::info!("gamepad: {}", pad.name());
                 self.open.push(pad);
+                true
             }
-            Err(error) => log::warn!("opening controller {index}: {error}"),
+            Err(error) => {
+                log::warn!("opening controller {index}: {error}");
+                false
+            }
         }
     }
 
