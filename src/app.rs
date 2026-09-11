@@ -186,6 +186,13 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 choice: None,
             })),
             other => {
+                // `prompt:9`: the stand-in with that many long choices.
+                if let Some(count) = other.strip_prefix("prompt:").and_then(|n| n.parse().ok()) {
+                    return Ok(Step::Act(Action::Answer {
+                        prompt: 0,
+                        choice: Some(count),
+                    }));
+                }
                 if let Some(index) = other.strip_prefix("focus:").and_then(|n| n.parse().ok()) {
                     Ok(Step::Act(Action::FocusIndex(index)))
                 } else if let Some(ms) = other.strip_prefix("wait:").and_then(|n| n.parse().ok()) {
@@ -502,20 +509,36 @@ impl App {
         if self.quitting.is_some() {
             return;
         }
-        if let (None, Action::Answer { prompt: 0, .. }) = (&self.prompt, &action) {
-            self.prompt = Some(Prompt {
-                id: 0,
-                title: "License agreement".into(),
-                body: "This is a sample license shown by the screenshot script. ".repeat(12),
-                choices: vec!["Accept".into(), "Decline".into()],
-                focus: 0,
+        if let (None, Action::Answer { prompt: 0, choice }) = (&self.prompt, &action) {
+            // The screenshot script's stand-in: a license, or with a count,
+            // a pick between that many downloads.
+            self.prompt = Some(match choice {
+                Some(count) => Prompt {
+                    id: 0,
+                    title: "Sample has more than one download for this computer.".into(),
+                    body: String::new(),
+                    choices: (1..=*count)
+                        .map(|i| format!("Sample - Linux - build {i} (135.9 MB)"))
+                        .collect(),
+                    focus: 0,
+                },
+                None => Prompt {
+                    id: 0,
+                    title: "License agreement".into(),
+                    body: "This is a sample license shown by the screenshot script. ".repeat(12),
+                    choices: vec!["Accept".into(), "Decline".into()],
+                    focus: 0,
+                },
             });
             return;
         }
         if let Some(prompt) = self.prompt.as_mut() {
             match action {
-                Action::MoveFocus(Direction::Left) => prompt.focus = prompt.focus.saturating_sub(1),
-                Action::MoveFocus(Direction::Right) => {
+                // Choices wrap onto lines, so both axes step through them.
+                Action::MoveFocus(Direction::Left | Direction::Up) => {
+                    prompt.focus = prompt.focus.saturating_sub(1)
+                }
+                Action::MoveFocus(Direction::Right | Direction::Down) => {
                     prompt.focus = (prompt.focus + 1).min(prompt.choices.len().saturating_sub(1))
                 }
                 Action::PromptFocus(index) if index < prompt.choices.len() => prompt.focus = index,

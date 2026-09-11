@@ -1724,6 +1724,10 @@ pub fn prompt(
                 .inner_margin(m.space(24.0))
                 .show(ui, |ui| {
                     ui.set_width(width);
+                    // The dialog never outgrows the screen: the body and the
+                    // choices scroll inside what is left under the title.
+                    let budget = screen.height() * 0.9 - 2.0 * m.space(24.0);
+                    let top = ui.cursor().top();
                     ui.label(
                         egui::RichText::new(&prompt.title)
                             .font(bold(m.dialog))
@@ -1732,7 +1736,8 @@ pub fn prompt(
                     if !prompt.body.is_empty() {
                         ui.add_space(m.space(10.0));
                         egui::ScrollArea::vertical()
-                            .max_height(screen.height() * 0.4)
+                            .id_salt("body")
+                            .max_height(budget * 0.4)
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(&prompt.body)
@@ -1742,23 +1747,39 @@ pub fn prompt(
                             });
                     }
                     ui.add_space(m.space(18.0));
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
-                        for (index, label) in prompt.choices.iter().enumerate() {
-                            let response = pill(ui, m, label, index == prompt.focus, index == 0);
-                            if response.hovered()
-                                && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                            {
-                                actions.push(Action::PromptFocus(index));
-                            }
-                            if response.clicked() {
-                                actions.push(Action::Answer {
-                                    prompt: prompt.id,
-                                    choice: Some(index),
-                                });
-                            }
-                        }
-                    });
+                    let used = ui.cursor().top() - top;
+                    // The bar stays visible whatever the input: on a pad it is
+                    // the one cue that the list goes on below.
+                    egui::ScrollArea::vertical()
+                        .id_salt("choices")
+                        .max_height((budget - used).max(m.space(60.0)))
+                        .scroll_bar_visibility(scroll_bar(ui, true))
+                        .show(ui, |ui| {
+                            // Room for the focus ring, painted outside the pill.
+                            ui.add_space(m.ring);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
+                                for (index, label) in prompt.choices.iter().enumerate() {
+                                    let focused = index == prompt.focus;
+                                    let response = pill(ui, m, label, focused, index == 0);
+                                    if focused {
+                                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                                    }
+                                    if response.hovered()
+                                        && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                                    {
+                                        actions.push(Action::PromptFocus(index));
+                                    }
+                                    if response.clicked() {
+                                        actions.push(Action::Answer {
+                                            prompt: prompt.id,
+                                            choice: Some(index),
+                                        });
+                                    }
+                                }
+                            });
+                            ui.add_space(m.ring);
+                        });
                 });
         });
 }
