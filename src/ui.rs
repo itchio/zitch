@@ -500,6 +500,8 @@ pub struct LibraryView<'a> {
     pub covers: &'a CoverLoader,
     /// Show the vertical scroll bar; a pad or finger has no use for it.
     pub scrollbar: bool,
+    /// Controller focus is in the rows rather than on the toolbar above.
+    pub focused: bool,
 }
 
 pub fn library(
@@ -516,6 +518,7 @@ pub fn library(
         updatable,
         covers,
         scrollbar,
+        focused: view_focused,
     } = view;
     let Metrics {
         tile_width,
@@ -616,7 +619,7 @@ pub fn library(
             let row_top = ui.cursor().top() - list_top;
             let section = &rows.sections[row];
             let focused_col = rows.cols[row];
-            let is_focused_row = row == rows.row;
+            let is_focused_row = view_focused && row == rows.row;
             ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
                 ui.label(
                     egui::RichText::new(&section.title)
@@ -1497,41 +1500,70 @@ fn pill_with(
     }
 }
 
-/// A button on the row above the Downloads list.
-pub struct ToolbarButton {
-    pub label: &'static str,
-    /// Its work is under way; drawn with a spinner and inert.
-    pub busy: bool,
+/// A control on the row above a tab's list. Every button and every filter
+/// option is one focus stop, numbered left to right across the row.
+pub enum ToolbarControl {
+    Button {
+        label: &'static str,
+        /// Its work is under way; drawn with a spinner and inert.
+        busy: bool,
+    },
+    /// Joined filter options, each with whether it is on.
+    Filters(Vec<(&'static str, bool)>),
 }
 
-/// The row of buttons above the Downloads list. Returns the index of a
-/// clicked button.
+impl ToolbarControl {
+    fn stops(&self) -> usize {
+        match self {
+            Self::Button { .. } => 1,
+            Self::Filters(options) => options.len(),
+        }
+    }
+}
+
+/// The row of controls above a tab's list. `focused` is the stop with
+/// controller focus; the response's indices are stops too.
 pub fn toolbar(
     ui: &mut Ui,
     m: &Metrics,
-    buttons: &[ToolbarButton],
+    controls: &[ToolbarControl],
     focused: Option<usize>,
-) -> Option<usize> {
-    let mut clicked = None;
+) -> ToolbarResponse {
+    let mut out = ToolbarResponse::default();
+    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = m.space(10.0);
-        // Room for the focus ring, which is painted outside the pill.
+        // Room for the focus ring, which is painted outside the controls.
         ui.add_space(m.ring);
-        for (index, button) in buttons.iter().enumerate() {
-            let response = pill_with(
-                ui,
-                m,
-                button.label,
-                focused == Some(index),
-                false,
-                button.busy,
-            );
-            if response.clicked() && !button.busy {
-                clicked = Some(index);
+        let mut first = 0;
+        for control in controls {
+            let local = focused
+                .filter(|&f| f >= first && f < first + control.stops())
+                .map(|f| f - first);
+            match control {
+                ToolbarControl::Button { label, busy } => {
+                    let response = pill_with(ui, m, label, local.is_some(), false, *busy);
+                    if response.hovered() && pointer_moved && local.is_none() {
+                        out.hovered = Some(first);
+                    }
+                    if response.clicked() && !busy {
+                        out.clicked = Some(first);
+                    }
+                }
+                ToolbarControl::Filters(options) => {
+                    let response = filter_group(ui, m, options, local);
+                    if let Some(index) = response.hovered {
+                        out.hovered = Some(first + index);
+                    }
+                    if let Some(index) = response.clicked {
+                        out.clicked = Some(first + index);
+                    }
+                }
             }
+            first += control.stops();
         }
     });
-    clicked
+    out
 }
 
 /// Short remaining-time text for progress lines.
@@ -1898,8 +1930,24 @@ pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
 
 /// One segmented group from the itch app's filter bar. Returns the index
 /// of an option the pointer picked.
-pub fn filter_group(ui: &mut Ui, m: &Metrics, options: &[(&str, bool)]) -> Option<usize> {
-    let mut picked = None;
+/// What the pointer did to a group of toolbar controls this frame.
+#[derive(Default)]
+pub struct ToolbarResponse {
+    pub clicked: Option<usize>,
+    /// The control the pointer moved onto.
+    pub hovered: Option<usize>,
+}
+
+/// A joined group of filter options. `focused` is the option with
+/// controller focus.
+fn filter_group(
+    ui: &mut Ui,
+    m: &Metrics,
+    options: &[(&str, bool)],
+    focused: Option<usize>,
+) -> ToolbarResponse {
+    let mut out = ToolbarResponse::default();
+    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
     let radius = m.space(12.0);
     let border = m.space(1.25).max(1.0);
     let icon = m.icon(12.0);
@@ -1958,13 +2006,19 @@ pub fn filter_group(ui: &mut Ui, m: &Metrics, options: &[(&str, bool)]) -> Optio
                 rect.center().y - galley.size().y / 2.0,
             );
             ui.painter().galley(text_pos, galley, TEXT);
+            if focused == Some(index) {
+                focus_ring(ui, rect, radii, m);
+            }
+            if response.hovered() && pointer_moved && focused != Some(index) {
+                out.hovered = Some(index);
+            }
             if response.clicked() {
-                picked = Some(index);
+                out.clicked = Some(index);
             }
             response.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
     });
-    picked
+    out
 }
 
 fn checkbox_icon(ui: &Ui, rect: Rect, color: Color32) {

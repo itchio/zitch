@@ -319,6 +319,8 @@ pub enum Action {
         row: usize,
         button: usize,
     },
+    /// Focus a button on the tab's toolbar; the pointer is already there.
+    FocusToolbar(usize),
     Activate,
     Back,
     Open(Page),
@@ -338,9 +340,6 @@ pub enum Action {
     },
     /// Focus a prompt button; the pointer is already there.
     PromptFocus(usize),
-    /// Flip the current tab's filter: Playable here on Library, Installed
-    /// on Collections.
-    ToggleFilter,
     /// Hide games with no upload for this computer, on every tab.
     SetPlayableOnly(bool),
     SetTab(Tab),

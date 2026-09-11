@@ -82,7 +82,11 @@ pub struct App {
     online: bool,
     tab: Tab,
     /// Row and button with focus on the Downloads tab.
-    downloads_focus: ui::DownloadFocus,
+    /// Per tab, the toolbar stop with controller focus, or none while
+    /// focus is in the list below.
+    toolbar_focus: [Option<usize>; Tab::ALL.len()],
+    /// The row and button with focus on the Downloads list.
+    downloads_row: (usize, usize),
     /// Hide games with no upload for this computer, on every tab.
     playable_only: bool,
     query: String,
@@ -169,7 +173,6 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
-            "tab" => Ok(Step::Act(Action::ToggleFilter)),
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
@@ -245,7 +248,8 @@ impl App {
             collection_installed: None,
             collection_loading: Default::default(),
             collection_rows: ui::Rows::default(),
-            downloads_focus: ui::DownloadFocus::Row { row: 0, button: 0 },
+            toolbar_focus: [None; Tab::ALL.len()],
+            downloads_row: (0, 0),
             playable_only: false,
             query: String::new(),
             focus_search: false,
@@ -316,8 +320,6 @@ impl App {
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
             key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
-            key(Modifiers::NONE, Key::Tab, Action::ToggleFilter);
-            key(Modifiers::SHIFT, Key::Tab, Action::ToggleFilter);
             key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
             key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
@@ -372,6 +374,98 @@ impl App {
             Tab::Library => Some(&mut self.rows),
             Tab::Collections => Some(&mut self.collection_rows),
             Tab::Downloads => None,
+        }
+    }
+
+    fn active_rows_ref(&self) -> Option<&ui::Rows> {
+        match self.tab {
+            Tab::Library => Some(&self.rows),
+            Tab::Collections => Some(&self.collection_rows),
+            Tab::Downloads => None,
+        }
+    }
+
+    /// Whether the tab's list has nothing to focus, leaving the toolbar. A
+    /// section can be listed with no games, a note in their place; a row
+    /// with more to fetch counts as having some.
+    fn rows_empty(&self) -> bool {
+        let no_tiles =
+            |rows: &ui::Rows| rows.sections.iter().all(|s| s.games.is_empty() && !s.more);
+        match self.tab {
+            Tab::Library => no_tiles(&self.rows),
+            Tab::Collections => no_tiles(&self.collection_rows),
+            Tab::Downloads => self.download_rows().is_empty(),
+        }
+    }
+
+    /// The controls above the tab's list, as drawn, and one stop per
+    /// button or filter option, in the same order.
+    fn toolbar(&self) -> (Vec<ui::ToolbarControl>, Vec<ToolbarStop>) {
+        let playable = (
+            ui::ToolbarControl::Filters(vec![("Playable here", self.playable_only)]),
+            vec![ToolbarStop::new(
+                "Playable here",
+                Action::SetPlayableOnly(!self.playable_only),
+            )],
+        );
+        let mut controls = Vec::new();
+        let mut stops = Vec::new();
+        let mut push = |control, mut more: Vec<ToolbarStop>| {
+            controls.push(control);
+            stops.append(&mut more);
+        };
+        match self.tab {
+            Tab::Library => push(playable.0, playable.1),
+            Tab::Collections => {
+                let installed = self.collections_installed_only;
+                push(
+                    ui::ToolbarControl::Filters(vec![
+                        ("All", !installed),
+                        ("Installed", installed),
+                    ]),
+                    vec![
+                        ToolbarStop::new("All", Action::SetCollectionsInstalledOnly(false)),
+                        ToolbarStop::new("Installed", Action::SetCollectionsInstalledOnly(true)),
+                    ],
+                );
+                push(playable.0, playable.1);
+            }
+            Tab::Downloads => {
+                let (label, busy) = if self.checking_updates {
+                    ("Checking…", true)
+                } else {
+                    ("Check for updates", false)
+                };
+                push(
+                    ui::ToolbarControl::Button { label, busy },
+                    vec![ToolbarStop {
+                        label,
+                        busy,
+                        action: Action::CheckUpdates,
+                    }],
+                );
+                if self.download_rows().iter().any(|r| r.finished) {
+                    push(
+                        ui::ToolbarControl::Button {
+                            label: "Clear all",
+                            busy: false,
+                        },
+                        vec![ToolbarStop::new("Clear all", Action::ClearFinished)],
+                    );
+                }
+            }
+        }
+        (controls, stops)
+    }
+
+    /// The toolbar stop with focus on the current tab, clamped to the
+    /// `stops` there are. With nothing in the list the toolbar is all there
+    /// is, so focus rests on it.
+    fn toolbar_focus_in(&self, stops: usize, rows_empty: bool) -> Option<usize> {
+        match self.toolbar_focus[tab_slot(self.tab)] {
+            Some(index) => Some(index.min(stops.saturating_sub(1))),
+            None if rows_empty && stops > 0 => Some(0),
+            None => None,
         }
     }
 
@@ -469,23 +563,50 @@ impl App {
         }
         match action {
             Action::MoveFocus(direction) => match self.page.clone() {
-                Page::Library => match self.tab {
-                    Tab::Library | Tab::Collections => {
-                        if let Some(rows) = self.active_rows() {
-                            rows.move_focus(direction);
+                Page::Library => {
+                    let stops = self.toolbar().1.len();
+                    let rows_empty = self.rows_empty();
+                    let at_first_row = match self.tab {
+                        Tab::Library => self.rows.row == 0,
+                        Tab::Collections => self.collection_rows.row == 0,
+                        Tab::Downloads => self.downloads_row_in(&self.download_rows()).0 == 0,
+                    };
+                    let landing = step_toolbar_focus(
+                        self.toolbar_focus_in(stops, rows_empty),
+                        direction,
+                        stops,
+                        rows_empty,
+                        at_first_row,
+                    );
+                    let slot = tab_slot(self.tab);
+                    match landing {
+                        Landing::Toolbar(index) => self.toolbar_focus[slot] = Some(index),
+                        Landing::FirstRow => {
+                            self.toolbar_focus[slot] = None;
+                            match self.active_rows() {
+                                Some(rows) => {
+                                    rows.row = 0;
+                                    rows.follow = true;
+                                }
+                                None => self.downloads_row = (0, 0),
+                            }
+                        }
+                        Landing::Rows => {
+                            self.toolbar_focus[slot] = None;
+                            match self.active_rows() {
+                                Some(rows) => rows.move_focus(direction),
+                                None => {
+                                    let rows = self.download_rows();
+                                    self.downloads_row = step_download_row(
+                                        self.downloads_row_in(&rows),
+                                        direction,
+                                        &rows,
+                                    );
+                                }
+                            }
                         }
                     }
-                    Tab::Downloads => {
-                        let rows = self.download_rows();
-                        let toolbar = self.downloads_toolbar(&rows).len();
-                        self.downloads_focus = step_download_focus(
-                            self.downloads_focus_in(&rows),
-                            direction,
-                            &rows,
-                            toolbar,
-                        );
-                    }
-                },
+                }
                 Page::Game { id, button } => {
                     let Some(game) = self.game(id) else {
                         return;
@@ -514,12 +635,17 @@ impl App {
                 }
             }
             Action::FocusTile { row, col } => {
+                self.toolbar_focus[tab_slot(self.tab)] = None;
                 if let Some(rows) = self.active_rows() {
                     rows.focus_tile(row, col);
                 }
             }
             Action::FocusDownload { row, button } => {
-                self.downloads_focus = ui::DownloadFocus::Row { row, button }
+                self.toolbar_focus[tab_slot(self.tab)] = None;
+                self.downloads_row = (row, button);
+            }
+            Action::FocusToolbar(index) => {
+                self.toolbar_focus[tab_slot(self.tab)] = Some(index);
             }
             Action::FocusButton(button) => {
                 if let Page::Game { id, .. } = self.page {
@@ -527,38 +653,38 @@ impl App {
                 }
             }
             Action::Activate => match self.page.clone() {
-                Page::Library => match self.tab {
-                    Tab::Library | Tab::Collections => {
-                        if let Some(id) = self
-                            .active_rows()
-                            .and_then(|rows| rows.focused_game())
-                            .filter(|id| self.catalog.contains_key(id))
-                        {
-                            self.actions
-                                .push(Action::Open(Page::Game { id, button: 0 }));
-                        }
-                    }
-                    Tab::Downloads => {
-                        let rows = self.download_rows();
-                        match self.downloads_focus_in(&rows) {
-                            ui::DownloadFocus::Toolbar(index) => {
-                                let toolbar = self.downloads_toolbar(&rows);
-                                if let Some((button, action)) = toolbar.get(index) {
-                                    if !button.busy {
-                                        self.actions.push(action.clone());
-                                    }
-                                }
-                            }
-                            ui::DownloadFocus::Row { row, button } => {
-                                if let Some((_, action)) =
-                                    rows.get(row).and_then(|r| r.buttons.get(button))
-                                {
-                                    self.actions.push(action.clone());
-                                }
+                Page::Library => {
+                    let (_, stops) = self.toolbar();
+                    if let Some(index) = self.toolbar_focus_in(stops.len(), self.rows_empty()) {
+                        if let Some(stop) = stops.get(index) {
+                            if !stop.busy {
+                                self.actions.push(stop.action.clone());
                             }
                         }
+                        return;
                     }
-                },
+                    match self.tab {
+                        Tab::Library | Tab::Collections => {
+                            if let Some(id) = self
+                                .active_rows()
+                                .and_then(|rows| rows.focused_game())
+                                .filter(|id| self.catalog.contains_key(id))
+                            {
+                                self.actions
+                                    .push(Action::Open(Page::Game { id, button: 0 }));
+                            }
+                        }
+                        Tab::Downloads => {
+                            let rows = self.download_rows();
+                            let (row, button) = self.downloads_row_in(&rows);
+                            if let Some((_, action)) =
+                                rows.get(row).and_then(|r| r.buttons.get(button))
+                            {
+                                self.actions.push(action.clone());
+                            }
+                        }
+                    }
+                }
                 Page::Game { id, button } => {
                     let Some(game) = self.game(id) else {
                         return;
@@ -585,18 +711,6 @@ impl App {
                     self.collection_rows.follow = true;
                 }
             }
-            Action::ToggleFilter => match (self.page.is_library(), self.tab) {
-                (true, Tab::Library) => {
-                    self.actions
-                        .push(Action::SetPlayableOnly(!self.playable_only));
-                }
-                (true, Tab::Collections) => {
-                    self.actions.push(Action::SetCollectionsInstalledOnly(
-                        !self.collections_installed_only,
-                    ));
-                }
-                _ => {}
-            },
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
             Action::CheckUpdates => {
                 if self.online && !self.checking_updates {
@@ -667,6 +781,9 @@ impl App {
             }
             Action::SearchDone => {
                 self.blur_search = true;
+                // Search hands control to its results, not back to the
+                // toolbar button that had focus before typing.
+                self.toolbar_focus[tab_slot(Tab::Library)] = None;
                 self.rows.follow = true;
             }
             Action::ClearSearch => {
@@ -1304,53 +1421,13 @@ impl App {
     /// What the footer offers on the current page, in reading order.
     /// The stored focus, clamped to rows that still exist. The queue changes
     /// underneath the focus, so every reader clamps rather than trusting it.
-    /// The buttons above the Downloads list and what they do. Check for
-    /// updates is always there; Clear all only while there is something
-    /// to clear.
-    fn downloads_toolbar(&self, rows: &[ui::DownloadRow<'_>]) -> Vec<(ui::ToolbarButton, Action)> {
-        let mut buttons = vec![(
-            ui::ToolbarButton {
-                label: if self.checking_updates {
-                    "Checking…"
-                } else {
-                    "Check for updates"
-                },
-                busy: self.checking_updates,
-            },
-            Action::CheckUpdates,
-        )];
-        if rows.iter().any(|r| r.finished) {
-            buttons.push((
-                ui::ToolbarButton {
-                    label: "Clear all",
-                    busy: false,
-                },
-                Action::ClearFinished,
-            ));
-        }
-        buttons
-    }
-
-    /// The remembered focus, clamped to what the list currently holds: rows
-    /// come and go as butler works, and Clear all goes with the last
-    /// finished row.
-    fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> ui::DownloadFocus {
-        let toolbar = self.downloads_toolbar(rows).len();
-        let (row, button) = match self.downloads_focus {
-            ui::DownloadFocus::Toolbar(index) => {
-                return ui::DownloadFocus::Toolbar(index.min(toolbar - 1));
-            }
-            ui::DownloadFocus::Row { .. } if rows.is_empty() => {
-                return ui::DownloadFocus::Toolbar(0);
-            }
-            ui::DownloadFocus::Row { row, button } => (row, button),
-        };
+    /// The remembered Downloads focus, clamped to the rows there are: they
+    /// come and go as butler works.
+    fn downloads_row_in(&self, rows: &[ui::DownloadRow<'_>]) -> (usize, usize) {
+        let (row, button) = self.downloads_row;
         let row = row.min(rows.len().saturating_sub(1));
         let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
-        ui::DownloadFocus::Row {
-            row,
-            button: button.min(buttons.saturating_sub(1)),
-        }
+        (row, button.min(buttons.saturating_sub(1)))
     }
 
     /// What the Downloads tab lists, split the way the itch app splits it:
@@ -1507,57 +1584,48 @@ impl App {
         }
         // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page.clone() {
-            Page::Library => match self.tab {
-                Tab::Library => {
-                    let mut hints = vec![
-                        (vec![Glyph::Navigate], "Browse".to_string()),
-                        (vec![Glyph::Confirm], "Open".to_string()),
-                        (
-                            vec![Glyph::FilterLeft, Glyph::FilterRight],
-                            "Filter".to_string(),
-                        ),
-                    ];
-                    if !self.handheld {
-                        hints.push((vec![Glyph::Search], "Search".to_string()));
-                    }
-                    hints.push((vec![Glyph::Menu], "Menu".to_string()));
-                    hints
-                }
-                Tab::Collections => {
-                    let mut hints = vec![(vec![Glyph::Navigate], "Browse".to_string())];
-                    if self.collection_rows.focused_game().is_some() {
-                        hints.push((vec![Glyph::Confirm], "Open".to_string()));
-                    }
-                    hints.push((
-                        vec![Glyph::FilterLeft, Glyph::FilterRight],
-                        "Filter".to_string(),
-                    ));
-                    hints.push((vec![Glyph::Back], "Back".to_string()));
-                    hints
-                }
-                Tab::Downloads => {
-                    let rows = self.download_rows();
-                    let toolbar = self.downloads_toolbar(&rows);
-                    let mut hints = Vec::new();
-                    if rows.len() + toolbar.len() > 1 {
-                        hints.push((vec![Glyph::Navigate], "Browse".to_string()));
-                    }
-                    let label = match self.downloads_focus_in(&rows) {
-                        ui::DownloadFocus::Toolbar(index) => {
-                            toolbar.get(index).map(|(button, _)| button.label)
-                        }
-                        ui::DownloadFocus::Row { row, button } => rows
-                            .get(row)
+            Page::Library => {
+                let (_, stops) = self.toolbar();
+                let rows_empty = self.rows_empty();
+                let on_toolbar = self
+                    .toolbar_focus_in(stops.len(), rows_empty)
+                    .and_then(|index| stops.get(index))
+                    .map(|stop| stop.label);
+                let mut hints = Vec::new();
+                // Confirm names what the focused control does.
+                let confirm = match self.tab {
+                    _ if on_toolbar.is_some() => on_toolbar,
+                    Tab::Library | Tab::Collections => self
+                        .active_rows_ref()
+                        .and_then(|rows| rows.focused_game())
+                        .map(|_| "Open"),
+                    Tab::Downloads => {
+                        let rows = self.download_rows();
+                        let (row, button) = self.downloads_row_in(&rows);
+                        rows.get(row)
                             .and_then(|r| r.buttons.get(button))
-                            .map(|(label, _)| *label),
-                    };
-                    if let Some(label) = label {
-                        hints.push((vec![Glyph::Confirm], label.to_string()));
+                            .map(|(label, _)| *label)
                     }
-                    hints.push((vec![Glyph::Back], "Back".to_string()));
-                    hints
+                };
+                if !rows_empty || stops.len() > 1 {
+                    hints.push((vec![Glyph::Navigate], "Browse".to_string()));
                 }
-            },
+                if let Some(label) = confirm {
+                    hints.push((vec![Glyph::Confirm], label.to_string()));
+                }
+                match self.tab {
+                    Tab::Library => {
+                        if !self.handheld {
+                            hints.push((vec![Glyph::Search], "Search".to_string()));
+                        }
+                        hints.push((vec![Glyph::Menu], "Menu".to_string()));
+                    }
+                    Tab::Collections | Tab::Downloads => {
+                        hints.push((vec![Glyph::Back], "Back".to_string()));
+                    }
+                }
+                hints
+            }
             Page::Game { id, button } => {
                 let mut hints: Vec<(Vec<Glyph>, String)> = Vec::new();
                 if let Some(game) = self.game(id) {
@@ -1732,18 +1800,24 @@ impl App {
                         }
                     });
                 });
-                if self.page.is_library() && self.tab == Tab::Library && self.owned.get().is_some()
-                {
+                let toolbar_shown = self.page.is_library()
+                    && match self.tab {
+                        Tab::Library | Tab::Downloads => self.owned.get().is_some(),
+                        Tab::Collections => self.collections.get().is_some(),
+                    };
+                if toolbar_shown {
                     ui.add_space(m.frame(8.0));
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = m.space(8.0);
-                        if ui::filter_group(ui, &m, &[("Playable here", self.playable_only)])
-                            .is_some()
-                        {
-                            self.actions
-                                .push(Action::SetPlayableOnly(!self.playable_only));
+                        let (controls, stops) = self.toolbar();
+                        let focused = self.toolbar_focus_in(stops.len(), self.rows_empty());
+                        let response = ui::toolbar(ui, &m, &controls, focused);
+                        if let Some(index) = response.hovered {
+                            self.actions.push(Action::FocusToolbar(index));
                         }
-                        if self.handheld {
+                        if let Some(index) = response.clicked {
+                            self.actions.push(stops[index].action.clone());
+                        }
+                        if self.tab != Tab::Library || self.handheld {
                             return;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1770,52 +1844,6 @@ impl App {
                         });
                     });
                 }
-                if self.page.is_library()
-                    && self.tab == Tab::Downloads
-                    && self.owned.get().is_some()
-                {
-                    ui.add_space(m.frame(8.0));
-                    let rows = self.download_rows();
-                    let toolbar = self.downloads_toolbar(&rows);
-                    let buttons: Vec<ui::ToolbarButton> = toolbar
-                        .iter()
-                        .map(|(button, _)| ui::ToolbarButton {
-                            label: button.label,
-                            busy: button.busy,
-                        })
-                        .collect();
-                    let focused = match self.downloads_focus_in(&rows) {
-                        ui::DownloadFocus::Toolbar(index) => Some(index),
-                        ui::DownloadFocus::Row { .. } => None,
-                    };
-                    if let Some(index) = ui::toolbar(ui, &m, &buttons, focused) {
-                        self.actions.push(toolbar[index].1.clone());
-                    }
-                }
-                if self.page.is_library()
-                    && self.tab == Tab::Collections
-                    && self.collections.get().is_some()
-                {
-                    ui.add_space(m.frame(8.0));
-                    ui.horizontal(|ui| {
-                        let installed = self.collections_installed_only;
-                        if let Some(picked) = ui::filter_group(
-                            ui,
-                            &m,
-                            &[("All", !installed), ("Installed", installed)],
-                        ) {
-                            self.actions
-                                .push(Action::SetCollectionsInstalledOnly(picked == 1));
-                        }
-                        ui.add_space(m.space(24.0));
-                        if ui::filter_group(ui, &m, &[("Playable here", self.playable_only)])
-                            .is_some()
-                        {
-                            self.actions
-                                .push(Action::SetPlayableOnly(!self.playable_only));
-                        }
-                    });
-                }
                 ui.add_space(m.frame(12.0));
                 match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
@@ -1831,6 +1859,7 @@ impl App {
                                 updatable: &self.updatable(),
                                 covers: &self.covers,
                                 scrollbar: self.input_mode == InputMode::Keyboard,
+                                focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
                             },
                             &mut self.rows,
                             &mut self.actions,
@@ -1856,6 +1885,8 @@ impl App {
                                             updatable: &self.updatable(),
                                             covers: &self.covers,
                                             scrollbar: self.input_mode == InputMode::Keyboard,
+                                            focused: self.toolbar_focus[tab_slot(Tab::Collections)]
+                                                .is_none(),
                                         },
                                         &mut self.collection_rows,
                                         &mut self.actions,
@@ -1866,7 +1897,13 @@ impl App {
                         },
                         Tab::Downloads => {
                             let rows = self.download_rows();
-                            let focus = self.downloads_focus_in(&rows);
+                            let (row, button) = self.downloads_row_in(&rows);
+                            let focus = match self
+                                .toolbar_focus_in(self.toolbar().1.len(), rows.is_empty())
+                            {
+                                Some(index) => ui::DownloadFocus::Toolbar(index),
+                                None => ui::DownloadFocus::Row { row, button },
+                            };
                             let mut actions = Vec::new();
                             ui::downloads(
                                 ui,
@@ -1968,60 +2005,99 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// One controller step through the Downloads tab: the toolbar's buttons
-/// left to right on top, then the rows top to bottom. `focus` is already
-/// clamped to `rows` and a toolbar of `toolbar` buttons.
-fn step_download_focus(
-    focus: ui::DownloadFocus,
-    direction: Direction,
-    rows: &[ui::DownloadRow<'_>],
-    toolbar: usize,
-) -> ui::DownloadFocus {
-    use ui::DownloadFocus::{Row, Toolbar};
-    let last = rows.len().saturating_sub(1);
-    let at_row = |row: usize| Row { row, button: 0 };
-    match (focus, direction) {
-        (Toolbar(index), Direction::Left) => Toolbar(index.saturating_sub(1)),
-        (Toolbar(index), Direction::Right) => Toolbar((index + 1).min(toolbar - 1)),
-        (Toolbar(index), Direction::Down) if rows.is_empty() => Toolbar(index),
-        (Toolbar(_), Direction::Down) => at_row(0),
-        (Toolbar(index), Direction::End) if rows.is_empty() => Toolbar(index),
-        (Toolbar(_), Direction::End) => at_row(last),
-        (Toolbar(_), Direction::Home) => Toolbar(0),
-        (Toolbar(index), Direction::Up) => Toolbar(index),
-        (Row { row: 0, .. }, Direction::Up) | (Row { .. }, Direction::Home) => Toolbar(0),
-        (Row { row, button }, _) => {
-            let row = match direction {
-                Direction::Up => row - 1,
-                Direction::Down => (row + 1).min(last),
-                Direction::End => last,
-                _ => row,
-            };
-            let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
-            let button = match direction {
-                Direction::Left => button.saturating_sub(1),
-                Direction::Right => button + 1,
-                _ => button,
-            }
-            .min(buttons.saturating_sub(1));
-            Row { row, button }
+/// A button on a tab's toolbar and what pressing it does.
+struct ToolbarStop {
+    label: &'static str,
+    /// Its work is under way; pressing it does nothing.
+    busy: bool,
+    action: Action,
+}
+
+impl ToolbarStop {
+    fn new(label: &'static str, action: Action) -> Self {
+        Self {
+            label,
+            busy: false,
+            action,
         }
     }
+}
+
+fn tab_slot(tab: Tab) -> usize {
+    Tab::ALL.iter().position(|&t| t == tab).unwrap_or(0)
+}
+
+/// Where a controller step lands on a tab with a toolbar above its list.
+#[derive(Debug, PartialEq, Eq)]
+enum Landing {
+    Toolbar(usize),
+    /// Down off the toolbar: the list's first row.
+    FirstRow,
+    /// A move within the list, for the list to apply.
+    Rows,
+}
+
+/// One controller step: the toolbar's `stops` left to right on top, the
+/// list below. `focus` is the toolbar stop with focus, already clamped, or
+/// none while focus is in the list.
+fn step_toolbar_focus(
+    focus: Option<usize>,
+    direction: Direction,
+    stops: usize,
+    rows_empty: bool,
+    at_first_row: bool,
+) -> Landing {
+    let last = stops.saturating_sub(1);
+    match (focus, direction) {
+        (Some(index), Direction::Left) => Landing::Toolbar(index.saturating_sub(1)),
+        (Some(index), Direction::Right) => Landing::Toolbar((index + 1).min(last)),
+        (Some(_), Direction::Home) => Landing::Toolbar(0),
+        (Some(_), Direction::End) => Landing::Toolbar(last),
+        (Some(index), Direction::Up) => Landing::Toolbar(index),
+        (Some(index), Direction::Down) if rows_empty => Landing::Toolbar(index),
+        (Some(_), Direction::Down) => Landing::FirstRow,
+        (None, Direction::Up) if at_first_row && stops > 0 => Landing::Toolbar(0),
+        (None, _) => Landing::Rows,
+    }
+}
+
+/// One step within the Downloads list. Up off the first row is the
+/// toolbar's, handled before this.
+fn step_download_row(
+    (row, button): (usize, usize),
+    direction: Direction,
+    rows: &[ui::DownloadRow<'_>],
+) -> (usize, usize) {
+    let last = rows.len().saturating_sub(1);
+    let row = match direction {
+        Direction::Up => row.saturating_sub(1),
+        Direction::Down => (row + 1).min(last),
+        Direction::Home => 0,
+        Direction::End => last,
+        _ => row,
+    };
+    let buttons = rows.get(row).map_or(0, |r| r.buttons.len());
+    let button = match direction {
+        Direction::Left => button.saturating_sub(1),
+        Direction::Right => button + 1,
+        _ => button,
+    }
+    .min(buttons.saturating_sub(1));
+    (row, button)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui::DownloadFocus::{Row, Toolbar};
 
-    fn row(finished: bool) -> ui::DownloadRow<'static> {
+    fn row() -> ui::DownloadRow<'static> {
         ui::DownloadRow {
             game: None,
             title: String::new(),
             detail: String::new(),
             progress: None,
             failed: false,
-            finished,
+            finished: false,
             buttons: vec![
                 ("Retry", Action::CheckUpdates),
                 ("Dismiss", Action::CheckUpdates),
@@ -2029,47 +2105,50 @@ mod tests {
         }
     }
 
-    fn at(row: usize) -> ui::DownloadFocus {
-        Row { row, button: 0 }
+    #[test]
+    fn toolbar_sits_above_the_rows() {
+        let step = |focus, direction| step_toolbar_focus(focus, direction, 3, false, false);
+        assert_eq!(step(Some(0), Direction::Right), Landing::Toolbar(1));
+        assert_eq!(step(Some(2), Direction::Right), Landing::Toolbar(2));
+        assert_eq!(step(Some(1), Direction::Left), Landing::Toolbar(0));
+        assert_eq!(step(Some(2), Direction::Home), Landing::Toolbar(0));
+        assert_eq!(step(Some(0), Direction::End), Landing::Toolbar(2));
+        assert_eq!(step(Some(1), Direction::Up), Landing::Toolbar(1));
+        assert_eq!(step(Some(1), Direction::Down), Landing::FirstRow);
+        assert_eq!(step(None, Direction::Up), Landing::Rows);
+        assert_eq!(step(None, Direction::Down), Landing::Rows);
+        assert_eq!(step(None, Direction::Home), Landing::Rows);
     }
 
     #[test]
-    fn toolbar_sits_above_the_rows() {
-        let rows = [row(false), row(true)];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows, 2);
-        assert_eq!(step(at(1), Direction::Up), at(0));
-        assert_eq!(step(at(0), Direction::Up), Toolbar(0));
-        assert_eq!(step(at(1), Direction::Home), Toolbar(0));
-        assert_eq!(step(Toolbar(0), Direction::Right), Toolbar(1));
-        assert_eq!(step(Toolbar(1), Direction::Right), Toolbar(1));
-        assert_eq!(step(Toolbar(1), Direction::Left), Toolbar(0));
-        assert_eq!(step(Toolbar(1), Direction::Up), Toolbar(1));
-        assert_eq!(step(Toolbar(1), Direction::Down), at(0));
-        assert_eq!(step(Toolbar(1), Direction::End), at(1));
-        assert_eq!(step(at(1), Direction::Down), at(1));
+    fn up_off_the_first_row_reaches_the_toolbar() {
+        assert_eq!(
+            step_toolbar_focus(None, Direction::Up, 1, false, true),
+            Landing::Toolbar(0)
+        );
+        // No toolbar: the list keeps the move.
+        assert_eq!(
+            step_toolbar_focus(None, Direction::Up, 0, false, true),
+            Landing::Rows
+        );
     }
 
     #[test]
     fn toolbar_is_all_there_is_without_rows() {
-        let rows: [ui::DownloadRow<'static>; 0] = [];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows, 1);
-        assert_eq!(step(Toolbar(0), Direction::Down), Toolbar(0));
-        assert_eq!(step(Toolbar(0), Direction::End), Toolbar(0));
-        assert_eq!(step(Toolbar(0), Direction::Right), Toolbar(0));
+        let step = |focus, direction| step_toolbar_focus(focus, direction, 2, true, false);
+        assert_eq!(step(Some(0), Direction::Down), Landing::Toolbar(0));
+        assert_eq!(step(Some(0), Direction::Right), Landing::Toolbar(1));
     }
 
     #[test]
-    fn row_buttons_step_sideways() {
-        let rows = [row(false), row(false)];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows, 1);
-        assert_eq!(step(at(0), Direction::Right), Row { row: 0, button: 1 });
-        assert_eq!(
-            step(Row { row: 0, button: 1 }, Direction::Right),
-            Row { row: 0, button: 1 }
-        );
-        assert_eq!(
-            step(Row { row: 0, button: 1 }, Direction::Down),
-            Row { row: 1, button: 1 }
-        );
+    fn download_rows_step_both_ways() {
+        let rows = [row(), row()];
+        let step = |focus, direction| step_download_row(focus, direction, &rows);
+        assert_eq!(step((0, 0), Direction::Right), (0, 1));
+        assert_eq!(step((0, 1), Direction::Right), (0, 1));
+        assert_eq!(step((0, 1), Direction::Down), (1, 1));
+        assert_eq!(step((1, 1), Direction::Down), (1, 1));
+        assert_eq!(step((1, 0), Direction::Up), (0, 0));
+        assert_eq!(step((1, 0), Direction::Home), (0, 0));
     }
 }

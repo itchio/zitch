@@ -39,7 +39,8 @@ pub fn button_action(button: PadButton) -> Option<Action> {
         PadButton::North => Action::FocusSearch,
         PadButton::LeftBumper => Action::CycleTab(-1),
         PadButton::RightBumper => Action::CycleTab(1),
-        PadButton::LeftTrigger | PadButton::RightTrigger => Action::ToggleFilter,
+        // The triggers are free; filters are toolbar buttons now.
+        PadButton::LeftTrigger | PadButton::RightTrigger => return None,
         PadButton::Guide | PadButton::Start => Action::Menu,
     })
 }
