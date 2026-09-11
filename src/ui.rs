@@ -2096,7 +2096,14 @@ pub fn tab_strip(
             let text_height = ui.fonts_mut(|f| f.row_height(&bold(m.section)));
             let glyph = |ui: &mut Ui, glyph: Glyph| {
                 if let Some(texture) = glyphs.get(mode, glyph) {
-                    let size = m.icon(17.0).min(text_height + 2.0 * tab_pad_y(m));
+                    // The bumper art is a wide, short button filling half its
+                    // box's height; a key fills the whole box.
+                    let base = if mode == InputMode::Gamepad {
+                        24.0
+                    } else {
+                        17.0
+                    };
+                    let size = m.icon(base).min(text_height + 2.0 * tab_pad_y(m));
                     ui.add(
                         egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                             .fit_to_exact_size(vec2(size, size)),
