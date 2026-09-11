@@ -1797,6 +1797,14 @@ fn drawer_width(m: &Metrics, screen: Rect) -> f32 {
     (screen.width() * 0.34).clamp(m.space(200.0), m.space(320.0))
 }
 
+/// One row of the menu drawer.
+pub struct MenuItem {
+    pub label: &'static str,
+    pub action: Action,
+    /// Its work is under way; drawn with a spinner.
+    pub busy: bool,
+}
+
 /// The menu drawer: a list down the left edge over a dimmed page, sliding
 /// in and out. `focus` is `None` while it is closed, when this only draws
 /// the tail of the closing animation.
@@ -1804,7 +1812,7 @@ pub fn drawer(
     ctx: &egui::Context,
     m: &Metrics,
     screen: Rect,
-    items: &[(&str, Action)],
+    items: &[MenuItem],
     focus: Option<usize>,
     actions: &mut Vec<Action>,
 ) {
@@ -1839,7 +1847,7 @@ pub fn drawer(
             let pad = m.space(16.0);
             let mut cursor = panel.min.y + m.header_height;
             let row_height = m.space(44.0);
-            for (index, (label, action)) in items.iter().enumerate() {
+            for (index, item) in items.iter().enumerate() {
                 let row =
                     Rect::from_min_size(egui::pos2(panel.min.x, cursor), vec2(width, row_height));
                 let response = ui.allocate_rect(row, Sense::click());
@@ -1855,16 +1863,29 @@ pub fn drawer(
                         ACCENT,
                     );
                 }
-                ui.painter().text(
+                let text = ui.painter().text(
                     egui::pos2(row.min.x + pad + m.space(4.0), row.center().y),
                     egui::Align2::LEFT_CENTER,
-                    label,
+                    item.label,
                     bold(m.button),
                     if focused { TEXT } else { DIM },
                 );
+                if item.busy {
+                    let size = m.space(18.0);
+                    let spinner = Rect::from_center_size(
+                        egui::pos2(text.right() + m.space(9.0) + size / 2.0, row.center().y),
+                        vec2(size, size),
+                    );
+                    egui::Spinner::new()
+                        .size(size)
+                        .color(DIM)
+                        .paint_at(ui, spinner);
+                }
+                // A click is a pick, as Confirm is, so the same rows keep
+                // the drawer open.
                 if response.clicked() {
-                    actions.push(Action::Back);
-                    actions.push(action.clone());
+                    actions.push(Action::MenuFocus(index));
+                    actions.push(Action::Activate);
                 }
                 cursor += row_height;
             }

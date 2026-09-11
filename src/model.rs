@@ -371,6 +371,8 @@ pub enum Action {
     },
     /// Ask butler for updates now and report what it found.
     CheckUpdates,
+    /// Refetch the owned list and collections from itch.io.
+    RefreshLibrary,
     Uninstall {
         cave_id: String,
     },

@@ -87,6 +87,9 @@ pub enum Command {
     },
     /// Check for updates now, on the user's request, and say what came of it.
     CheckUpdates,
+    /// Refetch the owned list and collections whether or not butler thinks
+    /// its cache is stale, and check for updates on the way.
+    RefreshLibrary,
     /// The user's pick for a [`Event::Prompt`], or `None` when dismissed.
     Answer {
         prompt: u64,
@@ -549,6 +552,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 );
             }
             Ok(Command::QuitGame { cave_id }) => launches.quit(&cave_id),
+            Ok(Command::RefreshLibrary) => {
+                sync.stale.store(true, Ordering::Relaxed);
+                sync.collections_stale.store(true, Ordering::Relaxed);
+                next_update_check = Instant::now() + UPDATE_EVERY;
+                emit.status("Refreshing library");
+                sync.spawn(&link, emit);
+            }
             Ok(Command::CheckUpdates) => {
                 next_update_check = Instant::now() + UPDATE_EVERY;
                 let prompts = prompts.clone();

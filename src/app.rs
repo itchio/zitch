@@ -112,6 +112,8 @@ pub struct App {
     handheld: bool,
     /// An update check the user asked for is still running.
     checking_updates: bool,
+    /// A library refresh the user asked for is still running.
+    refreshing: bool,
     minimize_while_playing: bool,
     /// For window commands raised from events, outside a frame.
     ctx: egui::Context,
@@ -276,6 +278,7 @@ impl App {
             low_spec,
             handheld: false,
             checking_updates: false,
+            refreshing: false,
             minimize_while_playing,
             ctx: ctx.clone(),
         }
@@ -574,9 +577,10 @@ impl App {
                 }
                 Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
                 Action::Activate => {
-                    if let Some((_, action)) = items.into_iter().nth(focus) {
-                        // Quit keeps the drawer in place under the overlay.
-                        if !matches!(action, Action::Quit) {
+                    if let Some(action) = items.into_iter().nth(focus).map(|item| item.action) {
+                        // Quit keeps the drawer in place under the overlay;
+                        // a refresh keeps it to show its progress.
+                        if !matches!(action, Action::Quit | Action::RefreshLibrary) {
                             self.menu = None;
                         }
                         self.actions.push(action);
@@ -584,6 +588,7 @@ impl App {
                 }
                 Action::Back | Action::Menu => self.menu = None,
                 Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
+                Action::RefreshLibrary => self.refresh_library(),
                 _ => {}
             }
             return;
@@ -739,6 +744,7 @@ impl App {
                 }
             }
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
+            Action::RefreshLibrary => self.refresh_library(),
             Action::CheckUpdates => {
                 if self.online && !self.checking_updates {
                     self.checking_updates = true;
@@ -1252,6 +1258,7 @@ impl App {
                 Event::Status(text) => self.status = text,
                 Event::SignedIn(profile) => self.profile = Some(profile),
                 Event::OwnedGames(games) => {
+                    self.refreshing = false;
                     self.owned = Loadable::Loaded(games);
                     self.rebuild_catalog();
                     self.rebuild_sections();
@@ -1389,7 +1396,12 @@ impl App {
                         .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                Event::Online(online) => self.online = online,
+                Event::Online(online) => {
+                    self.online = online;
+                    if !online {
+                        self.refreshing = false;
+                    }
+                }
                 Event::Prompt(prompt) => {
                     if self.prompt.is_some() {
                         self.prompt_queue.push_back(prompt);
@@ -1408,7 +1420,10 @@ impl App {
                         self.error = Some(format!("Uninstall failed: {error}"));
                     }
                 }
-                Event::SyncFailed(error) => log::warn!("sync: {error}"),
+                Event::SyncFailed(error) => {
+                    self.refreshing = false;
+                    log::warn!("sync: {error}");
+                }
                 Event::CollectionsFailed(error) => {
                     log::error!("loading collections: {error}");
                     if self.collections.get().is_none() {
@@ -1580,9 +1595,31 @@ impl App {
         rows
     }
 
+    fn refresh_library(&mut self) {
+        if self.online && !self.refreshing {
+            self.refreshing = true;
+            self.backend.send(Command::RefreshLibrary);
+        }
+    }
+
     /// What the menu drawer offers, top to bottom.
-    fn menu_items(&self) -> Vec<(&'static str, Action)> {
-        vec![("Quit", Action::Quit)]
+    fn menu_items(&self) -> Vec<ui::MenuItem> {
+        vec![
+            ui::MenuItem {
+                label: if self.refreshing {
+                    "Refreshing…"
+                } else {
+                    "Refresh library"
+                },
+                action: Action::RefreshLibrary,
+                busy: self.refreshing,
+            },
+            ui::MenuItem {
+                label: "Quit",
+                action: Action::Quit,
+                busy: false,
+            },
+        ]
     }
 
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
@@ -1592,8 +1629,8 @@ impl App {
             if items.len() > 1 {
                 hints.push((vec![Glyph::Navigate], "Choose".to_string()));
             }
-            if let Some((label, _)) = items.get(focus) {
-                hints.push((vec![Glyph::Confirm], label.to_string()));
+            if let Some(item) = items.get(focus) {
+                hints.push((vec![Glyph::Confirm], item.label.to_string()));
             }
             hints.push((vec![Glyph::Back], "Close".to_string()));
             return hints;
