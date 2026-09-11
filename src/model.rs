@@ -99,6 +99,9 @@ pub struct Prompt {
     /// The choice drawn as the primary button: the expected or safe answer
     /// to a question. A pick from a list of equals has none.
     pub primary: Option<usize>,
+    /// The choices stand in a column stepped with Up and Down, rather
+    /// than a row stepped with Left and Right.
+    pub stacked: bool,
 }
 
 /// Which part of the library the main row shows.

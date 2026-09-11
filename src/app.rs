@@ -525,6 +525,7 @@ impl App {
                         .collect(),
                     focus: 0,
                     primary: None,
+                    stacked: true,
                 },
                 None => Prompt {
                     id: 0,
@@ -533,18 +534,26 @@ impl App {
                     choices: vec!["Accept".into(), "Decline".into()],
                     focus: 0,
                     primary: Some(0),
+                    stacked: false,
                 },
             });
             return;
         }
         if let Some(prompt) = self.prompt.as_mut() {
             match action {
-                // Choices wrap onto lines, so both axes step through them.
-                Action::MoveFocus(Direction::Left | Direction::Up) => {
-                    prompt.focus = prompt.focus.saturating_sub(1)
-                }
-                Action::MoveFocus(Direction::Right | Direction::Down) => {
-                    prompt.focus = (prompt.focus + 1).min(prompt.choices.len().saturating_sub(1))
+                Action::MoveFocus(direction) => {
+                    let last = prompt.choices.len().saturating_sub(1);
+                    match (prompt.stacked, direction) {
+                        (true, Direction::Up) | (false, Direction::Left) => {
+                            prompt.focus = prompt.focus.saturating_sub(1)
+                        }
+                        (true, Direction::Down) | (false, Direction::Right) => {
+                            prompt.focus = (prompt.focus + 1).min(last)
+                        }
+                        (_, Direction::Home) => prompt.focus = 0,
+                        (_, Direction::End) => prompt.focus = last,
+                        _ => {}
+                    }
                 }
                 Action::PromptFocus(index) if index < prompt.choices.len() => prompt.focus = index,
                 Action::Activate => {
@@ -1658,7 +1667,12 @@ impl App {
         if let Some(prompt) = &self.prompt {
             let mut hints = Vec::new();
             if prompt.choices.len() > 1 {
-                hints.push((vec![Glyph::NavigateHorizontal], "Choose".to_string()));
+                let glyph = if prompt.stacked {
+                    Glyph::NavigateVertical
+                } else {
+                    Glyph::NavigateHorizontal
+                };
+                hints.push((vec![glyph], "Choose".to_string()));
             }
             if let Some(choice) = prompt.choices.get(prompt.focus) {
                 hints.push((vec![Glyph::Confirm], choice.clone()));

@@ -1761,7 +1761,7 @@ pub fn prompt(
                         .show(ui, |ui| {
                             // Room for the focus ring, painted outside the pill.
                             ui.add_space(m.ring);
-                            ui.horizontal_wrapped(|ui| {
+                            let choices = |ui: &mut Ui| {
                                 ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
                                 for (index, label) in prompt.choices.iter().enumerate() {
                                     let focused = index == prompt.focus;
@@ -1782,7 +1782,12 @@ pub fn prompt(
                                         });
                                     }
                                 }
-                            });
+                            };
+                            if prompt.stacked {
+                                ui.vertical(choices);
+                            } else {
+                                ui.horizontal_wrapped(choices);
+                            }
                             ui.add_space(m.ring);
                         });
                 });

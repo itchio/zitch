@@ -781,15 +781,16 @@ struct Prompts {
 }
 
 impl Prompts {
-    /// Shows a question and waits for the answer, with the first choice as
-    /// the primary one. `None` means dismissed, or the interface went away.
+    /// Shows a question and waits for the answer: a row of choices with
+    /// the first as the primary one. `None` means dismissed, or the
+    /// interface went away.
     fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, Some(0))
+        self.show(emit, title, body, choices, Some(0), false)
     }
 
-    /// Shows a pick between equals, none drawn as primary.
+    /// Shows a pick between equals: a column, none drawn as primary.
     fn pick(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, None)
+        self.show(emit, title, body, choices, None, true)
     }
 
     fn show(
@@ -799,6 +800,7 @@ impl Prompts {
         body: &str,
         choices: &[&str],
         primary: Option<usize>,
+        stacked: bool,
     ) -> Option<usize> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel();
@@ -813,6 +815,7 @@ impl Prompts {
             choices: choices.iter().map(|c| c.to_string()).collect(),
             focus: 0,
             primary,
+            stacked,
         }));
         let choice = rx.recv().ok().flatten();
         self.waiting
