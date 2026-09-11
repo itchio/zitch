@@ -1755,6 +1755,7 @@ pub fn prompt(
                     // the one cue that the list goes on below.
                     egui::ScrollArea::vertical()
                         .id_salt("choices")
+                        .auto_shrink([false, true])
                         .max_height((budget - used).max(m.space(60.0)))
                         .scroll_bar_visibility(scroll_bar(ui, true))
                         .show(ui, |ui| {
