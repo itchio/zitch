@@ -1533,8 +1533,6 @@ pub fn toolbar(
     let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = m.space(10.0);
-        // Room for the focus ring, which is painted outside the controls.
-        ui.add_space(m.ring);
         let mut first = 0;
         for control in controls {
             let local = focused
