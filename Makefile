@@ -78,7 +78,7 @@ clean:
 # --- Handheld (RG35XX H running muOS) ---------------------------------------
 # Cross-compiled with the aarch64-linux-gnu-gcc package against the
 # firmware's own SDL2, and pushed over ssh into the muOS Applications menu.
-HANDHELD ?= root@192.168.4.107
+HANDHELD ?= root@192.168.4.121
 HANDHELD_TARGET = aarch64-unknown-linux-gnu
 HANDHELD_APP = /mnt/mmc/MUOS/application/zitch
 SYSROOT = target/handheld-sysroot/lib

@@ -7,7 +7,7 @@ against the SDL2 that ships with the firmware. Everything else is static.
 ## Setup
 
 - ssh access to the device as root. The Makefile defaults to
-  `root@192.168.4.107`, override with `HANDHELD=root@<ip>`.
+  `root@192.168.4.121`, override with `HANDHELD=root@<ip>`.
 - `aarch64-linux-gnu-gcc` and a rustup toolchain with the
   `aarch64-unknown-linux-gnu` target. `CARGO_CROSS` in the Makefile points at
   `~/.cargo/bin/cargo +stable`, change it if rustup is your system cargo.
@@ -43,22 +43,43 @@ are in `home/.config/zitch` in that folder, covers in `home/.cache/zitch`.
 `mux_launch.sh` reads extra flags from an `args` file next to it (one line,
 no quotes). `handheld-shot` writes and removes it.
 
-## Playing ROMs
+## Running games
 
-The device runs homebrew ROMs, not Linux builds, so on muOS zitch judges an
-upload by its file name (`.nes`, `.gb`, `.gbc`, `.gba`, `.md`, `.prg`/`.d64`,
-`.adf`, `.z64`) instead of by itch's platform tags, and every game gets an
-Install button. Play finds the ROM in the install folder and launches it
-the way the muOS menu does: `src/muos.rs` writes `/tmp/rom_go`,
-`/tmp/gov_go` and `/tmp/flt_go`, runs `/opt/muos/script/mux/launch.sh`,
-and waits for RetroArch to exit. The core per system is the firmware's
-`default=` from `/opt/muos/share/info/assign/<system>/global.ini`.
+The device runs ROMs and engine files, not Linux builds. On muOS zitch
+judges an upload by its file name instead of itch's platform tags, and
+takes an archive with no platform tags too, since that is how most
+uploads arrive; butler unpacks it and Play looks inside the install
+folder (`src/muos.rs`). Every game gets an Install button. Bare files
+butler has no installer for (`.nes`, `.gba`, ...) are queued with
+`ignoreInstallers` so they install as a copy.
 
-While the game runs the SDL host stops drawing and drops controller input
-(`--minimize-while-playing`, set in `mux_launch.sh`). On return it draws
-two throwaway frames first: RetroArch overwrote the framebuffer and Mali's
-transaction elimination would otherwise skip every tile the interface
-didn't change, leaving the game's last frame showing through.
+Each runtime below is launched without zitch's HOME and XDG variables, or
+it starts with the app's config dir instead of the firmware's. The muOS
+panic combo (R2 + Select + B) kills the process named in
+`/opt/muos/config/system/foreground_process`; zitch names the game there
+while it runs and itself again after.
+
+### ROMs (RetroArch)
+
+Files: `.nes`, `.sfc`/`.smc`, `.gb`, `.gbc`, `.gba`, `.md`/`.gen`,
+`.prg`/`.d64`/`.crt` (C64), `.adf`/`.hdf` (Amiga), `.z64`/`.n64`.
+
+Launched the way the muOS menu launches one: write `/tmp/rom_go`,
+`/tmp/gov_go` and `/tmp/flt_go`, run `/opt/muos/script/mux/launch.sh`,
+wait for RetroArch to exit. The core per system is the firmware's
+`default=` from `/opt/muos/share/info/assign/<system>/global.ini`. The
+script always exits 1 (its last line is a Discord check), so its status
+is ignored. Quit with Menu held + Start.
+
+### LÖVE
+
+Files: `.love`, or a folder with `main.lua` at its root.
+
+Runs in the firmware's LÖVE 11.5 at
+`/opt/muos/share/application/Moonlight/love` with its `libs` on
+`LD_LIBRARY_PATH`. The game's own pad handling applies; there is no
+keyboard mapping helper (Moonlight runs `gptokeyb2` for its GUI). Quit
+with the game's own quit or the panic combo.
 
 ## Sign in
 

@@ -1,8 +1,8 @@
-//! ROMs on muOS. The handheld firmware ships RetroArch and a core for
-//! each system it knows; a game there is an upload whose file is a ROM,
-//! not a Linux binary. This module tells the two apart by file name and
-//! runs a ROM the way the firmware's own menu does: write the launch
-//! files it reads, run its launch script, wait for the emulator to exit.
+//! Games on muOS. The handheld firmware ships RetroArch with a core for
+//! each system it knows, and a LÖVE runtime; a game there is a ROM or a
+//! `.love`, not a Linux binary. This module tells them apart by file name
+//! and runs them the way the firmware's own menu does: a ROM through its
+//! launch script and RetroArch, a `.love` through its LÖVE binary.
 //!
 //! Nothing here is compiled out on other systems; [`available`] is a
 //! runtime check for the firmware's script, so the desktop build simply
@@ -22,8 +22,62 @@ const GOV_GO: &str = "/tmp/gov_go";
 const FLT_GO: &str = "/tmp/flt_go";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
-/// How deep to look for a ROM inside an install folder.
+/// How deep to look inside an install folder.
 const SEARCH_DEPTH: usize = 3;
+/// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
+/// The app launcher set it to zitch; while a game has the screen it must
+/// name the game, or the combo kills zitch under it and orphans the game.
+const FOREGROUND_PROCESS: &str = "/opt/muos/config/system/foreground_process";
+/// The firmware's LÖVE 11.5, shipped for its Moonlight client. The binary
+/// links `libs/liblove-11.5.so` and the system SDL2.
+const LOVE_DIR: &str = "/opt/muos/share/application/Moonlight";
+
+/// Something in an install folder the firmware can run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Content {
+    Rom {
+        path: PathBuf,
+        system: System,
+    },
+    /// A `.love` file, or a folder with `main.lua` at its root.
+    Love {
+        path: PathBuf,
+    },
+}
+
+impl Content {
+    /// What a file is, by name, if the firmware can run it.
+    pub fn for_file(path: &Path) -> Option<Content> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        if ext == "love" {
+            return Some(Content::Love {
+                path: path.to_path_buf(),
+            });
+        }
+        System::for_file(path).map(|system| Content::Rom {
+            path: path.to_path_buf(),
+            system,
+        })
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Content::Rom { system, .. } => system.label(),
+            Content::Love { .. } => "LÖVE",
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Content::Rom { path, .. } | Content::Love { path } => path,
+        }
+    }
+}
+
+/// Whether the firmware can run a file with this name.
+pub fn runs_here(path: &Path) -> bool {
+    Content::for_file(path).is_some()
+}
 
 /// An emulated system the firmware has a core for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,17 +163,22 @@ pub fn available() -> bool {
     *AVAILABLE.get_or_init(|| Path::new(LAUNCH_SCRIPT).exists())
 }
 
-/// The first ROM in an install folder, if any file in it is one.
-pub fn find_rom(folder: &Path) -> Option<(PathBuf, System)> {
-    fn walk(dir: &Path, depth: usize) -> Option<(PathBuf, System)> {
+/// The first thing in an install folder the firmware can run.
+pub fn find_content(folder: &Path) -> Option<Content> {
+    fn walk(dir: &Path, depth: usize) -> Option<Content> {
+        if dir.join("main.lua").is_file() {
+            return Some(Content::Love {
+                path: dir.to_path_buf(),
+            });
+        }
         let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in &entries {
             let path = entry.path();
             if path.is_file()
-                && let Some(system) = System::for_file(&path)
+                && let Some(content) = Content::for_file(&path)
             {
-                return Some((path, system));
+                return Some(content);
             }
         }
         if depth == 0 {
@@ -134,9 +193,55 @@ pub fn find_rom(folder: &Path) -> Option<(PathBuf, System)> {
     walk(folder, SEARCH_DEPTH)
 }
 
-/// Runs `rom` in the firmware's emulator for `system` and returns when it
-/// exits. `name` is what the firmware shows in its overlays and history.
-pub fn launch(name: &str, system: System, rom: &Path) -> Result<()> {
+/// Runs the content and returns when it exits. `name` is what the
+/// firmware shows in its overlays and history.
+pub fn launch(name: &str, content: &Content) -> Result<()> {
+    log::info!(
+        "launching {} as {}",
+        content.path().display(),
+        content.label()
+    );
+    let result = match content {
+        Content::Rom { path, system } => launch_rom(name, *system, path),
+        Content::Love { path } => {
+            set_foreground("love");
+            launch_love(path)
+        }
+    };
+    // RetroArch's launcher script names itself here and never puts the
+    // app back.
+    set_foreground("zitch");
+    result
+}
+
+fn set_foreground(process: &str) {
+    if let Err(error) = std::fs::write(FOREGROUND_PROCESS, process) {
+        log::warn!("setting {FOREGROUND_PROCESS}: {error}");
+    }
+}
+
+/// Runs a `.love` (or a folder) in the firmware's LÖVE. Its own SDL
+/// window takes the screen, like RetroArch's.
+fn launch_love(path: &Path) -> Result<()> {
+    let dir = Path::new(LOVE_DIR);
+    let status = Command::new(dir.join("love"))
+        .arg(path)
+        .current_dir(dir)
+        .env("LD_LIBRARY_PATH", dir.join("libs"))
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .status()
+        .with_context(|| format!("running {}", dir.join("love").display()))?;
+    if !status.success() {
+        bail!("love exited with {status}");
+    }
+    Ok(())
+}
+
+/// Runs `rom` in the firmware's emulator for `system`.
+fn launch_rom(name: &str, system: System, rom: &Path) -> Result<()> {
     let (assign, launcher, core) = system.assignment();
     let dir = rom
         .parent()
@@ -153,11 +258,6 @@ pub fn launch(name: &str, system: System, rom: &Path) -> Result<()> {
     let governor = std::fs::read_to_string(DEFAULT_GOVERNOR).unwrap_or_else(|_| "ondemand".into());
     std::fs::write(GOV_GO, governor.trim()).with_context(|| format!("writing {GOV_GO}"))?;
     std::fs::write(FLT_GO, "").with_context(|| format!("writing {FLT_GO}"))?;
-    log::info!(
-        "launching {} as {} through {LAUNCH_SCRIPT}",
-        rom.display(),
-        system.label()
-    );
     // The app's own config and cache live next to its binary (see
     // mux_launch.sh); the emulator has to find the firmware's instead, or
     // it starts with no button mappings.
@@ -211,9 +311,25 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(dir.join("manual.pdf"), b"").unwrap();
         std::fs::write(nested.join("game.gba"), b"").unwrap();
-        let found = find_rom(&dir).unwrap();
-        assert_eq!(found.1, System::GameBoyAdvance);
-        assert_eq!(found.0, nested.join("game.gba"));
+        assert_eq!(
+            find_content(&dir),
+            Some(Content::Rom {
+                path: nested.join("game.gba"),
+                system: System::GameBoyAdvance
+            })
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn love_by_file_or_by_folder() {
+        assert!(runs_here(Path::new("x-moon-love11.5.love")));
+        assert!(!runs_here(Path::new("xmoon-win32.zip")));
+        let dir = std::env::temp_dir().join(format!("zitch-love-{}", std::process::id()));
+        let game = dir.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("main.lua"), b"").unwrap();
+        assert_eq!(find_content(&dir), Some(Content::Love { path: game }));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

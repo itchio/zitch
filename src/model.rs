@@ -143,14 +143,32 @@ pub fn playable_here(game: &Game) -> bool {
     crate::muos::available() || runs_here(&game.platforms)
 }
 
-/// Whether an upload is built for this computer: a ROM for one of the
-/// firmware's emulators on muOS, an upload tagged for the OS elsewhere.
+/// Whether an upload is built for this computer: on muOS a ROM for one of
+/// the firmware's emulators or a `.love`, elsewhere an upload tagged for
+/// the OS.
 pub fn upload_runs_here(upload: &Upload) -> bool {
     if crate::muos::available() {
-        crate::muos::System::for_file(std::path::Path::new(&upload.filename)).is_some()
+        let path = std::path::Path::new(&upload.filename);
+        // An archive can hold anything; what it holds is only known once
+        // butler has unpacked it. One tagged for another OS is not worth
+        // the download, one with no tags (how ROM and .love zips arrive)
+        // is.
+        let foreign = (upload.platforms.windows.is_some() || upload.platforms.osx.is_some())
+            && upload.platforms.linux.is_none();
+        crate::muos::runs_here(path) || (is_archive(path) && !foreign)
     } else {
         runs_here(&upload.platforms)
     }
+}
+
+/// The archive types butler unpacks on install.
+fn is_archive(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz"
+        )
+    })
 }
 
 fn runs_here(p: &Platforms) -> bool {
