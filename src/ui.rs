@@ -1787,6 +1787,15 @@ pub fn prompt(
         });
 }
 
+/// How far the drawer has slid in, 0 to 1, animating toward `open`.
+fn drawer_open(ctx: &egui::Context, open: bool) -> f32 {
+    ctx.animate_bool_with_time(egui::Id::new("drawer-open"), open, 0.15)
+}
+
+fn drawer_width(m: &Metrics, screen: Rect) -> f32 {
+    (screen.width() * 0.34).clamp(m.space(200.0), m.space(320.0))
+}
+
 /// The menu drawer: a list down the left edge over a dimmed page, sliding
 /// in and out. `focus` is `None` while it is closed, when this only draws
 /// the tail of the closing animation.
@@ -1798,11 +1807,11 @@ pub fn drawer(
     focus: Option<usize>,
     actions: &mut Vec<Action>,
 ) {
-    let open = ctx.animate_bool_with_time(egui::Id::new("drawer-open"), focus.is_some(), 0.15);
+    let open = drawer_open(ctx, focus.is_some());
     if open <= 0.0 {
         return;
     }
-    let width = (screen.width() * 0.34).clamp(m.space(200.0), m.space(320.0));
+    let width = drawer_width(m, screen);
     egui::Area::new(egui::Id::new("drawer-dim"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
@@ -1885,7 +1894,8 @@ pub fn quitting(ctx: &egui::Context, m: &Metrics, screen: Rect) {
 /// The hint bar along the bottom: a glyph and a word for each thing the
 /// current page lets the user do.
 /// `raised` paints the hints above any modal's dim, so they stay readable
-/// while a dialog names them; the bar's own fill stays under it.
+/// while a dialog names them; the bar's own fill stays under it. With the
+/// `drawer` open they line up against the right edge, clear of it.
 pub fn footer(
     ui: &mut Ui,
     m: &Metrics,
@@ -1893,6 +1903,7 @@ pub fn footer(
     mode: InputMode,
     hints: &[(Vec<Glyph>, String)],
     raised: bool,
+    drawer: bool,
 ) {
     egui::Panel::bottom("footer")
         .resizable(false)
@@ -1905,44 +1916,67 @@ pub fn footer(
         .show(ui, |ui| {
             if raised {
                 let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("footer-hints"));
-                let mut child = ui.new_child(
-                    egui::UiBuilder::new()
-                        .layer_id(layer)
-                        .max_rect(ui.available_rect_before_wrap()),
-                );
-                footer_hints(&mut child, m, glyphs, mode, hints);
+                let rect = ui.available_rect_before_wrap();
+                let mut child = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(rect));
+                footer_hints(&mut child, m, glyphs, mode, hints, drawer);
                 ui.allocate_rect(child.min_rect(), Sense::hover());
             } else {
-                footer_hints(ui, m, glyphs, mode, hints);
+                footer_hints(ui, m, glyphs, mode, hints, false);
             }
         });
 }
 
+/// Right alignment packs the hints against the far edge; they still read
+/// left to right.
 fn footer_hints(
     ui: &mut Ui,
     m: &Metrics,
     glyphs: &Glyphs,
     mode: InputMode,
     hints: &[(Vec<Glyph>, String)],
+    right_aligned: bool,
 ) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = m.space(8.0);
-        for (keys, label) in hints {
-            for glyph in keys {
-                if let Some(texture) = glyphs.get(mode, *glyph) {
-                    let size = m.icon(22.0);
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                            .fit_to_exact_size(vec2(size, size)),
-                    );
-                }
-            }
-            ui.label(
-                egui::RichText::new(label)
-                    .font(FontId::proportional(m.caption))
-                    .color(DIM),
+    let glyph = |ui: &mut Ui, glyph: Glyph| {
+        if let Some(texture) = glyphs.get(mode, glyph) {
+            let size = m.icon(22.0);
+            ui.add(
+                egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                    .fit_to_exact_size(vec2(size, size)),
             );
-            ui.add_space(m.space(14.0));
+        }
+    };
+    let label = |ui: &mut Ui, label: &str| {
+        ui.label(
+            egui::RichText::new(label)
+                .font(FontId::proportional(m.caption))
+                .color(DIM),
+        );
+    };
+    let layout = if right_aligned {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.with_layout(layout, |ui| {
+        ui.spacing_mut().item_spacing.x = m.space(8.0);
+        if right_aligned {
+            // Laid from the right, so the last hint goes first and each
+            // hint's label before its glyphs.
+            for (keys, text) in hints.iter().rev() {
+                label(ui, text);
+                for key in keys.iter().rev() {
+                    glyph(ui, *key);
+                }
+                ui.add_space(m.space(14.0));
+            }
+        } else {
+            for (keys, text) in hints {
+                for key in keys {
+                    glyph(ui, *key);
+                }
+                label(ui, text);
+                ui.add_space(m.space(14.0));
+            }
         }
     });
 }

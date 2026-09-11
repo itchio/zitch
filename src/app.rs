@@ -1772,7 +1772,8 @@ impl App {
                 &self.glyphs,
                 self.input_mode,
                 &hints,
-                self.prompt.is_some(),
+                self.prompt.is_some() || self.menu.is_some(),
+                self.menu.is_some(),
             );
         }
         let page = egui::CentralPanel::default()
