@@ -103,6 +103,8 @@ pub struct App {
     /// Drawn for a handheld, which has no keyboard: the search box stays
     /// hidden until there is an on-screen one to type into.
     handheld: bool,
+    /// An update check the user asked for is still running.
+    checking_updates: bool,
     minimize_while_playing: bool,
     /// For window commands raised from events, outside a frame.
     ctx: egui::Context,
@@ -258,6 +260,7 @@ impl App {
             emulate,
             low_spec,
             handheld: false,
+            checking_updates: false,
             minimize_while_playing,
             ctx: ctx.clone(),
         }
@@ -474,8 +477,13 @@ impl App {
                     }
                     Tab::Downloads => {
                         let rows = self.download_rows();
-                        self.downloads_focus =
-                            step_download_focus(self.downloads_focus_in(&rows), direction, &rows);
+                        let toolbar = self.downloads_toolbar(&rows).len();
+                        self.downloads_focus = step_download_focus(
+                            self.downloads_focus_in(&rows),
+                            direction,
+                            &rows,
+                            toolbar,
+                        );
                     }
                 },
                 Page::Game { id, button } => {
@@ -533,7 +541,14 @@ impl App {
                     Tab::Downloads => {
                         let rows = self.download_rows();
                         match self.downloads_focus_in(&rows) {
-                            ui::DownloadFocus::ClearAll => self.actions.push(Action::ClearFinished),
+                            ui::DownloadFocus::Toolbar(index) => {
+                                let toolbar = self.downloads_toolbar(&rows);
+                                if let Some((button, action)) = toolbar.get(index) {
+                                    if !button.busy {
+                                        self.actions.push(action.clone());
+                                    }
+                                }
+                            }
                             ui::DownloadFocus::Row { row, button } => {
                                 if let Some((_, action)) =
                                     rows.get(row).and_then(|r| r.buttons.get(button))
@@ -580,15 +595,15 @@ impl App {
                         !self.collections_installed_only,
                     ));
                 }
-                (true, Tab::Downloads)
-                    if self.downloads.iter().any(|d| d.finished_at.is_some()) =>
-                {
-                    self.actions.push(Action::ClearFinished);
-                }
                 _ => {}
             },
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
-            Action::CheckUpdates => self.backend.send(Command::CheckUpdates),
+            Action::CheckUpdates => {
+                if self.online && !self.checking_updates {
+                    self.checking_updates = true;
+                    self.backend.send(Command::CheckUpdates);
+                }
+            }
             Action::SetCollectionsInstalledOnly(on) => {
                 if self.collections_installed_only != on {
                     self.collections_installed_only = on;
@@ -1184,6 +1199,7 @@ impl App {
                     self.updates.remove(&download.cave_id);
                 }
                 Event::Updates(updates) => {
+                    self.checking_updates = false;
                     self.updates = updates
                         .into_iter()
                         .map(|u| (u.cave_id.clone(), u))
@@ -1271,6 +1287,9 @@ impl App {
                     self.error = Some(format!("Couldn't cancel: {error}"));
                 }
                 Event::Error(message) => {
+                    if message.starts_with("Couldn't check for updates") {
+                        self.checking_updates = false;
+                    }
                     if self.owned.get().is_none() {
                         self.owned = Loadable::Failed(message.clone());
                     }
@@ -1285,15 +1304,45 @@ impl App {
     /// What the footer offers on the current page, in reading order.
     /// The stored focus, clamped to rows that still exist. The queue changes
     /// underneath the focus, so every reader clamps rather than trusting it.
+    /// The buttons above the Downloads list and what they do. Check for
+    /// updates is always there; Clear all only while there is something
+    /// to clear.
+    fn downloads_toolbar(&self, rows: &[ui::DownloadRow<'_>]) -> Vec<(ui::ToolbarButton, Action)> {
+        let mut buttons = vec![(
+            ui::ToolbarButton {
+                label: if self.checking_updates {
+                    "Checking…"
+                } else {
+                    "Check for updates"
+                },
+                busy: self.checking_updates,
+            },
+            Action::CheckUpdates,
+        )];
+        if rows.iter().any(|r| r.finished) {
+            buttons.push((
+                ui::ToolbarButton {
+                    label: "Clear all",
+                    busy: false,
+                },
+                Action::ClearFinished,
+            ));
+        }
+        buttons
+    }
+
     /// The remembered focus, clamped to what the list currently holds: rows
     /// come and go as butler works, and Clear all goes with the last
     /// finished row.
     fn downloads_focus_in(&self, rows: &[ui::DownloadRow<'_>]) -> ui::DownloadFocus {
+        let toolbar = self.downloads_toolbar(rows).len();
         let (row, button) = match self.downloads_focus {
-            ui::DownloadFocus::ClearAll if rows.iter().any(|r| r.finished) => {
-                return ui::DownloadFocus::ClearAll;
+            ui::DownloadFocus::Toolbar(index) => {
+                return ui::DownloadFocus::Toolbar(index.min(toolbar - 1));
             }
-            ui::DownloadFocus::ClearAll => (0, 0),
+            ui::DownloadFocus::Row { .. } if rows.is_empty() => {
+                return ui::DownloadFocus::Toolbar(0);
+            }
             ui::DownloadFocus::Row { row, button } => (row, button),
         };
         let row = row.min(rows.len().saturating_sub(1));
@@ -1429,12 +1478,7 @@ impl App {
 
     /// What the menu drawer offers, top to bottom.
     fn menu_items(&self) -> Vec<(&'static str, Action)> {
-        let mut items = Vec::new();
-        if self.online {
-            items.push(("Check for updates", Action::CheckUpdates));
-        }
-        items.push(("Quit", Action::Quit));
-        items
+        vec![("Quit", Action::Quit)]
     }
 
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
@@ -1493,13 +1537,15 @@ impl App {
                 }
                 Tab::Downloads => {
                     let rows = self.download_rows();
-                    let any_finished = rows.iter().any(|r| r.finished);
+                    let toolbar = self.downloads_toolbar(&rows);
                     let mut hints = Vec::new();
-                    if rows.len() + usize::from(any_finished) > 1 {
+                    if rows.len() + toolbar.len() > 1 {
                         hints.push((vec![Glyph::Navigate], "Browse".to_string()));
                     }
                     let label = match self.downloads_focus_in(&rows) {
-                        ui::DownloadFocus::ClearAll => Some("Clear all"),
+                        ui::DownloadFocus::Toolbar(index) => {
+                            toolbar.get(index).map(|(button, _)| button.label)
+                        }
                         ui::DownloadFocus::Row { row, button } => rows
                             .get(row)
                             .and_then(|r| r.buttons.get(button))
@@ -1507,12 +1553,6 @@ impl App {
                     };
                     if let Some(label) = label {
                         hints.push((vec![Glyph::Confirm], label.to_string()));
-                    }
-                    if any_finished {
-                        hints.push((
-                            vec![Glyph::FilterLeft, Glyph::FilterRight],
-                            "Clear finished".to_string(),
-                        ));
                     }
                     hints.push((vec![Glyph::Back], "Back".to_string()));
                     hints
@@ -1731,6 +1771,28 @@ impl App {
                     });
                 }
                 if self.page.is_library()
+                    && self.tab == Tab::Downloads
+                    && self.owned.get().is_some()
+                {
+                    ui.add_space(m.frame(8.0));
+                    let rows = self.download_rows();
+                    let toolbar = self.downloads_toolbar(&rows);
+                    let buttons: Vec<ui::ToolbarButton> = toolbar
+                        .iter()
+                        .map(|(button, _)| ui::ToolbarButton {
+                            label: button.label,
+                            busy: button.busy,
+                        })
+                        .collect();
+                    let focused = match self.downloads_focus_in(&rows) {
+                        ui::DownloadFocus::Toolbar(index) => Some(index),
+                        ui::DownloadFocus::Row { .. } => None,
+                    };
+                    if let Some(index) = ui::toolbar(ui, &m, &buttons, focused) {
+                        self.actions.push(toolbar[index].1.clone());
+                    }
+                }
+                if self.page.is_library()
                     && self.tab == Tab::Collections
                     && self.collections.get().is_some()
                 {
@@ -1906,34 +1968,32 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// One controller step through the Downloads tab: the rows top to bottom,
-/// with the Clear all pill as a stop of its own just before the first
-/// finished row. `focus` is already clamped to `rows`.
+/// One controller step through the Downloads tab: the toolbar's buttons
+/// left to right on top, then the rows top to bottom. `focus` is already
+/// clamped to `rows` and a toolbar of `toolbar` buttons.
 fn step_download_focus(
     focus: ui::DownloadFocus,
     direction: Direction,
     rows: &[ui::DownloadRow<'_>],
+    toolbar: usize,
 ) -> ui::DownloadFocus {
-    use ui::DownloadFocus::{ClearAll, Row};
-    let first_finished = rows.iter().position(|r| r.finished);
+    use ui::DownloadFocus::{Row, Toolbar};
     let last = rows.len().saturating_sub(1);
     let at_row = |row: usize| Row { row, button: 0 };
     match (focus, direction) {
-        (ClearAll, Direction::Up) => match first_finished {
-            Some(row) if row > 0 => at_row(row - 1),
-            _ => ClearAll,
-        },
-        (ClearAll, Direction::Down) => at_row(first_finished.unwrap_or(0)),
-        (ClearAll, Direction::Home) if first_finished != Some(0) => at_row(0),
-        (ClearAll, Direction::End) => at_row(last),
-        (ClearAll, _) => ClearAll,
-        (Row { row, .. }, Direction::Up) if first_finished == Some(row) => ClearAll,
-        (Row { .. }, Direction::Home) if first_finished == Some(0) => ClearAll,
+        (Toolbar(index), Direction::Left) => Toolbar(index.saturating_sub(1)),
+        (Toolbar(index), Direction::Right) => Toolbar((index + 1).min(toolbar - 1)),
+        (Toolbar(index), Direction::Down) if rows.is_empty() => Toolbar(index),
+        (Toolbar(_), Direction::Down) => at_row(0),
+        (Toolbar(index), Direction::End) if rows.is_empty() => Toolbar(index),
+        (Toolbar(_), Direction::End) => at_row(last),
+        (Toolbar(_), Direction::Home) => Toolbar(0),
+        (Toolbar(index), Direction::Up) => Toolbar(index),
+        (Row { row: 0, .. }, Direction::Up) | (Row { .. }, Direction::Home) => Toolbar(0),
         (Row { row, button }, _) => {
             let row = match direction {
-                Direction::Up => row.saturating_sub(1),
+                Direction::Up => row - 1,
                 Direction::Down => (row + 1).min(last),
-                Direction::Home => 0,
                 Direction::End => last,
                 _ => row,
             };
@@ -1952,7 +2012,7 @@ fn step_download_focus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui::DownloadFocus::{ClearAll, Row};
+    use ui::DownloadFocus::{Row, Toolbar};
 
     fn row(finished: bool) -> ui::DownloadRow<'static> {
         ui::DownloadRow {
@@ -1974,41 +2034,42 @@ mod tests {
     }
 
     #[test]
-    fn clear_all_sits_between_queue_and_finished_rows() {
-        let rows = [row(false), row(false), row(true), row(true)];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows);
-        assert_eq!(step(at(1), Direction::Down), at(2));
-        assert_eq!(step(at(2), Direction::Up), ClearAll);
-        assert_eq!(step(ClearAll, Direction::Up), at(1));
-        assert_eq!(step(ClearAll, Direction::Down), at(2));
-        assert_eq!(step(ClearAll, Direction::Home), at(0));
-        assert_eq!(step(ClearAll, Direction::End), at(3));
-        assert_eq!(step(ClearAll, Direction::Left), ClearAll);
+    fn toolbar_sits_above_the_rows() {
+        let rows = [row(false), row(true)];
+        let step = |focus, direction| step_download_focus(focus, direction, &rows, 2);
         assert_eq!(step(at(1), Direction::Up), at(0));
-        assert_eq!(step(at(3), Direction::Down), at(3));
+        assert_eq!(step(at(0), Direction::Up), Toolbar(0));
+        assert_eq!(step(at(1), Direction::Home), Toolbar(0));
+        assert_eq!(step(Toolbar(0), Direction::Right), Toolbar(1));
+        assert_eq!(step(Toolbar(1), Direction::Right), Toolbar(1));
+        assert_eq!(step(Toolbar(1), Direction::Left), Toolbar(0));
+        assert_eq!(step(Toolbar(1), Direction::Up), Toolbar(1));
+        assert_eq!(step(Toolbar(1), Direction::Down), at(0));
+        assert_eq!(step(Toolbar(1), Direction::End), at(1));
+        assert_eq!(step(at(1), Direction::Down), at(1));
     }
 
     #[test]
-    fn clear_all_is_the_top_when_nothing_is_queued() {
-        let rows = [row(true), row(true)];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows);
-        assert_eq!(step(at(0), Direction::Up), ClearAll);
-        assert_eq!(step(at(1), Direction::Home), ClearAll);
-        assert_eq!(step(ClearAll, Direction::Up), ClearAll);
-        assert_eq!(step(ClearAll, Direction::Home), ClearAll);
-        assert_eq!(step(ClearAll, Direction::Down), at(0));
+    fn toolbar_is_all_there_is_without_rows() {
+        let rows: [ui::DownloadRow<'static>; 0] = [];
+        let step = |focus, direction| step_download_focus(focus, direction, &rows, 1);
+        assert_eq!(step(Toolbar(0), Direction::Down), Toolbar(0));
+        assert_eq!(step(Toolbar(0), Direction::End), Toolbar(0));
+        assert_eq!(step(Toolbar(0), Direction::Right), Toolbar(0));
     }
 
     #[test]
-    fn without_finished_rows_there_is_no_clear_all_stop() {
+    fn row_buttons_step_sideways() {
         let rows = [row(false), row(false)];
-        let step = |focus, direction| step_download_focus(focus, direction, &rows);
-        assert_eq!(step(at(0), Direction::Up), at(0));
+        let step = |focus, direction| step_download_focus(focus, direction, &rows, 1);
         assert_eq!(step(at(0), Direction::Right), Row { row: 0, button: 1 });
         assert_eq!(
             step(Row { row: 0, button: 1 }, Direction::Right),
             Row { row: 0, button: 1 }
         );
-        assert_eq!(step(at(1), Direction::Home), at(0));
+        assert_eq!(
+            step(Row { row: 0, button: 1 }, Direction::Down),
+            Row { row: 1, button: 1 }
+        );
     }
 }

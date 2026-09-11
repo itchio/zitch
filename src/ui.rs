@@ -1383,11 +1383,27 @@ fn status_readout(ui: &mut Ui, m: &Metrics, text: &str) {
 }
 
 fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> egui::Response {
+    pill_with(ui, m, label, focused, primary, false)
+}
+
+/// `busy` puts a spinner before the label and dims it: the button's work
+/// is under way and pressing it again does nothing.
+fn pill_with(
+    ui: &mut Ui,
+    m: &Metrics,
+    label: &str,
+    focused: bool,
+    primary: bool,
+    busy: bool,
+) -> egui::Response {
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_string(), bold(m.button), TEXT);
+    let spinner = if busy { m.space(18.0) } else { 0.0 };
+    let spinner_gap = if busy { m.space(9.0) } else { 0.0 };
+    let content_width = spinner + spinner_gap + galley.size().x;
     let size = vec2(
-        galley.size().x + 2.0 * m.space(20.0),
+        content_width + 2.0 * m.space(20.0),
         galley.size().y.max(m.space(24.0)) + 2.0 * m.space(7.0),
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -1431,7 +1447,9 @@ fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> 
             (SURFACE, BORDER)
         };
         fill_squircle(ui, rect, radii, fill, Stroke::new(border.width, edge));
-        if focused {
+        if busy {
+            DIM
+        } else if focused {
             TEXT
         } else {
             Color32::from_rgb(0xe8, 0xe2, 0xdf)
@@ -1440,9 +1458,71 @@ fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> 
     if focused {
         focus_ring(ui, rect, radii, m);
     }
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, color);
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let left = rect.center().x - content_width / 2.0;
+    if busy {
+        let spinner_rect = Rect::from_center_size(
+            pos2(left + spinner / 2.0, rect.center().y),
+            vec2(spinner, spinner),
+        );
+        egui::Spinner::new()
+            .size(spinner)
+            .color(DIM)
+            .paint_at(ui, spinner_rect);
+    }
+    // Laid out again: a galley's own color wins over the one passed here.
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), bold(m.button), color);
+    ui.painter().galley(
+        pos2(
+            left + spinner + spinner_gap,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    if busy {
+        response
+    } else {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+}
+
+/// A button on the row above the Downloads list.
+pub struct ToolbarButton {
+    pub label: &'static str,
+    /// Its work is under way; drawn with a spinner and inert.
+    pub busy: bool,
+}
+
+/// The row of buttons above the Downloads list. Returns the index of a
+/// clicked button.
+pub fn toolbar(
+    ui: &mut Ui,
+    m: &Metrics,
+    buttons: &[ToolbarButton],
+    focused: Option<usize>,
+) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = m.space(10.0);
+        // Room for the focus ring, which is painted outside the pill.
+        ui.add_space(m.ring);
+        for (index, button) in buttons.iter().enumerate() {
+            let response = pill_with(
+                ui,
+                m,
+                button.label,
+                focused == Some(index),
+                false,
+                button.busy,
+            );
+            if response.clicked() && !button.busy {
+                clicked = Some(index);
+            }
+        }
+    });
+    clicked
 }
 
 /// Short remaining-time text for progress lines.
@@ -2053,9 +2133,9 @@ pub struct DownloadRow<'a> {
 pub enum DownloadFocus {
     /// A button on a row.
     Row { row: usize, button: usize },
-    /// The Clear all pill in the Recent activity heading, reached by going
-    /// up from the first finished row.
-    ClearAll,
+    /// A button on the toolbar above the list, reached by going up from
+    /// the first row.
+    Toolbar(usize),
 }
 
 pub struct DownloadsView<'a> {
@@ -2107,22 +2187,6 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                     ui.horizontal(|ui| {
                         ui.add_space(m.ring);
                         ui.label(egui::RichText::new(title).font(bold(m.section)).color(TEXT));
-                        if row.finished {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(m.ring);
-                                    let focused = view.focus == DownloadFocus::ClearAll;
-                                    let response = pill(ui, m, "Clear all", focused, false);
-                                    if focused {
-                                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
-                                    }
-                                    if response.clicked() {
-                                        actions.push(Action::ClearFinished);
-                                    }
-                                },
-                            );
-                        }
                     });
                 }
                 let focused_row =
