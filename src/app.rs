@@ -100,6 +100,9 @@ pub struct App {
     emulate: Option<(f32, f32)>,
     /// Force the cover policy instead of picking it by screen size.
     low_spec: Option<bool>,
+    /// Drawn for a handheld, which has no keyboard: the search box stays
+    /// hidden until there is an on-screen one to type into.
+    handheld: bool,
     minimize_while_playing: bool,
     /// For window commands raised from events, outside a frame.
     ctx: egui::Context,
@@ -254,6 +257,7 @@ impl App {
             shot,
             emulate,
             low_spec,
+            handheld: false,
             minimize_while_playing,
             ctx: ctx.clone(),
         }
@@ -649,7 +653,7 @@ impl App {
                 }
             }
             Action::FocusSearch => {
-                if self.page.is_library() && self.tab == Tab::Library {
+                if self.page.is_library() && self.tab == Tab::Library && !self.handheld {
                     self.focus_search = true;
                 }
             }
@@ -1455,16 +1459,21 @@ impl App {
         // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page.clone() {
             Page::Library => match self.tab {
-                Tab::Library => vec![
-                    (vec![Glyph::Navigate], "Browse".to_string()),
-                    (vec![Glyph::Confirm], "Open".to_string()),
-                    (
-                        vec![Glyph::FilterLeft, Glyph::FilterRight],
-                        "Filter".to_string(),
-                    ),
-                    (vec![Glyph::Search], "Search".to_string()),
-                    (vec![Glyph::Menu], "Menu".to_string()),
-                ],
+                Tab::Library => {
+                    let mut hints = vec![
+                        (vec![Glyph::Navigate], "Browse".to_string()),
+                        (vec![Glyph::Confirm], "Open".to_string()),
+                        (
+                            vec![Glyph::FilterLeft, Glyph::FilterRight],
+                            "Filter".to_string(),
+                        ),
+                    ];
+                    if !self.handheld {
+                        hints.push((vec![Glyph::Search], "Search".to_string()));
+                    }
+                    hints.push((vec![Glyph::Menu], "Menu".to_string()));
+                    hints
+                }
                 Tab::Collections => {
                     let mut hints = vec![(vec![Glyph::Navigate], "Browse".to_string())];
                     if self.collection_rows.focused_game().is_some() {
@@ -1599,10 +1608,9 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
         let m = ui::Metrics::for_screen(screen);
-        self.covers.set_policy(crate::images::Policy::for_screen(
-            screen.height(),
-            self.low_spec,
-        ));
+        let policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
+        self.handheld = policy.low_spec;
+        self.covers.set_policy(policy);
         if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
             let hints = self.hints();
             ui::footer(ui, &m, &self.glyphs, self.input_mode, &hints);
@@ -1682,6 +1690,9 @@ impl App {
                         {
                             self.actions
                                 .push(Action::SetPlayableOnly(!self.playable_only));
+                        }
+                        if self.handheld {
+                            return;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let id = Self::search_id();
