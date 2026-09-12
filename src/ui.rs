@@ -236,6 +236,10 @@ pub struct Metrics {
     pub tile_width: f32,
     /// Space between tiles in a row.
     pub gap: f32,
+    /// Space between the header's logo, glyphs and tabs. Grows with the
+    /// screen's width rather than the layout scale, so a narrow handheld
+    /// keeps room for the account name at the end of the row.
+    pub strip_gap: f32,
     /// Room around a strip for the focus ring, which is painted outside the
     /// cover and would otherwise be clipped at the strip's edges.
     pub ring: f32,
@@ -269,6 +273,9 @@ impl Metrics {
         let frame = |base: f32| (base * chrome).round();
         let margin = (screen.width() * 0.03).clamp(12.0, 48.0).round();
         let gap = space(14.0);
+        let strip_gap = (screen.width() * 0.017)
+            .clamp(space(8.0), space(18.0))
+            .round();
         let usable = screen.width() - 2.0 * margin;
         let tile_width = space(170.0)
             .min((usable - Self::MIN_COLUMNS * gap) / Self::MIN_COLUMNS)
@@ -280,6 +287,7 @@ impl Metrics {
             margin,
             tile_width,
             gap,
+            strip_gap,
             ring: space(6.0),
             title_height: space(26.0),
             header_height: frame(30.0),
@@ -2189,7 +2197,7 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
             egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                 .fit_to_exact_size(vec2(height * size.x / size.y, height)),
         );
-        ui.add_space(m.space(14.0));
+        ui.add_space(m.strip_gap);
     }
 }
 
@@ -2222,7 +2230,7 @@ pub fn tab_strip(
         row,
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.spacing_mut().item_spacing.x = m.space(18.0);
+            ui.spacing_mut().item_spacing.x = m.strip_gap;
             let text_height = ui.fonts_mut(|f| f.row_height(&bold(m.section)));
             let glyph = |ui: &mut Ui, glyph: Glyph| {
                 if let Some(texture) = glyphs.get(mode, glyph) {
