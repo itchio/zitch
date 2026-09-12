@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -27,6 +27,7 @@ help:
 	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first; see handheld/README.md)"
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
+	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
 	@echo "APP picks the config dir under ~/.config (default $(APP)):"
@@ -84,6 +85,8 @@ HANDHELD_APP = /mnt/mmc/MUOS/application/zitch
 SYSROOT = target/handheld-sysroot/lib
 # The user-local rustup toolchain that carries the aarch64 std.
 CARGO_CROSS ?= $(HOME)/.cargo/bin/cargo +stable
+# Routes a game's statically linked SDL2 into the firmware's; see handheld/README.md.
+SDL_SHIM = target/$(HANDHELD_TARGET)/release/libzitch-sdl.so
 
 # The device's C library, math library, loader and libgcc_s alongside its
 # SDL2, so the binary binds to the symbol versions the device has (the
@@ -104,11 +107,12 @@ handheld-sysroot:
 
 handheld:
 	$(CARGO_CROSS) build --release --target $(HANDHELD_TARGET) --no-default-features --features sdl-host
+	aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o $(SDL_SHIM) handheld/sdl-dynapi.c -ldl
 	@ls -lh target/$(HANDHELD_TARGET)/release/zitch | awk '{print "target/$(HANDHELD_TARGET)/release/zitch: " $$5}'
 
 handheld-deploy: handheld
 	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)'
-	scp -q target/$(HANDHELD_TARGET)/release/zitch handheld/mux_launch.sh $(HANDHELD):$(HANDHELD_APP)/
+	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh $(HANDHELD):$(HANDHELD_APP)/
 
 # Launch through the muOS frontend (which it kills to get the screen, as a
 # menu pick would), wait for the screenshot, fetch it to /tmp/zitch-handheld.png.
@@ -116,6 +120,19 @@ handheld-shot: handheld-deploy
 	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) 'cat > $(HANDHELD_APP)/args; rm -f /tmp/zitch.png; echo $(HANDHELD_APP) > /tmp/app_go; echo app > /tmp/act_go; kill -9 $$(pidof muxfrontend); touch /tmp/safe_quit; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ]; do sleep 0.5; done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(HANDHELD_APP)/args; cat $(HANDHELD_APP)/zitch.log'
 	scp -q $(HANDHELD):/tmp/zitch.png /tmp/zitch-handheld.png
 	@echo /tmp/zitch-handheld.png
+
+# SDL2's jump table order on Linux, which the shim checks a game's stubs
+# against and uses to name the slots that have none.
+handheld-sdl-procs:
+	set -o pipefail; \
+	curl -sSf https://raw.githubusercontent.com/libsdl-org/SDL/SDL2/src/dynapi/SDL_dynapi_procs.h \
+		| aarch64-linux-gnu-gcc -E -P -x c -D__LINUX__=1 -DHAVE_STDIO_H=1 -D'SDL_DYNAPI_PROC(rc,fn,params,args,ret)=fn' - \
+		| grep '^SDL_' \
+		| { printf '/* SDL2'"'"'s jump table order on Linux, from src/dynapi/SDL_dynapi_procs.h\n   on the SDL2 branch. Regenerate with `make handheld-sdl-procs`. */\nstatic const char *const UPSTREAM[] = {\n'; sed 's/.*/    "&",/'; echo '};'; } >handheld/sdl-dynapi-procs.h.new \
+		&& test "$$(grep -c '^    \"SDL_' handheld/sdl-dynapi-procs.h.new)" -ge 800 \
+		&& mv handheld/sdl-dynapi-procs.h.new handheld/sdl-dynapi-procs.h \
+		|| { rm -f handheld/sdl-dynapi-procs.h.new; exit 1; }
+	@grep -c '^    "' handheld/sdl-dynapi-procs.h
 
 # The SDL host on the desktop, for checking it before a device round trip.
 run-sdl: 

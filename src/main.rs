@@ -150,6 +150,7 @@ fn main() -> anyhow::Result<()> {
         // Same layout as the itch app, so a shared config dir shares games.
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),
+        game_env: muos::game_env(),
     };
 
     let script = match cli.screenshot_script.as_deref().map(app::parse_script) {

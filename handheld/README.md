@@ -45,7 +45,8 @@ no quotes). `handheld-shot` writes and removes it.
 
 ## Running games
 
-The device runs ROMs and engine files, not Linux builds. On muOS zitch
+The device runs ROMs and engine files, and Linux builds through the SDL
+shim below. On muOS zitch
 judges an upload by its file name instead of itch's platform tags, and
 takes an archive with no platform tags too, since that is how most
 uploads arrive; butler unpacks it and Play looks inside the install
@@ -80,6 +81,32 @@ Runs in the firmware's LÖVE 11.5 at
 `LD_LIBRARY_PATH`. The game's own pad handling applies; there is no
 keyboard mapping helper (Moonlight runs `gptokeyb2` for its GUI). Quit
 with the game's own quit or the panic combo.
+
+### Linux builds
+
+Native arm64 builds go through butler's launcher as on a desktop, with
+two additions to their environment (`muos::game_env`):
+
+- `SDL_DYNAMIC_API` naming `libzitch-sdl.so`, built from
+  `handheld/sdl-dynapi.c` by `make handheld` and deployed next to the
+  binary. Games carry their own SDL2, built with the X11, Wayland and
+  KMSDRM backends the device lacks, so they can't open the screen. SDL2's
+  dynamic API lets that copy hand every call to another library instead;
+  the shim points it at the firmware's libSDL2, whose `mali` backend can.
+  The firmware library's jump table doesn't match upstream's order, so
+  entries are matched by name: the shim reads each SDL stub in the game
+  to find its slot, checks that against `handheld/sdl-dynapi-procs.h`
+  (`make handheld-sdl-procs` refreshes it from SDL's source), and fills
+  the rest from that list. It refuses a game whose stubs disagree, and a
+  dynamically linked SDL2 asking to be replaced by itself. It opens the
+  firmware's library at `/usr/lib` or `/usr/lib/aarch64-linux-gnu`;
+  `ZITCH_SDL_LIB` names another.
+- `LANG=en_US.UTF-8` when unset. The firmware sets no locale and games
+  read it without checking.
+
+Only an SDL2 built with the dynamic API on (the default) can be routed.
+A game with it off, or on SDL3 or another windowing library, still
+fails to open a display. Quit with the game's own quit.
 
 ## Sign in
 

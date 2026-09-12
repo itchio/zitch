@@ -8,6 +8,7 @@
 //! after a restart, and ordering.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -44,6 +45,9 @@ pub struct Config {
     pub install_dir: PathBuf,
     /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
     pub prereqs_dir: PathBuf,
+    /// Variables for the games butler launches, on top of our own. On
+    /// muOS this is what routes their SDL to the screen (`muos::game_env`).
+    pub game_env: Vec<(String, OsString)>,
 }
 
 pub enum Command {
@@ -281,6 +285,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let link: Link = Arc::new(Mutex::new(Arc::new(Daemon::spawn(
         &config.butler,
         &config.dbpath,
+        &config.game_env,
     )?)));
     let mut client = connect(&link)?;
     emit.status(format!(
@@ -323,7 +328,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         // small device, a crash, a firmware reaping background processes.
         if !current(&link).alive() {
             emit.status("butler exited; restarting");
-            match Daemon::spawn(&config.butler, &config.dbpath) {
+            match Daemon::spawn(&config.butler, &config.dbpath, &config.game_env) {
                 Ok(daemon) => {
                     *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
                     client = connect(&link)?;

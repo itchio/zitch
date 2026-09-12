@@ -8,6 +8,7 @@
 //! runtime check for the firmware's script, so the desktop build simply
 //! never takes these paths.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -31,6 +32,10 @@ const FOREGROUND_PROCESS: &str = "/opt/muos/config/system/foreground_process";
 /// The firmware's LÖVE 11.5, shipped for its Moonlight client. The binary
 /// links `libs/liblove-11.5.so` and the system SDL2.
 const LOVE_DIR: &str = "/opt/muos/share/application/Moonlight";
+
+/// Routes a game's own SDL2 into the firmware's; see handheld/sdl-dynapi.c.
+/// Deployed next to our binary.
+const SDL_SHIM: &str = "libzitch-sdl.so";
 
 /// Something in an install folder the firmware can run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,6 +166,28 @@ impl System {
 pub fn available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| Path::new(LAUNCH_SCRIPT).exists())
+}
+
+/// What the games butler launches need in their environment here: the
+/// SDL shim, and a locale, which the firmware leaves unset and games
+/// read without checking.
+pub fn game_env() -> Vec<(String, OsString)> {
+    if !available() {
+        return Vec::new();
+    }
+    let mut env = Vec::new();
+    let shim = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(SDL_SHIM)))
+        .filter(|path| path.is_file());
+    match shim {
+        Some(shim) => env.push(("SDL_DYNAMIC_API".to_string(), shim.into_os_string())),
+        None => log::warn!("{SDL_SHIM} is missing; Linux builds will not find the screen"),
+    }
+    if std::env::var_os("LANG").is_none() {
+        env.push(("LANG".to_string(), "en_US.UTF-8".into()));
+    }
+    env
 }
 
 /// The first thing in an install folder the firmware can run.
