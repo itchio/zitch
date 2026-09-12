@@ -28,6 +28,8 @@ const SEARCH_DEPTH: usize = 3;
 /// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
 /// The app launcher set it to zitch; while a game has the screen it must
 /// name the game, or the combo kills zitch under it and orphans the game.
+/// A name is looked up with busybox `pgrep -x`, which matches the whole
+/// `argv[0]`, so a process started by path only matches by pid.
 const FOREGROUND_PROCESS: &str = "/opt/muos/config/system/foreground_process";
 /// The firmware's LÖVE 11.5, shipped for its Moonlight client. The binary
 /// links `libs/liblove-11.5.so` and the system SDL2.
@@ -230,10 +232,7 @@ pub fn launch(name: &str, content: &Content) -> Result<()> {
     );
     let result = match content {
         Content::Rom { path, system } => launch_rom(name, *system, path),
-        Content::Love { path } => {
-            set_foreground("love");
-            launch_love(path)
-        }
+        Content::Love { path } => launch_love(path),
     };
     // RetroArch's launcher script names itself here and never puts the
     // app back.
@@ -248,10 +247,11 @@ fn set_foreground(process: &str) {
 }
 
 /// Runs a `.love` (or a folder) in the firmware's LÖVE. Its own SDL
-/// window takes the screen, like RetroArch's.
+/// window takes the screen, like RetroArch's. The panic combo gets its
+/// pid, as there is no launcher script to name it.
 fn launch_love(path: &Path) -> Result<()> {
     let dir = Path::new(LOVE_DIR);
-    let status = Command::new(dir.join("love"))
+    let mut child = Command::new(dir.join("love"))
         .arg(path)
         .current_dir(dir)
         .env("LD_LIBRARY_PATH", dir.join("libs"))
@@ -259,8 +259,12 @@ fn launch_love(path: &Path) -> Result<()> {
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
-        .status()
+        .spawn()
         .with_context(|| format!("running {}", dir.join("love").display()))?;
+    set_foreground(&child.id().to_string());
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for {}", dir.join("love").display()))?;
     if !status.success() {
         bail!("love exited with {status}");
     }
