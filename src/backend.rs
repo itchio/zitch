@@ -599,38 +599,12 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             }
             Ok(Command::CheckUpdates) => {
                 next_update_check = Instant::now() + UPDATE_EVERY;
-                let prompts = prompts.clone();
                 spawn_op(
                     "update-check".into(),
                     Arc::clone(&link),
                     emit.clone(),
                     |error| Event::Error(format!("Couldn't check for updates: {error:#}")),
-                    move |client, emit| {
-                        let updates = check_updates(client, emit)?;
-                        let direct = updates.iter().filter(|u| u.direct).count();
-                        let indirect = updates.len() - direct;
-                        let mut lines = Vec::new();
-                        match direct {
-                            0 => {}
-                            1 => lines.push("1 game has an update.".to_string()),
-                            n => lines.push(format!("{n} games have updates.")),
-                        }
-                        match indirect {
-                            0 => {}
-                            1 => lines.push(
-                                "1 game has a newer upload that may replace it; see its page."
-                                    .to_string(),
-                            ),
-                            n => lines.push(format!(
-                                "{n} games have newer uploads that may replace them; see their pages."
-                            )),
-                        }
-                        if lines.is_empty() {
-                            lines.push("Everything installed is up to date.".to_string());
-                        }
-                        prompts.ask(emit, "Updates", &lines.join("\n"), &["OK"]);
-                        Ok(())
-                    },
+                    move |client, emit| check_updates(client, emit).map(|_| ()),
                 );
             }
             Ok(Command::Update { update }) => {

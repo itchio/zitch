@@ -10,7 +10,7 @@ use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
     Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
-    UserExt, playable_here,
+    UploadExt, UserExt, playable_here,
 };
 use crate::ui;
 
@@ -117,6 +117,9 @@ pub struct App {
     handheld: bool,
     /// An update check the user asked for is still running.
     checking_updates: bool,
+    /// When a check the user asked for last came back with nothing; the
+    /// button says so for a moment.
+    up_to_date_at: Option<Instant>,
     /// A library refresh the user asked for is still running.
     refreshing: bool,
     minimize_while_playing: bool,
@@ -287,6 +290,7 @@ impl App {
             low_spec,
             handheld: false,
             checking_updates: false,
+            up_to_date_at: None,
             refreshing: false,
             minimize_while_playing,
             ctx: ctx.clone(),
@@ -456,6 +460,11 @@ impl App {
             Tab::Downloads => {
                 let (label, busy) = if self.checking_updates {
                     ("Checking…", true)
+                } else if self
+                    .up_to_date_at
+                    .is_some_and(|at| at.elapsed() < Self::UP_TO_DATE_FOR)
+                {
+                    ("Up to date", false)
                 } else {
                     ("Check for updates", false)
                 };
@@ -467,7 +476,24 @@ impl App {
                         action: Action::CheckUpdates,
                     }],
                 );
-                if self.download_rows().iter().any(|r| r.finished) {
+                let rows = self.download_rows();
+                if rows
+                    .iter()
+                    .filter(|r| r.section == ui::DownloadSection::Updates)
+                    .any(|r| r.direct_update)
+                {
+                    push(
+                        ui::ToolbarControl::Button {
+                            label: "Update all",
+                            busy: false,
+                        },
+                        vec![ToolbarStop::new("Update all", Action::UpdateAll)],
+                    );
+                }
+                if rows
+                    .iter()
+                    .any(|r| r.section == ui::DownloadSection::Finished)
+                {
                     push(
                         ui::ToolbarControl::Button {
                             label: "Clear all",
@@ -765,9 +791,15 @@ impl App {
             }
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
             Action::RefreshLibrary => self.refresh_library(),
+            Action::UpdateAll => {
+                for cave_id in self.pending_updates(true) {
+                    self.apply(Action::Update { cave_id });
+                }
+            }
             Action::CheckUpdates => {
                 if self.online && !self.checking_updates {
                     self.checking_updates = true;
+                    self.up_to_date_at = None;
                     self.backend.send(Command::CheckUpdates);
                 }
             }
@@ -953,6 +985,26 @@ impl App {
             .collect()
     }
 
+    /// Caves with an update waiting that nothing is fetching yet, in
+    /// library order; `direct_only` leaves out butler's guesses.
+    fn pending_updates(&self, direct_only: bool) -> Vec<String> {
+        self.caves
+            .iter()
+            .filter(|cave| {
+                self.updates
+                    .get(&cave.id)
+                    .is_some_and(|u| u.direct || !direct_only)
+            })
+            .filter(|cave| {
+                !self
+                    .downloads
+                    .iter()
+                    .any(|d| d.cave_id == cave.id && d.finished_at.is_none())
+            })
+            .map(|cave| cave.id.clone())
+            .collect()
+    }
+
     fn update_for(&self, game_id: i64) -> Option<&GameUpdate> {
         self.caves
             .iter()
@@ -968,7 +1020,7 @@ impl App {
 
     /// Lays the home screen out as carousels, the way the itch app's
     /// Library tab does: what is installed, then what was played last,
-    /// anything with an update, and everything owned.
+    /// and everything owned.
     fn rebuild_sections(&mut self) {
         if self.owned.get().is_none() {
             return;
@@ -1025,16 +1077,6 @@ impl App {
             .take(12)
             .collect();
         sections.extend(self.section(|_| "Recently played".into(), played));
-
-        let updatable = self.updatable();
-        let mut seen = std::collections::HashSet::new();
-        let updates: Vec<i64> = self
-            .caves
-            .iter()
-            .filter_map(|cave| cave.game_id())
-            .filter(|id| updatable.contains(id) && seen.insert(*id))
-            .collect();
-        sections.extend(self.section(|_| "Updates".into(), updates));
 
         // The owned library, one row per kind of thing.
         for kind in Kind::ALL {
@@ -1387,12 +1429,14 @@ impl App {
                     self.updates.remove(&download.cave_id);
                 }
                 Event::Updates(updates) => {
+                    if self.checking_updates && updates.is_empty() {
+                        self.up_to_date_at = Some(Instant::now());
+                    }
                     self.checking_updates = false;
                     self.updates = updates
                         .into_iter()
                         .map(|u| (u.cave_id.clone(), u))
                         .collect();
-                    self.rebuild_sections();
                 }
                 Event::DownloadErrored(download) => {
                     let title = download.game.as_ref().map_or("game", |g| g.title.as_str());
@@ -1535,6 +1579,60 @@ impl App {
         finished.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
 
         let mut rows = Vec::new();
+        if self.online {
+            for cave_id in self.pending_updates(false) {
+                let Some(update) = self.updates.get(&cave_id) else {
+                    continue;
+                };
+                let game = self
+                    .caves
+                    .iter()
+                    .find(|cave| cave.id == cave_id)
+                    .and_then(|cave| cave.game.as_ref())
+                    .or(update.game.as_ref());
+                let title = game.map_or_else(|| "Game".to_string(), |g| g.title.clone());
+                let name = update
+                    .choices
+                    .first()
+                    .and_then(|c| c.upload.as_ref())
+                    .map_or("newer version", UploadExt::name);
+                // Same wording as the game page: a direct update is the
+                // installed upload, newer; an indirect one is a guess.
+                let (detail, label) = if update.direct {
+                    (format!("Update available: {name}"), "Update")
+                } else if update.choices.len() > 1 {
+                    (
+                        format!("{} newer uploads, maybe replacements", update.choices.len()),
+                        "Newer uploads",
+                    )
+                } else {
+                    (
+                        format!("Newer upload, maybe a replacement: {name}"),
+                        "Newer upload",
+                    )
+                };
+                let mut buttons = vec![(label, Action::Update { cave_id })];
+                if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
+                    buttons.push((
+                        "Open",
+                        Action::Open(Page::Game {
+                            id: game.id,
+                            button: 0,
+                        }),
+                    ));
+                }
+                rows.push(ui::DownloadRow {
+                    game,
+                    title,
+                    detail,
+                    progress: None,
+                    failed: false,
+                    section: ui::DownloadSection::Updates,
+                    direct_update: update.direct,
+                    buttons,
+                });
+            }
+        }
         for download in pending {
             let game = download.game.as_ref();
             let game_id = game.map(|g| g.id);
@@ -1578,7 +1676,8 @@ impl App {
                 detail,
                 progress,
                 failed: false,
-                finished: false,
+                section: ui::DownloadSection::Queue,
+                direct_update: false,
                 buttons,
             });
         }
@@ -1633,7 +1732,8 @@ impl App {
                 detail,
                 progress: None,
                 failed,
-                finished: true,
+                section: ui::DownloadSection::Finished,
+                direct_update: false,
                 buttons,
             });
         }
@@ -1798,6 +1898,14 @@ impl App {
             }
         }
         self.handle_events();
+        if let Some(at) = self.up_to_date_at {
+            let left = Self::UP_TO_DATE_FOR.saturating_sub(at.elapsed());
+            if left.is_zero() {
+                self.up_to_date_at = None;
+            } else {
+                ctx.request_repaint_after(left);
+            }
+        }
         let (keys, touches) = ctx.input(|i| {
             (
                 i.events
@@ -1864,6 +1972,8 @@ impl eframe::App for App {
 impl App {
     /// How long a notice stays up; Back dismisses it sooner.
     const NOTICE_FOR: Duration = Duration::from_secs(8);
+    /// How long the update button reports a clean check.
+    const UP_TO_DATE_FOR: Duration = Duration::from_secs(4);
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
@@ -2268,7 +2378,8 @@ mod tests {
             detail: String::new(),
             progress: None,
             failed: false,
-            finished: false,
+            section: ui::DownloadSection::Queue,
+            direct_update: false,
             buttons: vec![
                 ("Retry", Action::CheckUpdates),
                 ("Dismiss", Action::CheckUpdates),

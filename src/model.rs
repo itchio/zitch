@@ -375,7 +375,9 @@ pub enum Action {
     Update {
         cave_id: String,
     },
-    /// Ask butler for updates now and report what it found.
+    /// Queue every direct update butler found.
+    UpdateAll,
+    /// Ask butler for updates now.
     CheckUpdates,
     /// Refetch the owned list and collections from itch.io.
     RefreshLibrary,

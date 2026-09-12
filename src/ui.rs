@@ -2391,9 +2391,32 @@ pub struct DownloadRow<'a> {
     /// 0 to 1 while butler is working on it.
     pub progress: Option<f32>,
     pub failed: bool,
-    /// Listed under Recent activity rather than the queue.
-    pub finished: bool,
+    pub section: DownloadSection,
+    /// An update row whose update is the installed upload, newer; the
+    /// toolbar offers to take them all at once.
+    pub direct_update: bool,
     pub buttons: Vec<(&'static str, Action)>,
+}
+
+/// The lists on the Downloads tab, top to bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadSection {
+    /// Installed games butler found a newer version of.
+    Updates,
+    /// What butler is fetching or about to.
+    Queue,
+    /// Downloads that ended, well or not.
+    Finished,
+}
+
+impl DownloadSection {
+    pub fn title(self) -> &'static str {
+        match self {
+            DownloadSection::Updates => "Updates available",
+            DownloadSection::Queue => "Downloads",
+            DownloadSection::Finished => "Recent activity",
+        }
+    }
 }
 
 /// Where controller focus rests on the Downloads tab.
@@ -2470,19 +2493,18 @@ pub fn downloads(
             ui.add_space(m.frame(12.0));
             ui.spacing_mut().item_spacing.y = m.space(10.0);
             for (index, row) in view.rows.iter().enumerate() {
-                let first_of_kind = index == 0 || view.rows[index - 1].finished != row.finished;
+                let first_of_kind = index == 0 || view.rows[index - 1].section != row.section;
                 if first_of_kind {
                     if index > 0 {
                         ui.add_space(m.section_gap);
                     }
-                    let title = if row.finished {
-                        "Recent activity"
-                    } else {
-                        "Downloads"
-                    };
                     ui.horizontal(|ui| {
                         ui.add_space(m.ring);
-                        ui.label(egui::RichText::new(title).font(bold(m.section)).color(TEXT));
+                        ui.label(
+                            egui::RichText::new(row.section.title())
+                                .font(bold(m.section))
+                                .color(TEXT),
+                        );
                     });
                 }
                 let focused_row =
