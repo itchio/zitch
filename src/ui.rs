@@ -1802,8 +1802,9 @@ pub fn prompt(
                 .inner_margin(m.space(24.0))
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    // The dialog never outgrows the screen: the body and the
-                    // choices scroll inside what is left under the title.
+                    // The dialog never outgrows the screen: under the title,
+                    // the body and the choices scroll together inside what
+                    // is left of it.
                     let budget = page.height() * 0.9 - 2.0 * m.space(24.0);
                     let top = ui.cursor().top();
                     ui.label(
@@ -1811,60 +1812,61 @@ pub fn prompt(
                             .font(bold(m.dialog))
                             .color(TEXT),
                     );
-                    if !prompt.body.is_empty() {
-                        ui.add_space(m.space(10.0));
+                    ui.add_space(m.space(10.0));
+                    let budget = (budget - (ui.cursor().top() - top)).max(m.space(60.0));
+                    // An area's ui is bounded by the dialog's size from the
+                    // previous frame, so a scroll area placed straight in it
+                    // would only get last frame's leftover and chase its own
+                    // tail. Hand it the budget as its own rect instead.
+                    ui.allocate_ui(vec2(ui.available_width(), budget), |ui| {
+                        // The bar stays visible whatever the input: on a pad
+                        // it is the one cue that the dialog goes on below.
                         egui::ScrollArea::vertical()
-                            .id_salt("body")
-                            .max_height(budget * 0.4)
+                            .id_salt("content")
+                            .auto_shrink([false, true])
+                            .max_height(budget)
+                            .scroll_bar_visibility(scroll_bar(ui, true))
                             .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(&prompt.body)
-                                        .font(FontId::proportional(m.caption))
-                                        .color(DIM),
-                                );
-                            });
-                    }
-                    ui.add_space(m.space(18.0));
-                    let used = ui.cursor().top() - top;
-                    // The bar stays visible whatever the input: on a pad it is
-                    // the one cue that the list goes on below.
-                    egui::ScrollArea::vertical()
-                        .id_salt("choices")
-                        .auto_shrink([false, true])
-                        .max_height((budget - used).max(m.space(60.0)))
-                        .scroll_bar_visibility(scroll_bar(ui, true))
-                        .show(ui, |ui| {
-                            // Room for the focus ring, painted outside the pill.
-                            ui.add_space(m.ring);
-                            let choices = |ui: &mut Ui| {
-                                ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
-                                for (index, label) in prompt.choices.iter().enumerate() {
-                                    let focused = index == prompt.focus;
-                                    let primary = prompt.primary == Some(index);
-                                    let response = pill(ui, m, label, focused, primary);
-                                    if focused {
-                                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
-                                    }
-                                    if response.hovered()
-                                        && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                                    {
-                                        actions.push(Action::PromptFocus(index));
-                                    }
-                                    if response.clicked() {
-                                        actions.push(Action::Answer {
-                                            prompt: prompt.id,
-                                            choice: Some(index),
-                                        });
-                                    }
+                                if !prompt.body.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&prompt.body)
+                                            .font(FontId::proportional(m.caption))
+                                            .color(DIM),
+                                    );
+                                    ui.add_space(m.space(18.0));
                                 }
-                            };
-                            if prompt.stacked {
-                                ui.vertical(choices);
-                            } else {
-                                ui.horizontal_wrapped(choices);
-                            }
-                            ui.add_space(m.ring);
-                        });
+                                // Room for the focus ring, painted outside the pill.
+                                ui.add_space(m.ring);
+                                let choices = |ui: &mut Ui| {
+                                    ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
+                                    for (index, label) in prompt.choices.iter().enumerate() {
+                                        let focused = index == prompt.focus;
+                                        let primary = prompt.primary == Some(index);
+                                        let response = pill(ui, m, label, focused, primary);
+                                        if focused {
+                                            ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                                        }
+                                        if response.hovered()
+                                            && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                                        {
+                                            actions.push(Action::PromptFocus(index));
+                                        }
+                                        if response.clicked() {
+                                            actions.push(Action::Answer {
+                                                prompt: prompt.id,
+                                                choice: Some(index),
+                                            });
+                                        }
+                                    }
+                                };
+                                if prompt.stacked {
+                                    ui.vertical(choices);
+                                } else {
+                                    ui.horizontal_wrapped(choices);
+                                }
+                                ui.add_space(m.ring);
+                            });
+                    });
                 });
         });
     // A centered area and a shrinking list settle over a few frames. A host
