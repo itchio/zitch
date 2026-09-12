@@ -53,9 +53,14 @@ takes an archive with no platform tags too, since that is how most
 uploads arrive; butler unpacks it, and Play asks butler's
 `Launch.GetTargets` what it holds, naming the runtimes the firmware has
 (`muos::runtimes`). A ROM or LÖVE payload comes back as a `runtime`
-target with dash's engine record, and zitch runs it (`src/muos.rs`);
-more than one and the user picks. A Linux build stays butler's to
-launch, but its deep-probe record is checked first (`muos::native_blocker`):
+target with dash's engine record; more than one and the user picks.
+The pick goes to butler's `Launch` as the target, and butler hands it
+back in a `RuntimeLaunch` request, which zitch answers by running it
+(`src/muos.rs`) and replying when it exits. butler tracks the run like
+any other, so play time and the itch.io session are recorded. Quitting
+from zitch ends the process group the payload runs in. A Linux build
+stays butler's to launch, but its deep-probe record is checked first
+(`muos::native_blocker`):
 a bundled SDL2 without the dynamic API, SDL3, a GLFW or X11 build, or a
 glibc newer than the firmware's is refused with the reason instead of a
 black screen. Every game gets an Install button. Bare files

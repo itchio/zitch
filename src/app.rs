@@ -909,11 +909,17 @@ impl App {
                 }
             }
             Action::Play { cave_id } => {
-                if !self.running.contains_key(&cave_id) {
-                    self.running.insert(cave_id.clone(), Instant::now());
-                    self.launch_failures.remove(&cave_id);
-                    self.backend.send(Command::Launch { cave_id });
+                // One game at a time: the screen, the pad and the panic
+                // combo all assume it.
+                if !self.running.is_empty() {
+                    if !self.running.contains_key(&cave_id) {
+                        self.notify("Another game is still running".into());
+                    }
+                    return;
                 }
+                self.running.insert(cave_id.clone(), Instant::now());
+                self.launch_failures.remove(&cave_id);
+                self.backend.send(Command::Launch { cave_id });
             }
             // Only meaningful while a prompt is open, handled above.
             Action::Answer { .. } | Action::PromptFocus(_) => {}

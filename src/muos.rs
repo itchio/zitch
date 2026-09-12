@@ -11,14 +11,16 @@
 //! runtime check for the firmware's script, so the desktop build simply
 //! never takes these paths.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
-use crate::butlerd::types::{Engine, Flavor, LaunchStrategy, LaunchTarget, LinuxInfo};
+use crate::butlerd::types::{Candidate, Engine, Flavor, LinuxInfo};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// What the frontend writes before running the launch script: the
@@ -103,18 +105,11 @@ pub fn runtimes() -> Vec<String> {
     runtimes
 }
 
-/// What a runtime target from butler is here. `None` for targets of
-/// other strategies; an error for a payload of a kind the firmware was
-/// told it runs but this one it cannot.
-pub fn content_for(target: &LaunchTarget) -> Option<Result<Content, String>> {
-    let strategy = target.strategy.as_ref()?;
-    if strategy.strategy != LaunchStrategy::Runtime {
-        return None;
-    }
-    let path = PathBuf::from(&strategy.full_target_path);
-    let candidate = strategy.candidate.as_ref()?;
+/// What a payload butler hands us is here, or why this one cannot run
+/// even though the firmware was said to run its kind.
+pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, String> {
     let engine = candidate.engine.as_ref();
-    Some(match candidate.flavor {
+    match candidate.flavor {
         Flavor::Love => {
             let version = engine.and_then(|e| e.version.as_deref()).unwrap_or("");
             if version.starts_with("0.") {
@@ -136,7 +131,7 @@ pub fn content_for(target: &LaunchTarget) -> Option<Result<Content, String>> {
             }
         }
         other => Err(format!("no runtime for {other:?} on this device")),
-    })
+    }
 }
 
 /// Why a Linux build cannot run here, from what butler read out of its
@@ -322,22 +317,90 @@ pub fn game_env() -> Vec<(String, OsString)> {
     env
 }
 
+/// The process group of the content running now, so [`stop`] can end
+/// it: the emulator is a grandchild behind the launch script, so a
+/// group is the only handle on it. One game runs at a time.
+static RUNNING: Mutex<Option<u32>> = Mutex::new(None);
+/// Set by [`stop`], cleared by [`begin`]. A stop can land while butler
+/// is still deciding what to run, before there is a group to signal;
+/// the spawn that follows checks it and ends the child at once.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Marks the start of a launch, so a stop asked for during it counts.
+pub fn begin() {
+    STOPPED.store(false, Ordering::SeqCst);
+}
+
 /// Runs the content and returns when it exits. `name` is what the
-/// firmware shows in its overlays and history.
-pub fn launch(name: &str, content: &Content) -> Result<()> {
+/// firmware shows in its overlays and history; `args` and `env` are the
+/// manifest action's, and apply where the runtime takes them.
+pub fn launch(
+    name: &str,
+    content: &Content,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> Result<()> {
     log::info!(
         "launching {} as {}",
         content.path().display(),
         content.label()
     );
     let result = match content {
-        Content::Rom { path, system } => launch_rom(name, *system, path),
-        Content::Love { path } => launch_love(path),
+        Content::Rom { path, system } => {
+            if !args.is_empty() {
+                log::warn!("ignoring manifest arguments {args:?} for a ROM");
+            }
+            launch_rom(name, *system, path, env)
+        }
+        Content::Love { path } => launch_love(path, args, env),
     };
+    *RUNNING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     // RetroArch's launcher script names itself here and never puts the
     // app back.
     set_foreground("zitch");
     result
+}
+
+/// Ends whatever [`launch`] is running, or is about to.
+pub fn stop() {
+    STOPPED.store(true, Ordering::SeqCst);
+    let group = *RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(group) = group {
+        end_group(group);
+    }
+}
+
+fn end_group(group: u32) {
+    log::info!("stopping process group {group}");
+    match Command::new("kill")
+        .arg("-TERM")
+        .arg(format!("-{group}"))
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => log::warn!("kill exited with {status}"),
+        Err(error) => log::warn!("running kill: {error}"),
+    }
+}
+
+/// Puts the child in a process group of its own and remembers it for
+/// [`stop`]. Nothing here runs anywhere but Linux; the gate keeps the
+/// other builds compiling.
+fn spawn_group(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command.spawn()?;
+    {
+        let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+        *running = Some(child.id());
+        if STOPPED.load(Ordering::SeqCst) {
+            end_group(child.id());
+        }
+    }
+    Ok(child)
 }
 
 fn set_foreground(process: &str) {
@@ -349,17 +412,20 @@ fn set_foreground(process: &str) {
 /// Runs a `.love` (or a folder) in the firmware's LÖVE. Its own SDL
 /// window takes the screen, like RetroArch's. The panic combo gets its
 /// pid, as there is no launcher script to name it.
-fn launch_love(path: &Path) -> Result<()> {
+fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> Result<()> {
     let dir = Path::new(LOVE_DIR);
-    let mut child = Command::new(dir.join("love"))
+    let mut command = Command::new(dir.join("love"));
+    command
         .arg(path)
+        .args(args)
         .current_dir(dir)
         .env("LD_LIBRARY_PATH", dir.join("libs"))
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
-        .spawn()
+        .envs(env);
+    let mut child = spawn_group(&mut command)
         .with_context(|| format!("running {}", dir.join("love").display()))?;
     set_foreground(&child.id().to_string());
     let status = child
@@ -372,7 +438,7 @@ fn launch_love(path: &Path) -> Result<()> {
 }
 
 /// Runs `rom` in the firmware's emulator for `system`.
-fn launch_rom(name: &str, system: System, rom: &Path) -> Result<()> {
+fn launch_rom(name: &str, system: System, rom: &Path, env: &HashMap<String, String>) -> Result<()> {
     let (assign, launcher, core) = system.assignment();
     let dir = rom
         .parent()
@@ -392,14 +458,18 @@ fn launch_rom(name: &str, system: System, rom: &Path) -> Result<()> {
     // The app's own config and cache live next to its binary (see
     // mux_launch.sh); the emulator has to find the firmware's instead, or
     // it starts with no button mappings.
-    let status = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg(LAUNCH_SCRIPT)
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
-        .status()
-        .with_context(|| format!("running {LAUNCH_SCRIPT}"))?;
+        .envs(env);
+    let status = spawn_group(&mut command)
+        .with_context(|| format!("running {LAUNCH_SCRIPT}"))?
+        .wait()
+        .with_context(|| format!("waiting for {LAUNCH_SCRIPT}"))?;
     // The script's status is that of its last housekeeping line (a test
     // for a paired Discord PC that usually fails), not the emulator's, so
     // it only tells us whether the script ran at all.
@@ -417,7 +487,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::butlerd::types::{Candidate, EngineInfo, StrategyResult};
+    use crate::butlerd::types::EngineInfo;
 
     #[test]
     fn extension_picks_the_system() {
@@ -444,19 +514,11 @@ mod tests {
         assert!(!runs_here(Path::new("xmoon-win32.zip")));
     }
 
-    fn runtime_target(flavor: Flavor, engine: Option<EngineInfo>, path: &str) -> LaunchTarget {
-        LaunchTarget {
-            action: None,
-            host: Default::default(),
-            strategy: Some(StrategyResult {
-                strategy: LaunchStrategy::Runtime,
-                full_target_path: path.to_string(),
-                candidate: Some(Candidate {
-                    flavor,
-                    engine,
-                    ..Default::default()
-                }),
-            }),
+    fn payload(flavor: Flavor, engine: Option<EngineInfo>) -> Candidate {
+        Candidate {
+            flavor,
+            engine,
+            ..Default::default()
         }
     }
 
@@ -472,43 +534,41 @@ mod tests {
     }
 
     #[test]
-    fn targets_become_content() {
-        let gba = runtime_target(Flavor::ROM, Some(rom_engine("gba")), "/g/game.gba");
+    fn payloads_become_content() {
+        let gba = payload(Flavor::ROM, Some(rom_engine("gba")));
         assert_eq!(
-            content_for(&gba),
-            Some(Ok(Content::Rom {
+            content_for(&gba, PathBuf::from("/g/game.gba")),
+            Ok(Content::Rom {
                 path: PathBuf::from("/g/game.gba"),
                 system: System::GameBoyAdvance
-            }))
+            })
         );
-        let nds = runtime_target(Flavor::ROM, Some(rom_engine("nds")), "/g/game.nds");
-        assert!(matches!(content_for(&nds), Some(Err(_))));
+        let nds = payload(Flavor::ROM, Some(rom_engine("nds")));
+        assert!(content_for(&nds, PathBuf::from("/g/game.nds")).is_err());
 
         let love = EngineInfo {
             engine: Engine::Love,
             version: Some("11.5".into()),
             details: None,
         };
-        let new = runtime_target(Flavor::Love, Some(love.clone()), "/g/game.love");
+        let new = payload(Flavor::Love, Some(love.clone()));
         assert_eq!(
-            content_for(&new),
-            Some(Ok(Content::Love {
+            content_for(&new, PathBuf::from("/g/game.love")),
+            Ok(Content::Love {
                 path: PathBuf::from("/g/game.love")
-            }))
+            })
         );
-        let old = runtime_target(
+        let old = payload(
             Flavor::Love,
             Some(EngineInfo {
                 version: Some("0.8.0".into()),
                 ..love
             }),
-            "/g/old.love",
         );
-        assert!(matches!(content_for(&old), Some(Err(_))));
+        assert!(content_for(&old, PathBuf::from("/g/old.love")).is_err());
 
-        let mut native = runtime_target(Flavor::NativeLinux, None, "/g/bin");
-        native.strategy.as_mut().unwrap().strategy = LaunchStrategy::Native;
-        assert_eq!(content_for(&native), None);
+        let native = payload(Flavor::NativeLinux, None);
+        assert!(content_for(&native, PathBuf::from("/g/bin")).is_err());
     }
 
     #[test]

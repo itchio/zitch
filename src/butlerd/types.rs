@@ -1584,6 +1584,10 @@ pub struct ShellLaunchResult {}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HTMLLaunchResult {}
 
+/// Result for RuntimeLaunch
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLaunchResult {}
+
 /// Result for URLLaunch
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct URLLaunchResult {}
@@ -5384,6 +5388,13 @@ pub struct LaunchParams {
         skip_serializing_if = "Option::is_none"
     )]
     pub allowed_strategies: Option<Vec<LaunchStrategy>>,
+    /// Payload flavors the client runs with a runtime of its own, as for
+    /// @@LaunchGetTargetsParams. Matching payloads become targets with the
+    /// @@LaunchStrategyRuntime strategy, which are launched by asking the
+    /// client (@@RuntimeLaunchParams). Pass the same list that produced the
+    /// target being launched, or the target will not be found.
+    #[serde(rename = "runtimes", default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<Vec<String>>,
     /// Client-supplied defaults for knobs that both the explicit params and
     /// the cave's settings leave unset, typically sourced from a frontend's
     /// global preferences. Resolution order: explicit params, then cave
@@ -5468,6 +5479,30 @@ pub struct HTMLLaunchParams {
 impl Request for HTMLLaunchParams {
     const METHOD: &'static str = "HTMLLaunch";
     type Result = HTMLLaunchResult;
+}
+
+/// Params for RuntimeLaunch
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeLaunchParams {
+    /// Absolute path of the payload: a file, or a folder for engines that
+    /// run one (a LÖVE game with its main.lua at the root).
+    #[serde(rename = "fullTargetPath", default, deserialize_with = "null_default")]
+    pub full_target_path: String,
+    /// What the payload is, as dash found it: the flavor, and for ROMs
+    /// the system in Engine.Details.
+    #[serde(rename = "candidate", default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<Candidate>,
+    /// Command-line arguments from the manifest action, if any
+    #[serde(rename = "args", default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Environment variables from the manifest action, if any
+    #[serde(rename = "env", default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+}
+
+impl Request for RuntimeLaunchParams {
+    const METHOD: &'static str = "RuntimeLaunch";
+    type Result = RuntimeLaunchResult;
 }
 
 /// Params for URLLaunch
@@ -6473,6 +6508,18 @@ pub enum AnyServerRequest {
     ///
     /// Sent during @@LaunchParams.
     HTMLLaunch(HTMLLaunchParams),
+    /// Ask the client to run a payload with a runtime of its own: a ROM in
+    /// its emulator, a LÖVE game in its LÖVE. This is how a client that
+    /// manages the game process itself keeps butler's bookkeeping. Sent
+    /// during @@LaunchParams for a @@LaunchStrategyRuntime target, after
+    /// @@LaunchRunningNotification; the play session and the cave's play
+    /// time run from then until the reply.
+    ///
+    /// Reply when the game has exited. A plain reply is a normal exit, an
+    /// error reply is a failure or crash and fails the launch. butler never
+    /// sees the process, so it cannot end it: when the launch is cancelled,
+    /// the client ends the game itself.
+    RuntimeLaunch(RuntimeLaunchParams),
     /// Ask the client to perform an URL launch, ie. open an address
     /// with the system browser or appropriate.
     ///
@@ -6512,6 +6559,7 @@ impl AnyServerRequest {
             "PickManifestAction" => Self::PickManifestAction(serde_json::from_value(params)?),
             "ShellLaunch" => Self::ShellLaunch(serde_json::from_value(params)?),
             "HTMLLaunch" => Self::HTMLLaunch(serde_json::from_value(params)?),
+            "RuntimeLaunch" => Self::RuntimeLaunch(serde_json::from_value(params)?),
             "URLLaunch" => Self::URLLaunch(serde_json::from_value(params)?),
             "AllowSandboxSetup" => Self::AllowSandboxSetup(serde_json::from_value(params)?),
             "PrereqsFailed" => Self::PrereqsFailed(serde_json::from_value(params)?),
@@ -6541,6 +6589,8 @@ impl ServerRequest for PickManifestActionParams {}
 impl ServerRequest for ShellLaunchParams {}
 
 impl ServerRequest for HTMLLaunchParams {}
+
+impl ServerRequest for RuntimeLaunchParams {}
 
 impl ServerRequest for URLLaunchParams {}
 

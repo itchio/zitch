@@ -26,8 +26,8 @@ use crate::butlerd::types::{
     HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
     LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
     PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
-    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload,
-    UploadType,
+    ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
+    UninstallPerformParams, Upload, UploadType,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::model::{
@@ -548,6 +548,17 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 );
             }
             Ok(Command::Launch { cave_id }) => {
+                if launches.any() {
+                    emit.send(Event::LaunchFinished {
+                        cave_id,
+                        result: Err(LaunchFailure {
+                            message: "another game is still running".into(),
+                            log: Vec::new(),
+                        }),
+                    });
+                    continue;
+                }
+                crate::muos::begin();
                 let config = Arc::clone(&config);
                 let prompts = prompts.clone();
                 let launches = launches.clone();
@@ -568,13 +579,34 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         }
                     },
                     move |client, emit| {
-                        if let Some(result) = launch_content(client, &prompts, &cave_id, emit) {
-                            refresh_caves(client, emit);
-                            emit.send(Event::LaunchFinished { cave_id, result });
-                            return Ok(());
-                        }
+                        let (target, name) = match plan_launch(client, &prompts, &cave_id, emit) {
+                            Ok(Plan::Launch { target, name }) => (target, name),
+                            Ok(Plan::Cancelled) => {
+                                emit.send(Event::LaunchFinished {
+                                    cave_id,
+                                    result: Ok(()),
+                                });
+                                return Ok(());
+                            }
+                            Err(failure) => {
+                                emit.send(Event::LaunchFinished {
+                                    cave_id,
+                                    result: Err(failure),
+                                });
+                                return Ok(());
+                            }
+                        };
                         let quit = launches.track(&cave_id, client)?;
-                        let result = launch(client, &config, &prompts, profile_id, &cave_id, emit);
+                        let result = launch(
+                            client,
+                            &config,
+                            &prompts,
+                            profile_id,
+                            &cave_id,
+                            target.as_deref(),
+                            &name,
+                            emit,
+                        );
                         launches.forget(&cave_id);
                         // Play time and last-played change with every run.
                         refresh_caves(client, emit);
@@ -590,7 +622,11 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     },
                 );
             }
-            Ok(Command::QuitGame { cave_id }) => launches.quit(&cave_id),
+            Ok(Command::QuitGame { cave_id }) => {
+                launches.quit(&cave_id);
+                // A payload the firmware runs is our own child, not butler's.
+                crate::muos::stop();
+            }
             Ok(Command::RefreshLibrary) => {
                 sync.stale.store(true, Ordering::Relaxed);
                 sync.collections_stale.store(true, Ordering::Relaxed);
@@ -841,6 +877,14 @@ impl Launches {
         Ok(quit)
     }
 
+    fn any(&self) -> bool {
+        !self
+            .active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
+    }
+
     fn forget(&self, cave_id: &str) {
         self.active
             .lock()
@@ -864,60 +908,100 @@ impl Launches {
 /// How many of the game's last lines to keep for a failed launch.
 const LAUNCH_LOG_TAIL: usize = 40;
 
-/// On muOS, runs what the cave holds through the firmware's runtimes (a
-/// ROM, a `.love`) and stays in the call until it exits. `None` when
-/// this is not muOS or the install is a Linux build, which butler
-/// launches as usual; a Linux build that cannot reach the screen fails
-/// here instead, with the reason.
-fn launch_content(
+/// What Play does once butler has said what the install holds.
+enum Plan {
+    /// Let butler launch it. On muOS a payload the firmware runs is named
+    /// by path, and comes back to us as a `RuntimeLaunch` request.
+    Launch {
+        target: Option<String>,
+        name: String,
+    },
+    /// The user dismissed the pick between several payloads.
+    Cancelled,
+}
+
+/// On muOS, which of the install's contents to launch: a ROM or a
+/// `.love` the firmware runs, picked by the user when there are several,
+/// or else a Linux build, which butler launches through the SDL shim. A
+/// Linux build that cannot reach the screen fails here, with the reason.
+/// Elsewhere butler chooses on its own.
+fn plan_launch(
     client: &Client,
     prompts: &Prompts,
     cave_id: &str,
     emit: &Emitter,
-) -> Option<Result<(), LaunchFailure>> {
+) -> Result<Plan, LaunchFailure> {
     if !crate::muos::available() {
-        return None;
+        return Ok(Plan::Launch {
+            target: None,
+            name: String::new(),
+        });
     }
     let failure = |message: String| LaunchFailure {
         message,
         log: Vec::new(),
     };
-    let cave = match client.call(FetchCaveParams {
-        cave_id: cave_id.to_string(),
-        profile_id: None,
-    }) {
-        Ok(result) => result.cave?,
-        Err(error) => return Some(Err(failure(error.root_cause().to_string()))),
-    };
-    let targets = match client.call(LaunchGetTargetsParams {
-        cave_id: cave_id.to_string(),
-        runtimes: Some(crate::muos::runtimes()),
-        deep_probe: Some(true),
-    }) {
-        Ok(result) => result.targets,
-        Err(error) => return Some(Err(failure(error.root_cause().to_string()))),
-    };
+    let cave = client
+        .call(FetchCaveParams {
+            cave_id: cave_id.to_string(),
+            profile_id: None,
+        })
+        .map_err(|error| failure(error.root_cause().to_string()))?
+        .cave
+        .ok_or_else(|| failure("the game is no longer installed".into()))?;
+    let name = cave
+        .game
+        .as_ref()
+        .map_or("itch.io", |g| g.title.as_str())
+        .to_string();
+    let targets = client
+        .call(LaunchGetTargetsParams {
+            cave_id: cave_id.to_string(),
+            runtimes: Some(crate::muos::runtimes()),
+            deep_probe: Some(true),
+        })
+        .map_err(|error| failure(error.root_cause().to_string()))?
+        .targets;
 
-    // A fused LÖVE exe is listed once as a native build and once as the
-    // payload inside; the path tells them apart.
-    let mut contents: Vec<(String, crate::muos::Content)> = Vec::new();
+    // A payload we can run: its path, the name `Launch` matches a target
+    // by (the action's path, relative to the install folder), and what it
+    // is. A fused LÖVE exe is listed once as a native build and once as
+    // the payload inside; the path tells them apart.
+    struct Choice {
+        path: String,
+        target: String,
+        content: crate::muos::Content,
+    }
+    let mut choices: Vec<Choice> = Vec::new();
     let mut unrunnable = Vec::new();
     for target in &targets {
-        match crate::muos::content_for(target) {
-            Some(Ok(content)) => {
-                let path = &target
-                    .strategy
-                    .as_ref()
-                    .map_or("", |s| s.full_target_path.as_str());
-                if !contents.iter().any(|(p, _)| p == path) {
-                    contents.push((path.to_string(), content));
+        let Some(strategy) = target.strategy.as_ref() else {
+            continue;
+        };
+        if strategy.strategy != LaunchStrategy::Runtime {
+            continue;
+        }
+        let Some(candidate) = strategy.candidate.as_ref() else {
+            continue;
+        };
+        let path = strategy.full_target_path.clone();
+        match crate::muos::content_for(candidate, PathBuf::from(&path)) {
+            Ok(content) => {
+                if !choices.iter().any(|c| c.path == path) {
+                    choices.push(Choice {
+                        target: target
+                            .action
+                            .as_ref()
+                            .map_or(candidate.path.clone(), |a| a.path.clone()),
+                        path,
+                        content,
+                    });
                 }
             }
-            Some(Err(reason)) => unrunnable.push(reason),
-            None => {}
+            Err(reason) => unrunnable.push(reason),
         }
     }
-    if contents.is_empty() {
+    if choices.is_empty() {
         let natives: Vec<_> = targets
             .iter()
             .filter(|t| {
@@ -927,10 +1011,10 @@ fn launch_content(
             })
             .collect();
         if natives.is_empty() {
-            return unrunnable
-                .into_iter()
-                .next()
-                .map(|reason| Err(failure(reason)));
+            return match unrunnable.into_iter().next() {
+                Some(reason) => Err(failure(reason)),
+                None => Ok(Plan::Launch { target: None, name }),
+            };
         }
         // butler picks among the natives; only when none can reach the
         // screen is there nothing for it to do.
@@ -940,63 +1024,77 @@ fn launch_content(
             .filter_map(crate::muos::native_blocker)
             .collect();
         if blocked.len() == natives.len() {
-            return blocked
-                .into_iter()
-                .next()
-                .map(|reason| Err(failure(reason)));
+            return Err(failure(blocked.into_iter().next().unwrap_or_default()));
         }
-        return None;
+        return Ok(Plan::Launch { target: None, name });
     }
 
-    let content = if contents.len() == 1 {
-        &contents[0].1
+    let index = if choices.len() == 1 {
+        0
     } else {
-        let names: Vec<String> = contents
+        let names: Vec<String> = choices
             .iter()
-            .map(|(path, content)| {
-                let file = Path::new(path)
+            .map(|c| {
+                let file = Path::new(&c.path)
                     .file_name()
-                    .map_or(path.as_str(), |f| f.to_str().unwrap_or(path));
-                format!("{file} ({})", content.label())
+                    .map_or(c.path.as_str(), |f| f.to_str().unwrap_or(&c.path));
+                format!("{file} ({})", c.content.label())
             })
             .collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         match prompts.pick(emit, "What do you want to launch?", "", &names) {
-            Some(index) => &contents[index].1,
-            None => return Some(Ok(())),
+            Some(index) => index,
+            None => return Ok(Plan::Cancelled),
         }
     };
-    let name = cave.game.as_ref().map_or("itch.io", |g| g.title.as_str());
-    emit.send(Event::LaunchRunning {
-        cave_id: cave_id.to_string(),
-    });
-    // The interface hides on that event so the emulator has the screen to
-    // itself; its next frame is drawn well before the script gets that far.
-    Some(
-        crate::muos::launch(name, content).map_err(|error| failure(error.root_cause().to_string())),
-    )
+    Ok(Plan::Launch {
+        target: Some(choices.swap_remove(index).target),
+        name,
+    })
 }
 
 /// Runs a game and stays in the call until it exits, answering whatever
 /// butler asks along the way. A failure carries the tail of what butler
 /// logged at error level, which is where the game's stderr ends up.
+/// `target` names a launch target by path, as `Launch.GetTargets` gave
+/// it; `name` is the game's title, for what the firmware shows while a
+/// payload of ours runs.
+#[allow(clippy::too_many_arguments)]
 fn launch(
     client: &Client,
     config: &Config,
     prompts: &Prompts,
     profile_id: i64,
     cave_id: &str,
+    target: Option<&str>,
+    name: &str,
     emit: &Emitter,
 ) -> Result<(), LaunchFailure> {
     let mut errors: std::collections::VecDeque<String> = Default::default();
-    let result = launch_inner(client, config, prompts, profile_id, cave_id, emit, |line| {
+    let launching = LaunchCall {
+        client,
+        config,
+        prompts,
+        profile_id,
+        cave_id,
+        target,
+        name,
+        emit,
+    };
+    let result = launch_inner(&launching, |line| {
         if errors.len() == LAUNCH_LOG_TAIL {
             errors.pop_front();
         }
         errors.push_back(line);
     });
     result.map_err(|error| LaunchFailure {
-        message: error.root_cause().to_string(),
+        // Our own reply to a RuntimeLaunch comes back wrapped as a
+        // remote error; the words are ours already.
+        message: error
+            .root_cause()
+            .to_string()
+            .trim_start_matches("json-rpc2: error 500: ")
+            .to_string(),
         log: errors
             .into_iter()
             .filter(|l| !l.starts_with("Relaying launch failure") && !l.starts_with("Had error"))
@@ -1004,21 +1102,41 @@ fn launch(
     })
 }
 
-fn launch_inner(
-    client: &Client,
-    config: &Config,
-    prompts: &Prompts,
+/// One launch's particulars, shared by the call and its request handlers.
+struct LaunchCall<'a> {
+    client: &'a Client,
+    config: &'a Config,
+    prompts: &'a Prompts,
     profile_id: i64,
-    cave_id: &str,
-    emit: &Emitter,
-    mut on_error_line: impl FnMut(String),
-) -> Result<()> {
+    cave_id: &'a str,
+    target: Option<&'a str>,
+    name: &'a str,
+    emit: &'a Emitter,
+}
+
+fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String)) -> Result<()> {
+    let LaunchCall {
+        client,
+        config,
+        prompts,
+        profile_id,
+        cave_id,
+        target,
+        name,
+        emit,
+    } = *launching;
     std::fs::create_dir_all(&config.prereqs_dir)
         .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
+    let muos = crate::muos::available();
     let params = LaunchParams {
         cave_id: cave_id.to_string(),
         prereqs_dir: Some(config.prereqs_dir.to_string_lossy().into_owned()),
         profile_id: Some(profile_id),
+        target: target.map(str::to_string),
+        // The firmware's payloads come back to us to run; nothing else
+        // but a Linux build has a way onto its screen.
+        runtimes: muos.then(crate::muos::runtimes),
+        allowed_strategies: muos.then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
         ..Default::default()
     };
     client.call_streaming(params, |incoming| match incoming {
@@ -1056,7 +1174,7 @@ fn launch_inner(
                     return;
                 }
             };
-            let outcome = answer_launch_request(client, prompts, emit, &id, request);
+            let outcome = answer_launch_request(client, prompts, name, emit, &id, request);
             if let Err(error) = outcome {
                 log::warn!("answering {method}: {error:#}");
                 let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
@@ -1069,11 +1187,29 @@ fn launch_inner(
 fn answer_launch_request(
     client: &Client,
     prompts: &Prompts,
+    name: &str,
     emit: &Emitter,
     id: &serde_json::Value,
     request: AnyServerRequest,
 ) -> Result<()> {
     match request {
+        AnyServerRequest::RuntimeLaunch(p) => {
+            let candidate = p
+                .candidate
+                .as_ref()
+                .context("runtime launch names no payload")?;
+            let content = crate::muos::content_for(candidate, PathBuf::from(&p.full_target_path))
+                .map_err(anyhow::Error::msg)?;
+            // butler's LaunchRunning came just before this, so the
+            // interface is hiding; the emulator's first frame is later
+            // than that.
+            let args = p.args.as_deref().unwrap_or(&[]);
+            let env = p.env.clone().unwrap_or_default();
+            match crate::muos::launch(name, &content, args, &env) {
+                Ok(()) => client.reply(id, RuntimeLaunchResult {}),
+                Err(error) => client.reply_error(id, 500, &format!("{error:#}")),
+            }
+        }
         AnyServerRequest::PickManifestAction(p) => {
             let names: Vec<&str> = p.actions.iter().map(|a| a.name.as_str()).collect();
             let picked = if names.len() == 1 {
