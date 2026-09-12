@@ -66,6 +66,12 @@ pub enum LaunchStrategy {
     URL,
     #[serde(rename = "shell")]
     Shell,
+    /// A payload (ROM, .love, Godot pack, ...) the client said it has a
+    /// runtime for. FullTargetPath is the file or folder to run, and
+    /// Candidate carries the flavor, engine, and version. Butler has no
+    /// launcher for this strategy: the client runs it.
+    #[serde(rename = "runtime")]
+    Runtime,
     /// Any value not listed above.
     #[serde(other, skip_serializing)]
     Other,
@@ -972,6 +978,70 @@ pub struct FetchGameInteractionResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FetchExpireAllResult {}
 
+/// Result for Collections.Create
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsCreateResult {
+    /// The newly created collection
+    #[serde(
+        rename = "collection",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection: Option<Collection>,
+}
+
+/// Result for Collections.Update
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsUpdateResult {
+    /// The collection after the update
+    #[serde(
+        rename = "collection",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection: Option<Collection>,
+}
+
+/// Result for Collections.Delete
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsDeleteResult {}
+
+/// Result for Collections.AddGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsAddGameResult {
+    /// The game's entry in the collection
+    #[serde(
+        rename = "collectionGame",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection_game: Option<CollectionGame>,
+}
+
+/// Result for Collections.RemoveGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsRemoveGameResult {
+    /// False if the game was not in the collection to begin with
+    #[serde(rename = "removed", default, deserialize_with = "null_default")]
+    pub removed: bool,
+}
+
+/// Result for Collections.UpdateGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsUpdateGameResult {
+    /// The game's entry in the collection after the update
+    #[serde(
+        rename = "collectionGame",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection_game: Option<CollectionGame>,
+}
+
+/// Result for Collections.OrderGames
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsOrderGamesResult {}
+
 /// Result for Game.FindUploads
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GameFindUploadsResult {
@@ -1622,6 +1692,17 @@ impl Code {
     pub const SANDBOX_NOT_AVAILABLE: Code = Code(19000);
     /// The profile explicitly requested for an operation does not exist
     pub const NO_SUCH_PROFILE: Code = Code(20000);
+    /// No Steam login is stored, or Steam rejected the stored one.
+    /// Call @@PublishSteamSyncLoginParams.
+    pub const PUBLISH_STEAM_SYNC_NOT_LOGGED_IN: Code = Code(21000);
+    /// No Steam publisher key is stored. Call @@PublishSteamSyncSetPublisherKeyParams.
+    pub const PUBLISH_STEAM_SYNC_NO_PUBLISHER_KEY: Code = Code(21001);
+    /// The partner API rejected the publisher key.
+    pub const PUBLISH_STEAM_SYNC_PUBLISHER_KEY_INVALID: Code = Code(21002);
+    /// The user declined the login on their phone, or the challenge expired.
+    pub const PUBLISH_STEAM_SYNC_LOGIN_DENIED: Code = Code(21003);
+    /// Another @@PublishSteamSyncLoginParams call is still waiting for approval.
+    pub const PUBLISH_STEAM_SYNC_LOGIN_IN_PROGRESS: Code = Code(21004);
 }
 
 /// Result for Publish.Push
@@ -1805,6 +1886,219 @@ pub struct PublishListBuildsResult {
 
 pub type Cursor = String;
 
+/// Result for Publish.SteamSync.GetStatus
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncGetStatusResult {
+    /// True when a Steam login is stored
+    #[serde(rename = "loggedIn", default, deserialize_with = "null_default")]
+    pub logged_in: bool,
+    /// Steam account name, when logged in
+    #[serde(
+        rename = "accountName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_name: Option<String>,
+    /// 64-bit Steam ID as a string, when logged in
+    #[serde(rename = "steamId", default, skip_serializing_if = "Option::is_none")]
+    pub steam_id: Option<String>,
+    /// True when a publisher Web API key is stored
+    #[serde(rename = "hasPublisherKey", default, deserialize_with = "null_default")]
+    pub has_publisher_key: bool,
+}
+
+/// Result for Publish.SteamSync.Login
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLoginResult {
+    /// Steam account name
+    #[serde(rename = "accountName", default, deserialize_with = "null_default")]
+    pub account_name: String,
+    /// 64-bit Steam ID as a string
+    #[serde(rename = "steamId", default, deserialize_with = "null_default")]
+    pub steam_id: String,
+}
+
+/// Result for Publish.SteamSync.Login.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLoginCancelResult {
+    #[serde(rename = "didCancel", default, deserialize_with = "null_default")]
+    pub did_cancel: bool,
+}
+
+/// Result for Publish.SteamSync.Logout
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLogoutResult {}
+
+/// Result for Publish.SteamSync.SetPublisherKey
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSetPublisherKeyResult {
+    /// Number of apps the key controls
+    #[serde(rename = "appCount", default, deserialize_with = "null_default")]
+    pub app_count: i64,
+}
+
+/// Result for Publish.SteamSync.RemovePublisherKey
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncRemovePublisherKeyResult {}
+
+/// Result for Publish.SteamSync.ListApps
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncListAppsResult {
+    #[serde(rename = "apps", default, deserialize_with = "null_default")]
+    pub apps: Vec<PublishSteamSyncApp>,
+}
+
+/// A Steam app the publisher key controls
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncApp {
+    /// Steam app ID
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: i64,
+    /// Name on Steam
+    #[serde(rename = "name", default, deserialize_with = "null_default")]
+    pub name: String,
+    /// One of game, application, tool, demo, dlc, music
+    #[serde(rename = "type", default, deserialize_with = "null_default")]
+    pub r#type: String,
+}
+
+/// Result for Publish.SteamSync.Plan
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPlanResult {
+    #[serde(rename = "plan", default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PublishSteamSyncPlan>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPlan {
+    #[serde(rename = "appId", default, deserialize_with = "null_default")]
+    pub app_id: i64,
+    #[serde(rename = "appName", default, deserialize_with = "null_default")]
+    pub app_name: String,
+    /// Branch the plan is for
+    #[serde(rename = "branch", default, deserialize_with = "null_default")]
+    pub branch: String,
+    /// Steam build ID on that branch, used as the itch.io user version
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+    #[serde(rename = "target", default, deserialize_with = "null_default")]
+    pub target: String,
+    /// One itch.io channel per entry
+    #[serde(rename = "channels", default, deserialize_with = "null_default")]
+    pub channels: Vec<PublishSteamSyncChannel>,
+    /// Depots left out, with the reason
+    #[serde(rename = "skipped", default, deserialize_with = "null_default")]
+    pub skipped: Vec<PublishSteamSyncSkippedDepot>,
+    #[serde(rename = "warnings", default, deserialize_with = "null_default")]
+    pub warnings: Vec<String>,
+    /// Every branch of the app
+    #[serde(rename = "branches", default, deserialize_with = "null_default")]
+    pub branches: Vec<PublishSteamSyncBranch>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncChannel {
+    /// itch.io channel name, e.g. "windows" or "linux-64"
+    #[serde(rename = "name", default, deserialize_with = "null_default")]
+    pub name: String,
+    /// itch.io platform the name maps to, empty when unknown
+    #[serde(rename = "os", default, deserialize_with = "null_default")]
+    pub os: String,
+    /// "32" or "64" when the channel is architecture specific
+    #[serde(rename = "arch", default, deserialize_with = "null_default")]
+    pub arch: String,
+    #[serde(rename = "depots", default, deserialize_with = "null_default")]
+    pub depots: Vec<PublishSteamSyncDepot>,
+    /// Bytes on disk once assembled
+    #[serde(rename = "size", default, deserialize_with = "null_default")]
+    pub size: i64,
+    /// Bytes to download from Steam
+    #[serde(rename = "download", default, deserialize_with = "null_default")]
+    pub download: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncDepot {
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: i64,
+    #[serde(rename = "name", default, deserialize_with = "null_default")]
+    pub name: String,
+    /// Manifest GID as a string
+    #[serde(rename = "manifest", default, deserialize_with = "null_default")]
+    pub manifest: String,
+    #[serde(rename = "size", default, deserialize_with = "null_default")]
+    pub size: i64,
+    #[serde(rename = "download", default, deserialize_with = "null_default")]
+    pub download: i64,
+    /// True when the depot is copied into every channel
+    #[serde(rename = "shared", default, deserialize_with = "null_default")]
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSkippedDepot {
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: i64,
+    #[serde(rename = "name", default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(rename = "reason", default, deserialize_with = "null_default")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncBranch {
+    #[serde(rename = "name", default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+    #[serde(
+        rename = "description",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// True when the branch needs a password
+    #[serde(
+        rename = "passwordRequired",
+        default,
+        deserialize_with = "null_default"
+    )]
+    pub password_required: bool,
+    /// Unix seconds of the last build on the branch
+    #[serde(rename = "timeUpdated", default, deserialize_with = "null_default")]
+    pub time_updated: i64,
+}
+
+/// Result for Publish.SteamSync.Sync
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSyncResult {
+    /// Steam build ID that was synced
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+    /// One entry per channel of the plan
+    #[serde(rename = "channels", default, deserialize_with = "null_default")]
+    pub channels: Vec<PublishSteamSyncSyncedChannel>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSyncedChannel {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+    /// itch.io build created for the channel, 0 when up to date
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+    /// True when the channel already had this Steam build and was skipped
+    #[serde(rename = "upToDate", default, deserialize_with = "null_default")]
+    pub up_to_date: bool,
+}
+
+/// Result for Publish.SteamSync.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncCancelResult {
+    #[serde(rename = "didCancel", default, deserialize_with = "null_default")]
+    pub did_cancel: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Host {
     /// os + arch, e.g. windows-i386, linux-amd64
@@ -1927,6 +2221,10 @@ pub struct Candidate {
     /// JarInfo contains information specific to Java archives (`.jar` files)
     #[serde(rename = "jarInfo", default, skip_serializing_if = "Option::is_none")]
     pub jar_info: Option<JarInfo>,
+    /// Engine is what made this candidate. Set on natives when a known engine
+    /// left its footprint next to them, and on payload flavors always.
+    #[serde(rename = "engine", default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineInfo>,
     /// Any other info.
     #[serde(rename = "metadata", default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, Value>>,
@@ -1965,6 +2263,57 @@ pub enum Flavor {
     /// Microsoft installer packages
     #[serde(rename = "msi")]
     MSI,
+    /// Godot pack file, standalone or embedded in an executable
+    #[serde(rename = "godot-pck")]
+    GodotPck,
+    /// GameMaker data file (data.win, game.unx, game.ios, game.droid)
+    #[serde(rename = "gamemaker-data")]
+    GameMakerData,
+    /// PICO-8 cartridge (.p8, .p8.png)
+    #[serde(rename = "pico8-cart")]
+    Pico8Cart,
+    /// Picotron cartridge (.p64, .p64.png)
+    #[serde(rename = "picotron-cart")]
+    PicotronCart,
+    /// Ren'Py project: the folder holding game/
+    #[serde(rename = "renpy")]
+    Renpy,
+    /// RPG Maker MV/MZ project: the folder holding js/ and index.html
+    #[serde(rename = "rpgmaker-mv")]
+    RPGMakerMV,
+    /// RPG Maker XP/VX/VX Ace project: the folder holding Game.ini
+    #[serde(rename = "rpgmaker-xp")]
+    RPGMakerXP,
+    /// RPG Maker 2000/2003 project: the folder holding RPG_RT.ldb
+    #[serde(rename = "rpgmaker-2k")]
+    RPGMaker2k,
+    /// Adventure Game Studio game: the exe with appended data, or a .ags file
+    #[serde(rename = "ags")]
+    AGS,
+    /// Doom engine WAD or PK3
+    #[serde(rename = "doom-wad")]
+    DoomWad,
+    /// Flash movie, standalone or in a projector exe
+    #[serde(rename = "swf")]
+    SWF,
+    /// Folder holding 16-bit DOS executables
+    #[serde(rename = "dos")]
+    DOS,
+    /// Pyxel application bundle (.pyxapp)
+    #[serde(rename = "pyxel-app")]
+    PyxelApp,
+    /// Solarus quest (.solarus archive or folder holding data/quest.dat)
+    #[serde(rename = "solarus-quest")]
+    SolarusQuest,
+    /// TIC-80 cartridge (.tic)
+    #[serde(rename = "tic80-cart")]
+    TIC80Cart,
+    /// OpenBOR module (.pak)
+    #[serde(rename = "openbor-pak")]
+    OpenBORPak,
+    /// Console ROM or disc image, system in Engine.Details["system"]
+    #[serde(rename = "rom")]
+    ROM,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -1980,6 +2329,18 @@ pub enum Arch {
     /// 64-bit
     #[serde(rename = "amd64")]
     Amd64,
+    /// ARM 64-bit (Apple Silicon, aarch64 handhelds)
+    #[serde(rename = "arm64")]
+    Arm64,
+    /// ARM 32-bit (Raspberry Pi and older handhelds)
+    #[serde(rename = "arm")]
+    Arm,
+    /// RISC-V 64-bit
+    #[serde(rename = "riscv64")]
+    Riscv64,
+    /// Universal binary (multiple architectures)
+    #[serde(rename = "universal")]
+    Universal,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -2010,6 +2371,29 @@ pub struct WindowsInfo {
     /// Is this a .NET assembly?
     #[serde(rename = "dotNet", default, skip_serializing_if = "Option::is_none")]
     pub dot_net: Option<bool>,
+    /// Machine type from the PE header
+    #[serde(rename = "arch", default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<Arch>,
+    /// Imported DLLs, only filled when ConfigureParams.DeepProbe is set
+    #[serde(rename = "imports", default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
+    /// Strings from the VS_VERSIONINFO resource (ProductName, FileVersion,
+    /// CompanyName, ...). Only filled when ConfigureParams.DeepProbe is set.
+    #[serde(
+        rename = "versionProperties",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub version_properties: Option<HashMap<String, String>>,
+    /// requestedExecutionLevel from the embedded manifest ("asInvoker",
+    /// "requireAdministrator", "highestAvailable"). Only filled when
+    /// ConfigureParams.DeepProbe is set.
+    #[serde(
+        rename = "requestedExecutionLevel",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub requested_execution_level: Option<String>,
 }
 
 /// Which particular type of windows-specific installer
@@ -2036,11 +2420,74 @@ pub enum WindowsInstallerType {
 /// Contains information specific to native macOS executables
 /// or app bundles.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MacosInfo {}
+pub struct MacosInfo {
+    /// All CPU architectures found in the binary (for universal/fat binaries)
+    #[serde(
+        rename = "architectures",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub architectures: Option<Vec<Arch>>,
+}
 
 /// Contains information specific to native Linux executables
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct LinuxInfo {}
+pub struct LinuxInfo {
+    /// Machine type from the ELF header
+    #[serde(rename = "arch", default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<Arch>,
+    /// Operating system the ELF targets when it is not Linux: "freebsd",
+    /// "openbsd", "netbsd" from the header's OS ABI byte, "haiku" from its
+    /// imports (deep probe only). Such builds still get the linux flavor.
+    #[serde(rename = "os", default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    /// True when the executable has no dynamic section (no interpreter, no
+    /// DT_NEEDED). Only meaningful when ConfigureParams.DeepProbe is set.
+    #[serde(rename = "static", default, skip_serializing_if = "Option::is_none")]
+    pub r#static: Option<bool>,
+    /// Highest GLIBC_x.y symbol version the executable references.
+    /// Only filled when ConfigureParams.DeepProbe is set.
+    #[serde(
+        rename = "glibcVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub glibc_version: Option<String>,
+    /// Shared libraries listed in DT_NEEDED, in link order.
+    /// Only filled when ConfigureParams.DeepProbe is set.
+    #[serde(rename = "imports", default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
+    /// SDL major version the executable uses, "2" or "3": imported, or
+    /// linked in (see SDLBundled). Only filled when DeepProbe is set.
+    #[serde(rename = "sdl", default, skip_serializing_if = "Option::is_none")]
+    pub sdl: Option<String>,
+    /// True when SDL is linked into the executable rather than imported,
+    /// so it only has the display backends it was built with.
+    #[serde(
+        rename = "sdlBundled",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sdl_bundled: Option<bool>,
+    /// True when a bundled SDL kept its dynamic API, the hook that lets a
+    /// host substitute its own SDL at load time (SDL_DYNAMIC_API).
+    #[serde(
+        rename = "sdlDynamicApi",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sdl_dynamic_api: Option<bool>,
+    /// Windowing and graphics libraries the executable, or the SDL it
+    /// bundles, can load: "x11", "wayland", "kmsdrm", "glfw", "egl", "gl",
+    /// "gles", "vulkan". From DT_NEEDED and the library names it carries
+    /// for dlopen. Only filled when DeepProbe is set.
+    #[serde(rename = "display", default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Vec<String>>,
+    /// True when the executable keeps its symbol table.
+    /// Only filled when DeepProbe is set.
+    #[serde(rename = "symbols", default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<bool>,
+}
 
 /// Contains information specific to Love2D bundles
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2068,6 +2515,94 @@ pub struct JarInfo {
     /// The main Java class as specified by the manifest included in the .jar (if any)
     #[serde(rename = "mainClass", default, skip_serializing_if = "Option::is_none")]
     pub main_class: Option<String>,
+}
+
+/// Engine identifies the tool a game was made with. It is the key a consumer
+/// uses to pick a runtime: a native candidate carries it as extra context, a
+/// payload candidate carries it because the payload is nothing without it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Engine {
+    #[serde(rename = "godot")]
+    Godot,
+    #[serde(rename = "unity")]
+    Unity,
+    #[serde(rename = "unreal")]
+    Unreal,
+    #[serde(rename = "gamemaker")]
+    GameMaker,
+    #[serde(rename = "love")]
+    Love,
+    #[serde(rename = "pico8")]
+    Pico8,
+    #[serde(rename = "picotron")]
+    Picotron,
+    #[serde(rename = "renpy")]
+    Renpy,
+    #[serde(rename = "rpgmaker")]
+    RPGMaker,
+    #[serde(rename = "ags")]
+    AGS,
+    #[serde(rename = "doom")]
+    Doom,
+    #[serde(rename = "flash")]
+    Flash,
+    #[serde(rename = "dos")]
+    DOS,
+    #[serde(rename = "pyxel")]
+    Pyxel,
+    #[serde(rename = "solarus")]
+    Solarus,
+    #[serde(rename = "tic80")]
+    TIC80,
+    #[serde(rename = "openbor")]
+    OpenBOR,
+    /// ROM images: the console lives in Details["system"]
+    #[serde(rename = "rom")]
+    ROM,
+    #[serde(rename = "fna")]
+    FNA,
+    #[serde(rename = "monogame")]
+    MonoGame,
+    #[serde(rename = "xna")]
+    XNA,
+    #[serde(rename = "hashlink")]
+    HashLink,
+    #[serde(rename = "defold")]
+    Defold,
+    #[serde(rename = "construct")]
+    Construct,
+    #[serde(rename = "electron")]
+    Electron,
+    #[serde(rename = "nwjs")]
+    NWJS,
+    #[serde(rename = "python")]
+    Python,
+    #[serde(rename = "libgdx")]
+    LibGDX,
+    #[serde(rename = "lwjgl")]
+    LWJGL,
+    /// Any value not listed above.
+    #[default]
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+/// EngineInfo describes what made a candidate and, for payloads, what runtime
+/// it needs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EngineInfo {
+    #[serde(rename = "engine", default, deserialize_with = "null_default")]
+    pub engine: Engine,
+    /// Engine version, in the engine's own notation: "3.5.2", "2022.3.10f1",
+    /// "11.5". Empty when it would cost too much to find out or is not
+    /// recorded anywhere.
+    #[serde(rename = "version", default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Free-form engine facts. Keys are documented per detector; the ones
+    /// shared across engines are "confidence" ("ext" when only the file name
+    /// was used) and "system" (console id for ROMs).
+    #[serde(rename = "details", default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<HashMap<String, Value>>,
 }
 
 /// User represents an itch.io account, with basic profile info
@@ -2450,15 +2985,50 @@ pub enum UploadType {
     Unknown,
 }
 
+/// CollectionLayout is how a collection's games are displayed on itch.io
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CollectionLayout {
+    /// CollectionLayoutGrid shows games as a grid of covers
+    #[serde(rename = "grid")]
+    Grid,
+    /// CollectionLayoutList shows games as a list, with blurbs
+    #[serde(rename = "list")]
+    List,
+    /// Any value not listed above.
+    #[default]
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
 /// A Collection is a set of games, curated by humans.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Collection {
     /// Site-wide unique identifier generated by itch.io
     #[serde(rename = "id", default, deserialize_with = "null_default")]
     pub id: i64,
+    /// Canonical address of the collection's page on itch.io
+    #[serde(rename = "url", default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Human-friendly title for collection, for example `Couch coop games`
     #[serde(rename = "title", default, deserialize_with = "null_default")]
     pub title: String,
+    /// HTML description shown on the collection page
+    #[serde(
+        rename = "description",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// Whether the collection is hidden from everyone but its editors
+    #[serde(rename = "private", default, deserialize_with = "null_default")]
+    pub private: bool,
+    /// How games are displayed
+    #[serde(rename = "layout", default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<CollectionLayout>,
+    /// Only set when listing collections filtered by a game: whether
+    /// that game is in this collection
+    #[serde(rename = "hasGame", default, skip_serializing_if = "Option::is_none")]
+    pub has_game: Option<bool>,
     /// Date this collection was created at
     #[serde(rename = "createdAt", default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<RFCDate>,
@@ -3564,6 +4134,10 @@ pub struct FetchProfileCollectionsParams {
     /// If set, will force fresh data
     #[serde(rename = "fresh", default, skip_serializing_if = "Option::is_none")]
     pub fresh: Option<bool>,
+    /// When set, every returned collection has `hasGame` filled in
+    /// for this game. This always asks the API, regardless of `fresh`.
+    #[serde(rename = "gameId", default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<i64>,
 }
 
 impl Request for FetchProfileCollectionsParams {
@@ -3820,6 +4394,186 @@ pub struct FetchExpireAllParams {}
 impl Request for FetchExpireAllParams {
     const METHOD: &'static str = "Fetch.ExpireAll";
     type Result = FetchExpireAllResult;
+}
+
+// ---- Collections
+
+/// Params for Collections.Create
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsCreateParams {
+    /// Profile to create the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Title of the collection. Defaults to "<username>'s Collection" when empty.
+    #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether the collection is hidden from everyone but its editors
+    #[serde(rename = "private", default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    /// HTML description shown on the collection page
+    #[serde(
+        rename = "description",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// How games are displayed. Defaults to "list" when a blurb is
+    /// given, "grid" otherwise.
+    #[serde(rename = "layout", default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<CollectionLayout>,
+    /// A game to add to the collection right away
+    #[serde(rename = "gameId", default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<i64>,
+    /// HTML blurb for that game. Only used together with gameId.
+    #[serde(rename = "blurb", default, skip_serializing_if = "Option::is_none")]
+    pub blurb: Option<String>,
+}
+
+impl Request for CollectionsCreateParams {
+    const METHOD: &'static str = "Collections.Create";
+    type Result = CollectionsCreateResult;
+}
+
+/// Params for Collections.Update
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsUpdateParams {
+    /// Profile to edit the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection to edit
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+    /// New title
+    #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// New HTML description. An empty string clears it.
+    #[serde(
+        rename = "description",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// Whether the collection is hidden from everyone but its editors
+    #[serde(rename = "private", default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    /// How games are displayed
+    #[serde(rename = "layout", default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<CollectionLayout>,
+    /// Whether the collection is shown on the profile's user page
+    #[serde(rename = "onProfile", default, skip_serializing_if = "Option::is_none")]
+    pub on_profile: Option<bool>,
+}
+
+impl Request for CollectionsUpdateParams {
+    const METHOD: &'static str = "Collections.Update";
+    type Result = CollectionsUpdateResult;
+}
+
+/// Params for Collections.Delete
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsDeleteParams {
+    /// Profile to delete the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection to delete
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+}
+
+impl Request for CollectionsDeleteParams {
+    const METHOD: &'static str = "Collections.Delete";
+    type Result = CollectionsDeleteResult;
+}
+
+/// Params for Collections.AddGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsAddGameParams {
+    /// Profile to edit the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection to add the game to
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+    /// Game to add
+    #[serde(rename = "gameId", default, deserialize_with = "null_default")]
+    pub game_id: i64,
+    /// HTML blurb shown next to the game in "list" layout
+    #[serde(rename = "blurb", default, skip_serializing_if = "Option::is_none")]
+    pub blurb: Option<String>,
+}
+
+impl Request for CollectionsAddGameParams {
+    const METHOD: &'static str = "Collections.AddGame";
+    type Result = CollectionsAddGameResult;
+}
+
+/// Params for Collections.RemoveGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsRemoveGameParams {
+    /// Profile to edit the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection to remove the game from
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+    /// Game to remove
+    #[serde(rename = "gameId", default, deserialize_with = "null_default")]
+    pub game_id: i64,
+}
+
+impl Request for CollectionsRemoveGameParams {
+    const METHOD: &'static str = "Collections.RemoveGame";
+    type Result = CollectionsRemoveGameResult;
+}
+
+/// Params for Collections.UpdateGame
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsUpdateGameParams {
+    /// Profile to edit the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection the game is in
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+    /// Game whose entry to edit
+    #[serde(rename = "gameId", default, deserialize_with = "null_default")]
+    pub game_id: i64,
+    /// New HTML blurb. An empty string clears it, omitting it leaves
+    /// it unchanged.
+    #[serde(rename = "blurb", default, skip_serializing_if = "Option::is_none")]
+    pub blurb: Option<String>,
+}
+
+impl Request for CollectionsUpdateGameParams {
+    const METHOD: &'static str = "Collections.UpdateGame";
+    type Result = CollectionsUpdateGameResult;
+}
+
+/// Params for Collections.OrderGames
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionsOrderGamesParams {
+    /// Profile to edit the collection as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Collection to reorder
+    #[serde(rename = "collectionId", default, deserialize_with = "null_default")]
+    pub collection_id: i64,
+    /// Game IDs in the desired order, the first one is shown first.
+    /// Up to 500 games.
+    #[serde(rename = "gameIds", default, deserialize_with = "null_default")]
+    pub game_ids: Vec<i64>,
+    /// Games to remove from the collection before ordering
+    #[serde(
+        rename = "removeGameIds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub remove_game_ids: Option<Vec<i64>>,
+}
+
+impl Request for CollectionsOrderGamesParams {
+    const METHOD: &'static str = "Collections.OrderGames";
+    type Result = CollectionsOrderGamesResult;
 }
 
 // ---- Install
@@ -4536,6 +5290,21 @@ pub struct LaunchGetTargetsParams {
     /// The ID of the cave to list launch targets for
     #[serde(rename = "caveId", default, deserialize_with = "null_default")]
     pub cave_id: String,
+    /// Payload flavors the client can run with a runtime of its own, in
+    /// dash's vocabulary: "love", "godot-pck", "rom:nes", "rom:gba", or
+    /// "rom" for every console. Matching payloads are returned with the
+    /// @@LaunchStrategyRuntime strategy, for the client to launch itself;
+    /// butler never runs them. When empty, payloads are only listed when
+    /// nothing else is launchable, as before.
+    #[serde(rename = "runtimes", default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<Vec<String>>,
+    /// Fill the dependency record of native candidates: imports, glibc
+    /// version, SDL version and how it is linked, display libraries
+    /// (see LinuxInfo and WindowsInfo). Parses section tables of every
+    /// native executable in the install folder, so it costs more than
+    /// the default sniff; leave it off unless the client acts on it.
+    #[serde(rename = "deepProbe", default, skip_serializing_if = "Option::is_none")]
+    pub deep_probe: Option<bool>,
 }
 
 impl Request for LaunchGetTargetsParams {
@@ -5142,6 +5911,245 @@ impl Request for PublishListBuildsParams {
     type Result = PublishListBuildsResult;
 }
 
+/// Params for Publish.SteamSync.GetStatus
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncGetStatusParams {}
+
+impl Request for PublishSteamSyncGetStatusParams {
+    const METHOD: &'static str = "Publish.SteamSync.GetStatus";
+    type Result = PublishSteamSyncGetStatusResult;
+}
+
+/// Params for Publish.SteamSync.Login
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLoginParams {
+    /// ID that can be later used in @@PublishSteamSyncLoginCancelParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+}
+
+impl Request for PublishSteamSyncLoginParams {
+    const METHOD: &'static str = "Publish.SteamSync.Login";
+    type Result = PublishSteamSyncLoginResult;
+}
+
+/// Params for Publish.SteamSync.Login.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLoginCancelParams {
+    /// The ID passed to @@PublishSteamSyncLoginParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+}
+
+impl Request for PublishSteamSyncLoginCancelParams {
+    const METHOD: &'static str = "Publish.SteamSync.Login.Cancel";
+    type Result = PublishSteamSyncLoginCancelResult;
+}
+
+/// Payload for Publish.SteamSync.Login.Challenge
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLoginChallengeNotification {
+    /// The ID passed to @@PublishSteamSyncLoginParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+    /// Challenge URL, to be rendered as a QR code
+    #[serde(rename = "url", default, deserialize_with = "null_default")]
+    pub url: String,
+}
+
+/// Params for Publish.SteamSync.Logout
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncLogoutParams {}
+
+impl Request for PublishSteamSyncLogoutParams {
+    const METHOD: &'static str = "Publish.SteamSync.Logout";
+    type Result = PublishSteamSyncLogoutResult;
+}
+
+/// Params for Publish.SteamSync.SetPublisherKey
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSetPublisherKeyParams {
+    /// The publisher Web API key
+    #[serde(rename = "key", default, deserialize_with = "null_default")]
+    pub key: String,
+}
+
+impl Request for PublishSteamSyncSetPublisherKeyParams {
+    const METHOD: &'static str = "Publish.SteamSync.SetPublisherKey";
+    type Result = PublishSteamSyncSetPublisherKeyResult;
+}
+
+/// Params for Publish.SteamSync.RemovePublisherKey
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncRemovePublisherKeyParams {}
+
+impl Request for PublishSteamSyncRemovePublisherKeyParams {
+    const METHOD: &'static str = "Publish.SteamSync.RemovePublisherKey";
+    type Result = PublishSteamSyncRemovePublisherKeyResult;
+}
+
+/// Params for Publish.SteamSync.ListApps
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncListAppsParams {}
+
+impl Request for PublishSteamSyncListAppsParams {
+    const METHOD: &'static str = "Publish.SteamSync.ListApps";
+    type Result = PublishSteamSyncListAppsResult;
+}
+
+/// Params for Publish.SteamSync.Plan
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPlanParams {
+    /// Steam app ID
+    #[serde(rename = "appId", default, deserialize_with = "null_default")]
+    pub app_id: i64,
+    /// itch.io project in user/slug form, without a channel
+    #[serde(rename = "target", default, deserialize_with = "null_default")]
+    pub target: String,
+    /// Steam branch, default "public"
+    #[serde(rename = "branch", default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Password for a private branch
+    #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Depot ID to channel name, overriding platform detection
+    #[serde(rename = "map", default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<HashMap<String, String>>,
+    /// Depot IDs to leave out
+    #[serde(rename = "skip", default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<Vec<i64>>,
+}
+
+impl Request for PublishSteamSyncPlanParams {
+    const METHOD: &'static str = "Publish.SteamSync.Plan";
+    type Result = PublishSteamSyncPlanResult;
+}
+
+/// Params for Publish.SteamSync.Sync
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncSyncParams {
+    /// ID that can be later used in @@PublishSteamSyncCancelParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+    /// itch.io profile to push as
+    #[serde(rename = "profileId", default, deserialize_with = "null_default")]
+    pub profile_id: i64,
+    /// Steam app ID
+    #[serde(rename = "appId", default, deserialize_with = "null_default")]
+    pub app_id: i64,
+    /// itch.io project in user/slug form, without a channel
+    #[serde(rename = "target", default, deserialize_with = "null_default")]
+    pub target: String,
+    /// Steam branch, default "public"
+    #[serde(rename = "branch", default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Password for a private branch
+    #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Depot ID to channel name, overriding platform detection
+    #[serde(rename = "map", default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<HashMap<String, String>>,
+    /// Depot IDs to leave out
+    #[serde(rename = "skip", default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<Vec<i64>>,
+    /// Push even when the channel already has this Steam build
+    #[serde(rename = "force", default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+    /// Mark new channels as hidden on creation
+    #[serde(rename = "hidden", default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+}
+
+impl Request for PublishSteamSyncSyncParams {
+    const METHOD: &'static str = "Publish.SteamSync.Sync";
+    type Result = PublishSteamSyncSyncResult;
+}
+
+/// Payload for Publish.SteamSync.Planned
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPlannedNotification {
+    #[serde(rename = "plan", default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PublishSteamSyncPlan>,
+}
+
+/// Payload for Publish.SteamSync.DepotProgress
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncDepotProgressNotification {
+    #[serde(rename = "depotId", default, deserialize_with = "null_default")]
+    pub depot_id: i64,
+    #[serde(rename = "doneBytes", default, deserialize_with = "null_default")]
+    pub done_bytes: i64,
+    #[serde(rename = "totalBytes", default, deserialize_with = "null_default")]
+    pub total_bytes: i64,
+}
+
+/// Payload for Publish.SteamSync.ChannelUpToDate
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncChannelUpToDateNotification {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+}
+
+/// Payload for Publish.SteamSync.PushStarted
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPushStartedNotification {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+}
+
+/// Payload for Publish.SteamSync.BuildAssigned
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncBuildAssignedNotification {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+}
+
+/// Payload for Publish.SteamSync.BuildFailed
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncBuildFailedNotification {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+    #[serde(rename = "buildId", default, deserialize_with = "null_default")]
+    pub build_id: i64,
+    #[serde(rename = "message", default, deserialize_with = "null_default")]
+    pub message: String,
+}
+
+/// Payload for Publish.SteamSync.PushProgress
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncPushProgressNotification {
+    #[serde(rename = "channel", default, deserialize_with = "null_default")]
+    pub channel: String,
+    #[serde(rename = "progress", default, deserialize_with = "null_default")]
+    pub progress: f64,
+    #[serde(rename = "eta", default, deserialize_with = "null_default")]
+    pub eta: f64,
+    #[serde(rename = "bps", default, deserialize_with = "null_default")]
+    pub bps: f64,
+    #[serde(rename = "readBytes", default, deserialize_with = "null_default")]
+    pub read_bytes: i64,
+    #[serde(rename = "totalBytes", default, deserialize_with = "null_default")]
+    pub total_bytes: i64,
+    #[serde(rename = "uploadedBytes", default, deserialize_with = "null_default")]
+    pub uploaded_bytes: i64,
+    #[serde(rename = "patchBytes", default, deserialize_with = "null_default")]
+    pub patch_bytes: i64,
+}
+
+/// Params for Publish.SteamSync.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PublishSteamSyncCancelParams {
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+}
+
+impl Request for PublishSteamSyncCancelParams {
+    const METHOD: &'static str = "Publish.SteamSync.Cancel";
+    type Result = PublishSteamSyncCancelResult;
+}
+
 // ---- Dispatch
 
 /// Every notification the daemon can send, decoded from its method name.
@@ -5209,6 +6217,29 @@ pub enum AnyNotification {
     PublishPushBuildFailed(PublishPushBuildFailedNotification),
     /// Periodic progress update emitted while a Publish.Push is in flight.
     PublishPushProgress(PublishPushProgressNotification),
+    /// Sent during @@PublishSteamSyncLoginParams with the URL to show as a QR code.
+    /// Show the URL as a link too, for people whose phone is this device.
+    PublishSteamSyncLoginChallenge(PublishSteamSyncLoginChallengeNotification),
+    /// Sent once the worker has planned the sync, before any download.
+    PublishSteamSyncPlanned(PublishSteamSyncPlannedNotification),
+    /// Download progress for one depot. Depots download one at a time; sum
+    /// TotalBytes over the plan's channels for the whole picture, counting
+    /// shared depots once.
+    PublishSteamSyncDepotProgress(PublishSteamSyncDepotProgressNotification),
+    /// The channel's latest build already has this Steam build ID, so it
+    /// is skipped.
+    PublishSteamSyncChannelUpToDate(PublishSteamSyncChannelUpToDateNotification),
+    /// The channel's directory is assembled and its push is starting.
+    PublishSteamSyncPushStarted(PublishSteamSyncPushStartedNotification),
+    /// The push for a channel has a build ID. Same meaning as
+    /// @@PublishPushBuildAssignedNotification.
+    PublishSteamSyncBuildAssigned(PublishSteamSyncBuildAssignedNotification),
+    /// The push for a channel failed after its build was created. The sync
+    /// stops at the first failed channel.
+    PublishSteamSyncBuildFailed(PublishSteamSyncBuildFailedNotification),
+    /// Push progress for a channel. Fields as in
+    /// @@PublishPushProgressNotification.
+    PublishSteamSyncPushProgress(PublishSteamSyncPushProgressNotification),
     /// A method these bindings do not know.
     Unknown {
         method: String,
@@ -5258,6 +6289,30 @@ impl AnyNotification {
                 Self::PublishPushBuildFailed(serde_json::from_value(params)?)
             }
             "Publish.Push.Progress" => Self::PublishPushProgress(serde_json::from_value(params)?),
+            "Publish.SteamSync.Login.Challenge" => {
+                Self::PublishSteamSyncLoginChallenge(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.Planned" => {
+                Self::PublishSteamSyncPlanned(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.DepotProgress" => {
+                Self::PublishSteamSyncDepotProgress(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.ChannelUpToDate" => {
+                Self::PublishSteamSyncChannelUpToDate(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.PushStarted" => {
+                Self::PublishSteamSyncPushStarted(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.BuildAssigned" => {
+                Self::PublishSteamSyncBuildAssigned(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.BuildFailed" => {
+                Self::PublishSteamSyncBuildFailed(serde_json::from_value(params)?)
+            }
+            "Publish.SteamSync.PushProgress" => {
+                Self::PublishSteamSyncPushProgress(serde_json::from_value(params)?)
+            }
             _ => Self::Unknown {
                 method: method.to_string(),
                 params,
@@ -5348,6 +6403,38 @@ impl Notification for PublishPushBuildFailedNotification {
 
 impl Notification for PublishPushProgressNotification {
     const METHOD: &'static str = "Publish.Push.Progress";
+}
+
+impl Notification for PublishSteamSyncLoginChallengeNotification {
+    const METHOD: &'static str = "Publish.SteamSync.Login.Challenge";
+}
+
+impl Notification for PublishSteamSyncPlannedNotification {
+    const METHOD: &'static str = "Publish.SteamSync.Planned";
+}
+
+impl Notification for PublishSteamSyncDepotProgressNotification {
+    const METHOD: &'static str = "Publish.SteamSync.DepotProgress";
+}
+
+impl Notification for PublishSteamSyncChannelUpToDateNotification {
+    const METHOD: &'static str = "Publish.SteamSync.ChannelUpToDate";
+}
+
+impl Notification for PublishSteamSyncPushStartedNotification {
+    const METHOD: &'static str = "Publish.SteamSync.PushStarted";
+}
+
+impl Notification for PublishSteamSyncBuildAssignedNotification {
+    const METHOD: &'static str = "Publish.SteamSync.BuildAssigned";
+}
+
+impl Notification for PublishSteamSyncBuildFailedNotification {
+    const METHOD: &'static str = "Publish.SteamSync.BuildFailed";
+}
+
+impl Notification for PublishSteamSyncPushProgressNotification {
+    const METHOD: &'static str = "Publish.SteamSync.PushProgress";
 }
 
 /// Every request the daemon can make of the client mid-call, decoded

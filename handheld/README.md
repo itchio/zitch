@@ -16,7 +16,8 @@ against the SDL2 that ships with the firmware. Everything else is static.
   because the cross package's glibc is newer than the device's (2.38) and
   the binary won't load otherwise. Run it again after `cargo clean` or a
   firmware update.
-- butler: the linux-arm64 build from https://broth.itch.zone/butler works.
+- butler: the linux-arm64-head build from https://broth.itch.zone/butler works
+  (the versioned linux-arm64 channel lags master).
   Copy `butler`, `7z.so` and `libc7zip.so` into
   `/mnt/mmc/MUOS/application/zitch/` on the device. make doesn't do this.
 
@@ -49,8 +50,15 @@ The device runs ROMs and engine files, and Linux builds through the SDL
 shim below. On muOS zitch
 judges an upload by its file name instead of itch's platform tags, and
 takes an archive with no platform tags too, since that is how most
-uploads arrive; butler unpacks it and Play looks inside the install
-folder (`src/muos.rs`). Every game gets an Install button. Bare files
+uploads arrive; butler unpacks it, and Play asks butler's
+`Launch.GetTargets` what it holds, naming the runtimes the firmware has
+(`muos::runtimes`). A ROM or LÖVE payload comes back as a `runtime`
+target with dash's engine record, and zitch runs it (`src/muos.rs`);
+more than one and the user picks. A Linux build stays butler's to
+launch, but its deep-probe record is checked first (`muos::native_blocker`):
+a bundled SDL2 without the dynamic API, SDL3, a GLFW or X11 build, or a
+glibc newer than the firmware's is refused with the reason instead of a
+black screen. Every game gets an Install button. Bare files
 butler has no installer for (`.nes`, `.gba`, ...) are queued with
 `ignoreInstallers` so they install as a copy.
 

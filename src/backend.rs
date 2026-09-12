@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -24,9 +24,10 @@ use crate::butlerd::types::{
     DownloadsRetryParams, FetchCaveParams, FetchCavesParams, FetchCollectionGamesParams,
     FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
     HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
-    LaunchParams, LogLevel, PickManifestActionResult, PrereqsFailedResult, ProfileListParams,
-    ProfileLoginWithAPIKeyParams, ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult,
-    UninstallPerformParams, Upload, UploadType,
+    LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
+    PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
+    ProfileUseSavedLoginParams, ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload,
+    UploadType,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::model::{
@@ -567,7 +568,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                         }
                     },
                     move |client, emit| {
-                        if let Some(result) = launch_content(client, &cave_id, emit) {
+                        if let Some(result) = launch_content(client, &prompts, &cave_id, emit) {
                             refresh_caves(client, emit);
                             emit.send(Event::LaunchFinished { cave_id, result });
                             return Ok(());
@@ -863,20 +864,22 @@ impl Launches {
 /// How many of the game's last lines to keep for a failed launch.
 const LAUNCH_LOG_TAIL: usize = 40;
 
-/// On muOS, runs what the cave holds (a ROM, a `.love`) through the
-/// firmware's runtimes and stays in the call until it exits. `None` when
-/// this is not muOS or the install holds nothing of the kind, in which
-/// case butler launches it as usual.
+/// On muOS, runs what the cave holds through the firmware's runtimes (a
+/// ROM, a `.love`) and stays in the call until it exits. `None` when
+/// this is not muOS or the install is a Linux build, which butler
+/// launches as usual; a Linux build that cannot reach the screen fails
+/// here instead, with the reason.
 fn launch_content(
     client: &Client,
+    prompts: &Prompts,
     cave_id: &str,
     emit: &Emitter,
 ) -> Option<Result<(), LaunchFailure>> {
     if !crate::muos::available() {
         return None;
     }
-    let failure = |error: anyhow::Error| LaunchFailure {
-        message: error.root_cause().to_string(),
+    let failure = |message: String| LaunchFailure {
+        message,
         log: Vec::new(),
     };
     let cave = match client.call(FetchCaveParams {
@@ -884,17 +887,94 @@ fn launch_content(
         profile_id: None,
     }) {
         Ok(result) => result.cave?,
-        Err(error) => return Some(Err(failure(error))),
+        Err(error) => return Some(Err(failure(error.root_cause().to_string()))),
     };
-    let folder = PathBuf::from(cave.install_info.as_ref()?.install_folder.as_str());
-    let content = crate::muos::find_content(&folder)?;
+    let targets = match client.call(LaunchGetTargetsParams {
+        cave_id: cave_id.to_string(),
+        runtimes: Some(crate::muos::runtimes()),
+        deep_probe: Some(true),
+    }) {
+        Ok(result) => result.targets,
+        Err(error) => return Some(Err(failure(error.root_cause().to_string()))),
+    };
+
+    // A fused LÖVE exe is listed once as a native build and once as the
+    // payload inside; the path tells them apart.
+    let mut contents: Vec<(String, crate::muos::Content)> = Vec::new();
+    let mut unrunnable = Vec::new();
+    for target in &targets {
+        match crate::muos::content_for(target) {
+            Some(Ok(content)) => {
+                let path = &target
+                    .strategy
+                    .as_ref()
+                    .map_or("", |s| s.full_target_path.as_str());
+                if !contents.iter().any(|(p, _)| p == path) {
+                    contents.push((path.to_string(), content));
+                }
+            }
+            Some(Err(reason)) => unrunnable.push(reason),
+            None => {}
+        }
+    }
+    if contents.is_empty() {
+        let natives: Vec<_> = targets
+            .iter()
+            .filter(|t| {
+                t.strategy
+                    .as_ref()
+                    .is_some_and(|s| s.strategy == LaunchStrategy::Native)
+            })
+            .collect();
+        if natives.is_empty() {
+            return unrunnable
+                .into_iter()
+                .next()
+                .map(|reason| Err(failure(reason)));
+        }
+        // butler picks among the natives; only when none can reach the
+        // screen is there nothing for it to do.
+        let blocked: Vec<String> = natives
+            .iter()
+            .filter_map(|t| t.strategy.as_ref()?.candidate.as_ref()?.linux_info.as_ref())
+            .filter_map(crate::muos::native_blocker)
+            .collect();
+        if blocked.len() == natives.len() {
+            return blocked
+                .into_iter()
+                .next()
+                .map(|reason| Err(failure(reason)));
+        }
+        return None;
+    }
+
+    let content = if contents.len() == 1 {
+        &contents[0].1
+    } else {
+        let names: Vec<String> = contents
+            .iter()
+            .map(|(path, content)| {
+                let file = Path::new(path)
+                    .file_name()
+                    .map_or(path.as_str(), |f| f.to_str().unwrap_or(path));
+                format!("{file} ({})", content.label())
+            })
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        match prompts.pick(emit, "What do you want to launch?", "", &names) {
+            Some(index) => &contents[index].1,
+            None => return Some(Ok(())),
+        }
+    };
     let name = cave.game.as_ref().map_or("itch.io", |g| g.title.as_str());
     emit.send(Event::LaunchRunning {
         cave_id: cave_id.to_string(),
     });
     // The interface hides on that event so the emulator has the screen to
     // itself; its next frame is drawn well before the script gets that far.
-    Some(crate::muos::launch(name, &content).map_err(failure))
+    Some(
+        crate::muos::launch(name, content).map_err(|error| failure(error.root_cause().to_string())),
+    )
 }
 
 /// Runs a game and stays in the call until it exits, answering whatever

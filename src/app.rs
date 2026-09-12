@@ -734,10 +734,10 @@ impl App {
                 Page::Library => {
                     let (_, stops) = self.toolbar();
                     if let Some(index) = self.toolbar_focus_in(stops.len(), self.rows_empty()) {
-                        if let Some(stop) = stops.get(index) {
-                            if !stop.busy {
-                                self.actions.push(stop.action.clone());
-                            }
+                        if let Some(stop) = stops.get(index)
+                            && !stop.busy
+                        {
+                            self.actions.push(stop.action.clone());
                         }
                         return;
                     }
