@@ -43,7 +43,10 @@ pub struct App {
     /// last frame on screen, so it must be one that already says Quitting;
     /// a few frames also let a pending screenshot read back first.
     quitting: Option<u32>,
+    /// The backend's latest progress line, shown while the library loads.
     status: String,
+    /// A failure with no page of its own, shown briefly above the footer.
+    notice: Option<(String, Instant)>,
     profile: Option<Profile>,
     /// Games the profile has a key for, in butler's order (newest first).
     owned: Loadable<Vec<Game>>,
@@ -75,6 +78,9 @@ pub struct App {
     running: std::collections::HashMap<String, Instant>,
     /// Why the last launch of a cave failed, until it is launched again.
     launch_failures: std::collections::HashMap<String, LaunchFailure>,
+    /// Why a game's last install failed, shown on its page until the next
+    /// attempt.
+    install_failures: std::collections::HashMap<i64, String>,
     /// Updates butler found, by cave.
     updates: std::collections::HashMap<String, GameUpdate>,
     /// A question from the backend, shown over everything until answered.
@@ -98,7 +104,6 @@ pub struct App {
     /// Take keyboard focus out of the search box on the next frame.
     blur_search: bool,
     page: Page,
-    error: Option<String>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -143,6 +148,8 @@ pub enum Step {
     Wait(Duration),
     /// Write the screenshot now, mid-script, instead of at the end.
     Capture,
+    /// Raise a sample failure notice, to look at it.
+    Notice,
     /// Type into the search box.
     Search(String),
 }
@@ -178,6 +185,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
+            "notice" => Ok(Step::Notice),
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             // A stand-in question, to look at the modal without a game that
@@ -239,6 +247,7 @@ impl App {
             input_mode: InputMode::Keyboard,
             input_seen: false,
             status: String::new(),
+            notice: None,
             profile: None,
             owned: Loadable::Loading,
             caves: Vec::new(),
@@ -251,6 +260,7 @@ impl App {
             installs: Default::default(),
             running: Default::default(),
             launch_failures: Default::default(),
+            install_failures: Default::default(),
             updates: Default::default(),
             prompt: None,
             prompt_queue: Default::default(),
@@ -268,7 +278,6 @@ impl App {
             focus_search: false,
             blur_search: false,
             page: Page::Library,
-            error: None,
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -807,7 +816,6 @@ impl App {
             Action::SetTab(tab) => {
                 if self.page.is_library() {
                     self.tab = tab;
-                    self.error = None;
                     self.blur_search = true;
                     self.rows.follow = true;
                     self.collection_rows.follow = true;
@@ -842,7 +850,7 @@ impl App {
                     self.actions.push(Action::SetTab(Tab::Library))
                 }
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
-                Page::Library if self.error.is_some() => self.error = None,
+                Page::Library if self.notice.is_some() => self.notice = None,
                 Page::Library => self.actions.push(Action::Menu),
                 Page::Game { id, .. } => {
                     if let Some(rows) = self.active_rows() {
@@ -854,7 +862,6 @@ impl App {
             Action::MenuFocus(_) => {}
             Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
             Action::Open(page) => {
-                self.error = None;
                 self.page = page;
             }
             Action::Update { cave_id } => {
@@ -888,6 +895,7 @@ impl App {
                 // Shown as installing from this instant; the queue listing
                 // that follows replaces it.
                 self.pending_installs.insert(game_id);
+                self.install_failures.remove(&game_id);
                 self.backend.send(Command::Install {
                     game: Box::new(game),
                 });
@@ -1231,7 +1239,7 @@ impl App {
             return;
         }
 
-        let loaded = !matches!(self.owned, Loadable::Loading) || self.error.is_some();
+        let loaded = !matches!(self.owned, Loadable::Loading);
         if let Some(until) = shot.wait_until {
             if now < until {
                 return;
@@ -1246,6 +1254,10 @@ impl App {
                     self.rebuild_sections();
                 }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
+                Step::Notice => self.notify(
+                    "Couldn't check for updates: a sample failure from the screenshot script"
+                        .into(),
+                ),
                 Step::Capture => {
                     shot.capture_pending = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
@@ -1334,7 +1346,7 @@ impl App {
                     {
                         c.next_cursor = None;
                     }
-                    self.error = Some(format!("Couldn't load more: {error}"));
+                    self.notify(format!("Couldn't load more: {error}"));
                     self.rebuild_collection_sections();
                 }
                 Event::CollectionsInstalled(lists) => {
@@ -1389,7 +1401,11 @@ impl App {
                         .as_deref()
                         .or(download.error.as_deref())
                         .unwrap_or("unknown error");
-                    self.error = Some(format!("Install of {title} failed: {error}"));
+                    if let Some(game_id) = download.game.as_ref().map(|g| g.id) {
+                        self.install_failed(game_id, error.to_string());
+                    } else {
+                        self.notify(format!("Install of {title} failed: {error}"));
+                    }
                 }
                 Event::LaunchRunning { .. } => {
                     if self.minimize_while_playing {
@@ -1409,7 +1425,7 @@ impl App {
                         let on_page =
                             matches!(&self.page, Page::Game { id, .. } if Some(*id) == game_id);
                         if !on_page {
-                            self.error = Some(format!("Couldn't launch: {}", failure.message));
+                            self.notify(format!("Couldn't launch: {}", failure.message));
                         }
                         self.launch_failures.insert(cave_id.clone(), failure);
                     }
@@ -1442,7 +1458,7 @@ impl App {
                 }
                 Event::UninstallFinished { result, .. } => {
                     if let Err(error) = result {
-                        self.error = Some(format!("Uninstall failed: {error}"));
+                        self.notify(format!("Uninstall failed: {error}"));
                     }
                 }
                 Event::SyncFailed(error) => {
@@ -1462,8 +1478,7 @@ impl App {
                 Event::InstallFailed { game_id, error } => {
                     self.pending_installs.remove(&game_id);
                     self.rebuild_installs();
-                    let title = self.game(game_id).map_or("game", |g| g.title.as_str());
-                    self.error = Some(format!("Couldn't install {title}: {error}"));
+                    self.install_failed(game_id, error);
                 }
                 Event::Discarding { download_id } => {
                     self.discarding.insert(download_id);
@@ -1472,16 +1487,17 @@ impl App {
                 Event::DiscardFailed { download_id, error } => {
                     self.discarding.remove(&download_id);
                     self.rebuild_installs();
-                    self.error = Some(format!("Couldn't cancel: {error}"));
+                    self.notify(format!("Couldn't cancel: {error}"));
                 }
                 Event::Error(message) => {
                     if message.starts_with("Couldn't check for updates") {
                         self.checking_updates = false;
                     }
                     if self.owned.get().is_none() {
-                        self.owned = Loadable::Failed(message.clone());
+                        self.owned = Loadable::Failed(message);
+                    } else {
+                        self.notify(message);
                     }
-                    self.error = Some(message);
                 }
             }
         }
@@ -1622,6 +1638,23 @@ impl App {
             });
         }
         rows
+    }
+
+    /// The game's page shows the failure until the next attempt; the
+    /// notice is for when the user is elsewhere.
+    fn install_failed(&mut self, game_id: i64, error: String) {
+        let on_page = matches!(self.page, Page::Game { id, .. } if id == game_id);
+        if !on_page {
+            let title = self.game(game_id).map_or("game", |g| g.title.as_str());
+            self.notify(format!("Couldn't install {title}: {error}"));
+        }
+        self.install_failures.insert(game_id, error);
+    }
+
+    /// Something failed that has no page to show it on.
+    fn notify(&mut self, message: String) {
+        log::warn!("{message}");
+        self.notice = Some((message, Instant::now()));
     }
 
     fn refresh_library(&mut self) {
@@ -1829,6 +1862,9 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// How long a notice stays up; Back dismisses it sooner.
+    const NOTICE_FOR: Duration = Duration::from_secs(8);
+
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
         let m = ui::Metrics::for_screen(screen);
@@ -1901,15 +1937,6 @@ impl App {
                         if !self.online {
                             ui::offline(ui, &m);
                         }
-                        // Failures, and while loading the backend's status
-                        // text: an escape hatch for messages nothing else
-                        // presents, rare enough to borrow the header's free
-                        // space rather than keep a line of its own.
-                        match (&self.owned, &self.error) {
-                            (_, Some(error)) => ui::error(ui, &m, error),
-                            (Loadable::Loaded(_), None) => {}
-                            _ => ui::subtle(ui, &m, &self.status),
-                        }
                     });
                 });
                 // The Downloads toolbar scrolls with its list instead.
@@ -1966,8 +1993,10 @@ impl App {
                     m.frame(12.0)
                 });
                 match (&self.owned, self.page.clone()) {
-                    (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
-                    (Loadable::Failed(_), _) => {}
+                    (Loadable::NotLoaded | Loadable::Loading, _) => {
+                        ui::loading(ui, &m, &self.status)
+                    }
+                    (Loadable::Failed(message), _) => ui::failed(ui, &m, message),
                     (Loadable::Loaded(_), Page::Library) => match self.tab {
                         Tab::Library => ui::library(
                             ui,
@@ -2064,6 +2093,8 @@ impl App {
                                 let failure = caves
                                     .iter()
                                     .find_map(|cave| self.launch_failures.get(&cave.id));
+                                let install_failure =
+                                    self.install_failures.get(&game.id).map(String::as_str);
                                 ui::game_detail(
                                     ui,
                                     &m,
@@ -2078,6 +2109,7 @@ impl App {
                                         online: self.online,
                                         focused_button: button,
                                         failure,
+                                        install_failure,
                                     },
                                     &mut self.actions,
                                 );
@@ -2089,6 +2121,15 @@ impl App {
             })
             .response
             .rect;
+        if let Some((message, since)) = &self.notice {
+            if since.elapsed() < Self::NOTICE_FOR {
+                ui::notice(ui.ctx(), &m, page, message);
+                ui.ctx()
+                    .request_repaint_after(Self::NOTICE_FOR - since.elapsed());
+            } else {
+                self.notice = None;
+            }
+        }
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), page, prompt, &mut self.actions);
         }

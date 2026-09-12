@@ -1045,12 +1045,63 @@ pub fn offline(ui: &mut Ui, m: &Metrics) {
     );
 }
 
-pub fn error(ui: &mut Ui, m: &Metrics, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .font(FontId::proportional(m.body))
-            .color(Color32::from_rgb(0xff, 0x6e, 0x6e)),
+/// The page while the library loads: a spinner over the backend's
+/// progress line.
+pub fn loading(ui: &mut Ui, m: &Metrics, status: &str) {
+    let rect = ui.available_rect_before_wrap();
+    centered_spinner(ui, m);
+    ui.painter().text(
+        rect.center() + vec2(0.0, m.space(40.0)),
+        egui::Align2::CENTER_TOP,
+        status,
+        FontId::proportional(m.caption),
+        DIM,
     );
+}
+
+/// The page when the library could not load at all.
+pub fn failed(ui: &mut Ui, m: &Metrics, text: &str) {
+    let rect = ui.available_rect_before_wrap();
+    let width = rect.width() - 2.0 * m.space(40.0);
+    let galley = ui.painter().layout(
+        text.to_string(),
+        FontId::proportional(m.body),
+        ACCENT,
+        width.max(0.0),
+    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, ACCENT);
+}
+
+/// A failure with no page of its own, over the bottom of the page.
+pub fn notice(ctx: &egui::Context, m: &Metrics, page: Rect, text: &str) {
+    let width = (page.width() * 0.8).min(m.space(640.0));
+    egui::Area::new(egui::Id::new("notice"))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .anchor(
+            egui::Align2::CENTER_BOTTOM,
+            egui::pos2(page.center().x, page.max.y - m.space(12.0)) - ctx.content_rect().max
+                + vec2(ctx.content_rect().width() / 2.0, 0.0),
+        )
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(TILE_BG)
+                .corner_radius(CornerRadius::same(10))
+                .stroke(Stroke::new(1.0, BORDER))
+                .inner_margin(egui::Margin::symmetric(
+                    m.space(16.0) as i8,
+                    m.space(10.0) as i8,
+                ))
+                .show(ui, |ui| {
+                    ui.set_max_width(width);
+                    ui.label(
+                        egui::RichText::new(text)
+                            .font(FontId::proportional(m.body))
+                            .color(ACCENT),
+                    );
+                });
+        });
 }
 
 pub fn centered_spinner(ui: &mut Ui, m: &Metrics) {
@@ -1173,6 +1224,8 @@ pub struct GameView<'a> {
     pub focused_button: usize,
     /// Why the last launch failed, shown under the buttons.
     pub failure: Option<&'a LaunchFailure>,
+    /// Why the last install failed, shown the same way.
+    pub install_failure: Option<&'a str>,
 }
 
 pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
@@ -1187,6 +1240,7 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
         online,
         focused_button,
         failure,
+        install_failure,
     } = view;
     let buttons = game_buttons(game, caves, install, running, update, online);
     let width = ui.available_width();
@@ -1350,6 +1404,14 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                     }
                 }
             });
+            if let Some(error) = install_failure {
+                ui.add_space(m.space(20.0));
+                ui.label(
+                    egui::RichText::new(format!("Couldn't install: {error}"))
+                        .font(bold(m.caption))
+                        .color(ACCENT),
+                );
+            }
             if let Some(failure) = failure {
                 ui.add_space(m.space(20.0));
                 ui.label(

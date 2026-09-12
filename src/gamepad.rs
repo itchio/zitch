@@ -235,9 +235,11 @@ mod reader {
 
     /// Whether a device gilrs lists is a controller worth showing glyphs
     /// for. It also lists keyboards' media-key and system-control nodes,
-    /// which have no mapping and would put a desktop into gamepad mode.
+    /// which carry a driver mapping but no face buttons, and would put a
+    /// desktop into gamepad mode.
     fn is_pad(pad: &gilrs::Gamepad<'_>) -> bool {
         pad.mapping_source() != gilrs::MappingSource::None
+            && pad.button_code(gilrs::Button::South).is_some()
     }
 
     /// Runs until the interface drops its receiver.
