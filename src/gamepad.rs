@@ -219,7 +219,9 @@ mod reader {
         let tx = PadSender(tx);
         for (_, pad) in gilrs.gamepads() {
             log::info!("gamepad: {}", pad.name());
-            let _ = tx.connected();
+            if is_pad(&pad) {
+                let _ = tx.connected();
+            }
         }
         let spawned = std::thread::Builder::new()
             .name("gamepad".into())
@@ -229,6 +231,13 @@ mod reader {
             return Gamepad { events: None };
         }
         Gamepad { events: Some(rx) }
+    }
+
+    /// Whether a device gilrs lists is a controller worth showing glyphs
+    /// for. It also lists keyboards' media-key and system-control nodes,
+    /// which have no mapping and would put a desktop into gamepad mode.
+    fn is_pad(pad: &gilrs::Gamepad<'_>) -> bool {
+        pad.mapping_source() != gilrs::MappingSource::None
     }
 
     /// Runs until the interface drops its receiver.
@@ -250,12 +259,14 @@ mod reader {
                         }
                     }
                     EventType::Connected => {
-                        let name = gilrs.gamepad(event.id).name().to_string();
-                        log::info!("gamepad connected: {name}");
-                        if tx.connected().is_err() {
-                            return;
+                        let pad = gilrs.gamepad(event.id);
+                        log::info!("gamepad connected: {}", pad.name());
+                        if is_pad(&pad) {
+                            if tx.connected().is_err() {
+                                return;
+                            }
+                            sent = true;
                         }
-                        sent = true;
                     }
                     EventType::Disconnected => log::info!("gamepad disconnected"),
                     _ => {}

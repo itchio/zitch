@@ -1912,10 +1912,12 @@ impl App {
                         }
                     });
                 });
+                // The Downloads toolbar scrolls with its list instead.
                 let toolbar_shown = self.page.is_library()
                     && match self.tab {
-                        Tab::Library | Tab::Downloads => self.owned.get().is_some(),
+                        Tab::Library => self.owned.get().is_some(),
                         Tab::Collections => self.collections.get().is_some(),
+                        Tab::Downloads => false,
                     };
                 if toolbar_shown {
                     ui.add_space(m.frame(8.0));
@@ -1956,7 +1958,13 @@ impl App {
                         });
                     });
                 }
-                ui.add_space(m.frame(12.0));
+                // Under a toolbar; or, on Downloads, above the list's own
+                // ring space so its toolbar sits where the others do.
+                ui.add_space(if self.page.is_library() && self.tab == Tab::Downloads {
+                    (m.frame(8.0) - m.ring).max(0.0)
+                } else {
+                    m.frame(12.0)
+                });
                 match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => ui::centered_spinner(ui, &m),
                     (Loadable::Failed(_), _) => {}
@@ -2016,19 +2024,27 @@ impl App {
                                 Some(index) => ui::DownloadFocus::Toolbar(index),
                                 None => ui::DownloadFocus::Row { row, button },
                             };
+                            let (controls, stops) = self.toolbar();
                             let mut actions = Vec::new();
-                            ui::downloads(
+                            let response = ui::downloads(
                                 ui,
                                 &m,
                                 ui::DownloadsView {
                                     rows: &rows,
                                     covers: &self.covers,
+                                    toolbar: &controls,
                                     focus,
                                     scrollbar: self.input_mode == InputMode::Keyboard,
                                 },
                                 &mut actions,
                             );
                             self.actions.extend(actions);
+                            if let Some(index) = response.hovered {
+                                self.actions.push(Action::FocusToolbar(index));
+                            }
+                            if let Some(index) = response.clicked {
+                                self.actions.push(stops[index].action.clone());
+                            }
                         }
                     },
                     (Loadable::Loaded(_), Page::Game { id, button }) => {

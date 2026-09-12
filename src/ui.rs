@@ -1529,9 +1529,13 @@ pub fn toolbar(
     controls: &[ToolbarControl],
     focused: Option<usize>,
 ) -> ToolbarResponse {
-    let mut out = ToolbarResponse::default();
+    let mut out = ToolbarResponse {
+        clicked: None,
+        hovered: None,
+        rect: Rect::NOTHING,
+    };
     let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-    ui.horizontal(|ui| {
+    let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = m.space(10.0);
         let mut first = 0;
         for control in controls {
@@ -1561,6 +1565,7 @@ pub fn toolbar(
             first += control.stops();
         }
     });
+    out.rect = row.response.rect;
     out
 }
 
@@ -2048,11 +2053,12 @@ pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
 /// One segmented group from the itch app's filter bar. Returns the index
 /// of an option the pointer picked.
 /// What the pointer did to a group of toolbar controls this frame.
-#[derive(Default)]
 pub struct ToolbarResponse {
     pub clicked: Option<usize>,
     /// The control the pointer moved onto.
     pub hovered: Option<usize>,
+    /// The row the controls took up.
+    pub rect: Rect,
 }
 
 /// A joined group of filter options. `focused` is the option with
@@ -2063,13 +2069,17 @@ fn filter_group(
     options: &[(&str, bool)],
     focused: Option<usize>,
 ) -> ToolbarResponse {
-    let mut out = ToolbarResponse::default();
+    let mut out = ToolbarResponse {
+        clicked: None,
+        hovered: None,
+        rect: Rect::NOTHING,
+    };
     let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
     let radius = m.space(12.0);
     let border = m.space(1.25).max(1.0);
     let icon = m.icon(12.0);
     let pad = vec2(m.label, m.label * 0.5);
-    ui.scope(|ui| {
+    let group = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for (index, &(label, active)) in options.iter().enumerate() {
             let galley =
@@ -2135,6 +2145,7 @@ fn filter_group(
             response.on_hover_cursor(egui::CursorIcon::PointingHand);
         }
     });
+    out.rect = group.response.rect;
     out
 }
 
@@ -2328,6 +2339,8 @@ pub enum DownloadFocus {
 pub struct DownloadsView<'a> {
     pub rows: &'a [DownloadRow<'a>],
     pub covers: &'a CoverLoader,
+    /// The buttons above the list; they scroll with it.
+    pub toolbar: &'a [ToolbarControl],
     pub focus: DownloadFocus,
     pub scrollbar: bool,
 }
@@ -2343,23 +2356,49 @@ fn scroll_bar(ui: &mut Ui, shown: bool) -> egui::scroll_area::ScrollBarVisibilit
     }
 }
 
-pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Vec<Action>) {
-    if view.rows.is_empty() {
-        placeholder(ui, m, "Nothing downloading");
-        return;
-    }
+/// Returns what the pointer did to the toolbar.
+pub fn downloads(
+    ui: &mut Ui,
+    m: &Metrics,
+    view: DownloadsView,
+    actions: &mut Vec<Action>,
+) -> ToolbarResponse {
     let thumb_width = m.space(110.0);
     let thumb_height = (thumb_width / COVER_ASPECT).round();
     let pad = m.space(12.0);
     let row_height = thumb_height + 2.0 * pad;
     let radius = CornerRadius::same(6);
+    // The list reaches a ring's width into the page margins and its content
+    // stands that far in, so rings paint uncut and the toolbar, headings
+    // and rows sit on the gutter like the other tabs' content.
+    let rect = ui.available_rect_before_wrap().expand2(vec2(m.ring, 0.0));
+    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_bar_visibility(scroll_bar(ui, view.scrollbar))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = m.space(10.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
             // Room for the focus ring, which is painted outside the row.
             ui.add_space(m.ring);
+            let toolbar_focus = match view.focus {
+                DownloadFocus::Toolbar(index) => Some(index),
+                DownloadFocus::Row { .. } => None,
+            };
+            let toolbar = ui
+                .horizontal(|ui| {
+                    ui.add_space(m.ring);
+                    toolbar(ui, m, view.toolbar, toolbar_focus)
+                })
+                .inner;
+            if toolbar_focus.is_some() {
+                ui.scroll_to_rect(toolbar.rect.expand(m.ring), None);
+            }
+            if view.rows.is_empty() {
+                placeholder(ui, m, "Nothing downloading");
+                return toolbar;
+            }
+            ui.add_space(m.frame(12.0));
+            ui.spacing_mut().item_spacing.y = m.space(10.0);
             for (index, row) in view.rows.iter().enumerate() {
                 let first_of_kind = index == 0 || view.rows[index - 1].finished != row.finished;
                 if first_of_kind {
@@ -2483,7 +2522,9 @@ pub fn downloads(ui: &mut Ui, m: &Metrics, view: DownloadsView, actions: &mut Ve
                 }
             }
             ui.add_space(m.ring);
-        });
+            toolbar
+        })
+        .inner
 }
 
 #[cfg(test)]
