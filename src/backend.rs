@@ -1597,7 +1597,12 @@ fn pick_update(
         body.push_str(&format!("\nInstalled: {installed}"));
     }
     body.push_str(&format!("\nOffered: {}", names.join(", ")));
-    let picked = prompts.pick(emit, "Update?", &body, &choices)?;
+    // One offer is a yes-or-no question; several are a pick between them.
+    let picked = if names.len() == 1 {
+        prompts.ask(emit, "Update?", &body, &choices)?
+    } else {
+        prompts.pick(emit, "Update?", &body, &choices)?
+    };
     (picked < names.len()).then_some(picked)
 }
 
