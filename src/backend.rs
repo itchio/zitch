@@ -916,15 +916,15 @@ enum Plan {
         target: Option<String>,
         name: String,
     },
-    /// The user dismissed the pick between several payloads.
+    /// The user dismissed the pick between several choices.
     Cancelled,
 }
 
-/// On muOS, which of the install's contents to launch: a ROM or a
-/// `.love` the firmware runs, picked by the user when there are several,
-/// or else a Linux build, which butler launches through the SDL shim. A
-/// Linux build that cannot reach the screen fails here, with the reason.
-/// Elsewhere butler chooses on its own.
+/// On muOS, which of the install's contents to launch: a Linux build
+/// that can reach the screen, which butler launches through the SDL
+/// shim, or a ROM, cart or `.love` the firmware runs. The user picks
+/// when there are several. When nothing can run, the first reason why is
+/// the failure. Elsewhere butler chooses on its own.
 fn plan_launch(
     client: &Client,
     prompts: &Prompts,
@@ -963,85 +963,85 @@ fn plan_launch(
         .map_err(|error| failure(error.root_cause().to_string()))?
         .targets;
 
-    // A payload we can run: its path, the name `Launch` matches a target
-    // by (the action's path, relative to the install folder), and what it
-    // is. A fused LÖVE exe is listed once as a native build and once as
-    // the payload inside; the path tells them apart.
+    // Something we can run: its path, the name `Launch` matches a target
+    // by (the action's path, relative to the install folder), and what to
+    // call it. A fused LÖVE exe is listed once as a native build and once
+    // as the payload inside; the path tells them apart.
     struct Choice {
         path: String,
         target: String,
-        content: crate::muos::Content,
+        label: String,
     }
-    let mut choices: Vec<Choice> = Vec::new();
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(path)
+            .to_string()
+    };
+    let mut natives: Vec<Choice> = Vec::new();
+    let mut payloads: Vec<Choice> = Vec::new();
     let mut unrunnable = Vec::new();
     for target in &targets {
         let Some(strategy) = target.strategy.as_ref() else {
             continue;
         };
-        if strategy.strategy != LaunchStrategy::Runtime {
-            continue;
-        }
         let Some(candidate) = strategy.candidate.as_ref() else {
             continue;
         };
         let path = strategy.full_target_path.clone();
-        match crate::muos::content_for(candidate, PathBuf::from(&path)) {
-            Ok(content) => {
-                if !choices.iter().any(|c| c.path == path) {
-                    choices.push(Choice {
-                        target: target
-                            .action
-                            .as_ref()
-                            .map_or(candidate.path.clone(), |a| a.path.clone()),
-                        path,
-                        content,
-                    });
+        let action_path = target
+            .action
+            .as_ref()
+            .map_or(candidate.path.clone(), |a| a.path.clone());
+        match strategy.strategy {
+            LaunchStrategy::Runtime => {
+                match crate::muos::content_for(candidate, PathBuf::from(&path)) {
+                    Ok(content) => {
+                        if !payloads.iter().any(|c| c.path == path) {
+                            payloads.push(Choice {
+                                label: format!("{} ({})", file_name(&path), content.label()),
+                                target: action_path,
+                                path,
+                            });
+                        }
+                    }
+                    Err(reason) => unrunnable.push(reason),
                 }
             }
-            Err(reason) => unrunnable.push(reason),
+            LaunchStrategy::Native => {
+                let blocked = candidate
+                    .linux_info
+                    .as_ref()
+                    .and_then(crate::muos::native_blocker);
+                match blocked {
+                    Some(reason) => unrunnable.push(format!("{} {reason}", file_name(&path))),
+                    None => natives.push(Choice {
+                        label: format!("{} (Linux build)", file_name(&path)),
+                        target: action_path,
+                        path,
+                    }),
+                }
+            }
+            _ => {}
         }
     }
+    // A native build is the developer's own runtime for the game, which
+    // beats ours: a PICO-8 export carries the real player, where the
+    // firmware's fake-08 gets some carts wrong.
+    let mut choices = natives;
+    choices.extend(payloads);
     if choices.is_empty() {
-        let natives: Vec<_> = targets
-            .iter()
-            .filter(|t| {
-                t.strategy
-                    .as_ref()
-                    .is_some_and(|s| s.strategy == LaunchStrategy::Native)
-            })
-            .collect();
-        if natives.is_empty() {
-            return match unrunnable.into_iter().next() {
-                Some(reason) => Err(failure(reason)),
-                None => Ok(Plan::Launch { target: None, name }),
-            };
-        }
-        // butler picks among the natives; only when none can reach the
-        // screen is there nothing for it to do.
-        let blocked: Vec<String> = natives
-            .iter()
-            .filter_map(|t| t.strategy.as_ref()?.candidate.as_ref()?.linux_info.as_ref())
-            .filter_map(crate::muos::native_blocker)
-            .collect();
-        if blocked.len() == natives.len() {
-            return Err(failure(blocked.into_iter().next().unwrap_or_default()));
-        }
-        return Ok(Plan::Launch { target: None, name });
+        return match unrunnable.into_iter().next() {
+            Some(reason) => Err(failure(reason)),
+            None => Ok(Plan::Launch { target: None, name }),
+        };
     }
 
     let index = if choices.len() == 1 {
         0
     } else {
-        let names: Vec<String> = choices
-            .iter()
-            .map(|c| {
-                let file = Path::new(&c.path)
-                    .file_name()
-                    .map_or(c.path.as_str(), |f| f.to_str().unwrap_or(&c.path));
-                format!("{file} ({})", c.content.label())
-            })
-            .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let names: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
         match prompts.pick(emit, "What do you want to launch?", "", &names) {
             Some(index) => index,
             None => return Ok(Plan::Cancelled),

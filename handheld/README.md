@@ -52,20 +52,26 @@ judges an upload by its file name instead of itch's platform tags, and
 takes an archive with no platform tags too, since that is how most
 uploads arrive; butler unpacks it, and Play asks butler's
 `Launch.GetTargets` what it holds, naming the runtimes the firmware has
-(`muos::runtimes`). A ROM or LÖVE payload comes back as a `runtime`
-target with dash's engine record; more than one and the user picks.
-The pick goes to butler's `Launch` as the target, and butler hands it
-back in a `RuntimeLaunch` request, which zitch answers by running it
-(`src/muos.rs`) and replying when it exits. butler tracks the run like
-any other, so play time and the itch.io session are recorded. Quitting
-from zitch ends the process group the payload runs in. A Linux build
-stays butler's to launch, but its deep-probe record is checked first
-(`muos::native_blocker`):
-a bundled SDL2 without the dynamic API, SDL3, a GLFW or X11 build, or a
-glibc newer than the firmware's is refused with the reason instead of a
-black screen. Every game gets an Install button. Bare files
-butler has no installer for (`.nes`, `.gba`, ...) are queued with
-`ignoreInstallers` so they install as a copy.
+(`muos::runtimes`). A ROM, cart or LÖVE payload comes back as a
+`runtime` target with dash's engine record, an arm64 build as a
+`native` one. Every runnable choice is offered together, Linux builds
+first: the developer's own build is the real engine where the
+firmware's core may be a reimplementation (a PICO-8 Raspberry Pi
+export is the official player, fake-08 rejects newer cart syntax).
+One choice launches at once; more and the user picks. The pick goes to
+butler's `Launch` as the target. A payload comes back in a
+`RuntimeLaunch` request, which zitch answers by running it
+(`src/muos.rs`) and replying when it exits; a Linux build butler
+launches itself, through the SDL shim. butler tracks the run either
+way, so play time and the itch.io session are recorded. Quitting from
+zitch ends the process group the payload runs in. A Linux build's
+deep-probe record is checked before it is offered
+(`muos::native_blocker`): a 32-bit ARM or x86 build, a bundled SDL2
+without the dynamic API, SDL3, a GLFW or X11 build, or a glibc newer
+than the firmware's is left out with the reason, which becomes the
+failure when nothing else can run. Every game gets an Install button.
+Bare files butler has no installer for (`.nes`, `.gba`, ...) are queued
+with `ignoreInstallers` so they install as a copy.
 
 Each runtime below is launched without zitch's HOME and XDG variables, or
 it starts with the app's config dir instead of the firmware's. The muOS

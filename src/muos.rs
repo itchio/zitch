@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
-use crate::butlerd::types::{Candidate, Engine, Flavor, LinuxInfo};
+use crate::butlerd::types::{Arch, Candidate, Engine, Flavor, LinuxInfo};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// What the frontend writes before running the launch script: the
@@ -53,14 +53,9 @@ const SDL_SHIM: &str = "libzitch-sdl.so";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
     /// A file RetroArch plays with the system's core; PICO-8 carts count.
-    Rom {
-        path: PathBuf,
-        system: System,
-    },
+    Rom { path: PathBuf, system: System },
     /// A `.love` file, or a folder with `main.lua` at its root.
-    Love {
-        path: PathBuf,
-    },
+    Love { path: PathBuf },
 }
 
 impl Content {
@@ -147,8 +142,17 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
 /// Why a Linux build cannot run here, from what butler read out of its
 /// executable, or `None` when nothing says it cannot. The screen is the
 /// usual problem: only the firmware's SDL2 can open it, so a build must
-/// link that, or bundle an SDL2 the shim can redirect there.
+/// link that, or bundle an SDL2 the shim can redirect there. butler
+/// keeps 32-bit ARM builds as a fallback for arm64 hosts, which this
+/// firmware cannot honour: it has no 32-bit loader or libraries.
 pub fn native_blocker(info: &LinuxInfo) -> Option<String> {
+    match info.arch {
+        Some(Arch::Arm64) | None => {}
+        Some(Arch::Arm) => {
+            return Some("is a 32-bit ARM build; this device runs 64-bit only".into());
+        }
+        Some(_) => return Some("is not an ARM build".into()),
+    }
     if let Some(version) = info.glibc_version.as_deref()
         && let Some(needed) = parse_version(version)
         && needed > GLIBC_VERSION
@@ -645,6 +649,29 @@ mod tests {
                 ..Default::default()
             }),
             None
+        );
+        assert_eq!(
+            native_blocker(&LinuxInfo {
+                arch: Some(Arch::Arm64),
+                sdl: Some("2".into()),
+                ..Default::default()
+            }),
+            None
+        );
+        assert!(
+            native_blocker(&LinuxInfo {
+                arch: Some(Arch::Arm),
+                sdl: Some("2".into()),
+                ..Default::default()
+            })
+            .is_some()
+        );
+        assert!(
+            native_blocker(&LinuxInfo {
+                arch: Some(Arch::Amd64),
+                ..Default::default()
+            })
+            .is_some()
         );
     }
 }
