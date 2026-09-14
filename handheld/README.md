@@ -79,14 +79,15 @@ panic combo (R2 + Select + B) kills the process named in
 `/opt/muos/config/system/foreground_process`; zitch names the game there
 while it runs and itself again after.
 
-### ROMs and PICO-8 carts (RetroArch)
+### ROMs and fantasy console carts (RetroArch)
 
 Files: `.nes`, `.sfc`/`.smc`, `.gb`, `.gbc`, `.gba`, `.md`/`.gen`,
 `.prg`/`.d64`/`.crt` (C64), `.adf`/`.hdf` (Amiga), `.z64`/`.n64`, and
 `.p8`/`.p8.png` PICO-8 carts, which the firmware plays with the fake-08
-core under its `PICO-8` system, no official PICO-8 binary needed. butler
-reports a cart as a `pico8-cart` payload rather than a ROM, so it is asked
-for by that name and mapped to the same launch path.
+core under its `PICO-8` system, no official PICO-8 binary needed, and
+`.tic` TIC-80 carts, played with the tic80 core under `TIC-80`. butler
+reports a cart as a `pico8-cart` or `tic80-cart` payload rather than a
+ROM, so it is asked for by that name and mapped to the same launch path.
 
 Launched the way the muOS menu launches one: write `/tmp/rom_go`,
 `/tmp/gov_go` and `/tmp/flt_go`, run `/opt/muos/script/mux/launch.sh`,

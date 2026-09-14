@@ -1,5 +1,5 @@
 //! Games on muOS. The handheld firmware ships RetroArch with a core for
-//! each system it knows (PICO-8 carts among them, through fake-08), and
+//! each system it knows (PICO-8 and TIC-80 carts among them), and
 //! a LÖVE runtime; most games there are a ROM, a cart or a `.love`.
 //! butler's launch targets say which an install holds ([`content_for`]),
 //! and this module runs them the way the firmware's own menu does: a ROM
@@ -52,7 +52,8 @@ const SDL_SHIM: &str = "libzitch-sdl.so";
 /// Something in an install folder the firmware can run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
-    /// A file RetroArch plays with the system's core; PICO-8 carts count.
+    /// A file RetroArch plays with the system's core; fantasy console
+    /// carts count.
     Rom { path: PathBuf, system: System },
     /// A `.love` file, or a folder with `main.lua` at its root.
     Love { path: PathBuf },
@@ -97,7 +98,11 @@ pub fn runs_here(path: &Path) -> bool {
 /// The payload flavors the firmware has runtimes for, in dash's words,
 /// for `Launch.GetTargets`.
 pub fn runtimes() -> Vec<String> {
-    let mut runtimes = vec!["love".to_string(), "pico8-cart".to_string()];
+    let mut runtimes = vec![
+        "love".to_string(),
+        "pico8-cart".to_string(),
+        "tic80-cart".to_string(),
+    ];
     runtimes.extend(
         System::ALL
             .iter()
@@ -134,6 +139,10 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
         Flavor::Pico8Cart => Ok(Content::Rom {
             path,
             system: System::Pico8,
+        }),
+        Flavor::TIC80Cart => Ok(Content::Rom {
+            path,
+            system: System::Tic80,
         }),
         other => Err(format!("no runtime for {other:?} on this device")),
     }
@@ -206,13 +215,14 @@ pub enum System {
     Commodore64,
     Amiga,
     Nintendo64,
-    /// Not a console: carts are `.p8` or `.p8.png`, and dash names them
-    /// as a payload of their own rather than a ROM system.
+    /// Not consoles: carts are `.p8`/`.p8.png` and `.tic`, and dash names
+    /// each as a payload of its own rather than a ROM system.
     Pico8,
+    Tic80,
 }
 
 impl System {
-    const ALL: [System; 10] = [
+    const ALL: [System; 11] = [
         System::Nes,
         System::Snes,
         System::GameBoy,
@@ -223,6 +233,7 @@ impl System {
         System::Amiga,
         System::Nintendo64,
         System::Pico8,
+        System::Tic80,
     ];
 
     /// dash's id for the system, as `Launch.GetTargets` names ROMs.
@@ -237,7 +248,7 @@ impl System {
             System::Commodore64 => "c64",
             System::Amiga => "amiga",
             System::Nintendo64 => "n64",
-            System::Pico8 => return None,
+            System::Pico8 | System::Tic80 => return None,
         })
     }
 
@@ -263,6 +274,7 @@ impl System {
             "adf" | "hdf" | "lha" => System::Amiga,
             "z64" | "n64" | "v64" => System::Nintendo64,
             "p8" => System::Pico8,
+            "tic" => System::Tic80,
             _ => return None,
         })
     }
@@ -279,6 +291,7 @@ impl System {
             System::Amiga => "Amiga",
             System::Nintendo64 => "Nintendo 64",
             System::Pico8 => "PICO-8",
+            System::Tic80 => "TIC-80",
         }
     }
 
@@ -311,6 +324,7 @@ impl System {
                 "mupen64plus_next_libretro.so",
             ),
             System::Pico8 => ("PICO-8", "fake-08", "fake08_libretro.so"),
+            System::Tic80 => ("TIC-80", "tic80", "tic80_libretro.so"),
         }
     }
 }
@@ -535,6 +549,10 @@ mod tests {
             Some(System::Pico8)
         );
         assert_eq!(System::for_file(Path::new("cart.P8")), Some(System::Pico8));
+        assert_eq!(
+            System::for_file(Path::new("island.tic")),
+            Some(System::Tic80)
+        );
         assert_eq!(System::for_file(Path::new("cover.png")), None);
         assert_eq!(System::for_file(Path::new("setup.exe")), None);
         assert_eq!(System::for_file(Path::new("README")), None);
@@ -588,6 +606,17 @@ mod tests {
         );
         assert!(runtimes().iter().any(|r| r == "pico8-cart"));
         assert!(!runtimes().iter().any(|r| r.starts_with("rom:pico")));
+
+        let cart = payload(Flavor::TIC80Cart, None);
+        assert_eq!(
+            content_for(&cart, PathBuf::from("/g/island.tic")),
+            Ok(Content::Rom {
+                path: PathBuf::from("/g/island.tic"),
+                system: System::Tic80
+            })
+        );
+        assert!(runtimes().iter().any(|r| r == "tic80-cart"));
+        assert!(!runtimes().iter().any(|r| r.starts_with("rom:tic")));
 
         let love = EngineInfo {
             engine: Engine::Love,
