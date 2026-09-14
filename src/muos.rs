@@ -31,6 +31,10 @@ const GOV_GO: &str = "/tmp/gov_go";
 const FLT_GO: &str = "/tmp/flt_go";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
+/// One folder per system the firmware can run, holding a launcher ini
+/// per emulator. The launch script reads the launcher named in rom_go
+/// from here, and exits with a bare error when the folder is missing.
+const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
 /// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
 /// The app launcher set it to zitch; while a game has the screen it must
 /// name the game, or the combo kills zitch under it and orphans the game.
@@ -480,6 +484,18 @@ fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> R
 /// Runs `rom` in the firmware's emulator for `system`.
 fn launch_rom(name: &str, system: System, rom: &Path, env: &HashMap<String, String>) -> Result<()> {
     let (assign, launcher, core) = system.assignment();
+    // muOS 2601 ships no TIC-80, so its cart would otherwise exit at once
+    // with the reason only in the log.
+    let ini = Path::new(ASSIGN_DIR)
+        .join(assign)
+        .join(format!("{launcher}.ini"));
+    if !ini.is_file() {
+        bail!(
+            "This muOS has no {launcher} emulator for {assign}: it needs {core} in \
+             /opt/muos/share/core and {}",
+            ini.display()
+        );
+    }
     let dir = rom
         .parent()
         .and_then(Path::to_str)
