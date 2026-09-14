@@ -344,6 +344,26 @@ const CUSTOM_SWIPE: bool = true;
 const SWIPE_LOCK: f32 = 8.0;
 const FLING_FRICTION: f32 = 1000.0;
 const FLING_STOP: f32 = 20.0;
+/// How fast a follow-scroll closes on its goal, as the fraction of the
+/// remaining distance covered per second (exponential ease-out).
+const FOLLOW_SPEED: f32 = 14.0;
+
+/// Moves `current` one frame toward `goal`. A goal that is reached, or that
+/// the scroll area refused (`current` did not land where it was sent), is
+/// dropped. Returns whether the area should be handed `current` this frame.
+fn glide(current: &mut f32, goal: &mut Option<f32>, dt: f32) -> bool {
+    let Some(target) = *goal else {
+        return false;
+    };
+    let remaining = target - *current;
+    if remaining.abs() < 0.5 {
+        *current = target;
+        *goal = None;
+    } else {
+        *current += remaining * (1.0 - (-dt * FOLLOW_SPEED).exp());
+    }
+    true
+}
 
 struct Playing {
     url: String,
@@ -389,6 +409,10 @@ pub struct Rows {
     /// Where focus sits in each row, so moving down and back up returns to
     /// the same tile, the way console home screens behave.
     cols: Vec<usize>,
+    /// Whether the user has moved focus. Until then a rebuild lands on the
+    /// first tile; startup loads the library in stages, and chasing the
+    /// default focus through each reshuffle strands it somewhere random.
+    touched: bool,
     /// Scroll so the focused tile is in view on the next frame.
     pub follow: bool,
     /// The sizes the rows were last laid out with. Scroll offsets are in
@@ -396,6 +420,9 @@ pub struct Rows {
     laid_out: Option<Metrics>,
     vscroll: f32,
     hscroll: Vec<f32>,
+    /// Where a follow-scroll is heading, while one is under way.
+    vgoal: Option<f32>,
+    hgoal: Vec<Option<f32>>,
     /// How far each area can scroll, as last laid out, so a swipe stops at
     /// the ends instead of overshooting and snapping back.
     vmax: f32,
@@ -419,7 +446,7 @@ impl Rows {
         if sections == self.sections {
             return;
         }
-        let focused = self.focused_game();
+        let focused = self.touched.then(|| self.focused_game()).flatten();
         self.sections = sections;
         // A gesture in flight indexes rows that may no longer exist.
         self.swipe = None;
@@ -427,6 +454,7 @@ impl Rows {
         self.fling_row = None;
         self.cols.resize(self.sections.len(), 0);
         self.hscroll.resize(self.sections.len(), 0.0);
+        self.hgoal.resize(self.sections.len(), None);
         self.hmax.resize(self.sections.len(), 0.0);
         self.row_spans.resize(self.sections.len(), (0.0, 0.0));
         self.row = self.row.min(self.sections.len().saturating_sub(1));
@@ -456,6 +484,7 @@ impl Rows {
         {
             self.row = row;
             self.cols[row] = col;
+            self.touched = true;
         }
     }
 
@@ -495,6 +524,7 @@ impl Rows {
                 self.cols[self.row] = self.sections[self.row].games.len().saturating_sub(1)
             }
         }
+        self.touched = true;
         self.follow = true;
     }
 }
@@ -549,6 +579,8 @@ pub fn library(
             for offset in &mut rows.hscroll {
                 *offset *= ratio;
             }
+            rows.vgoal = None;
+            rows.hgoal.fill(None);
             rows.follow = true;
             true
         }
@@ -571,21 +603,31 @@ pub fn library(
         .auto_shrink([false, false])
         .scroll_source(no_drag)
         .scroll_bar_visibility(scroll_bar(ui, scrollbar));
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    let mut sent_vscroll = None;
     if let Some(offset) = set_vscroll {
+        rows.vgoal = None;
         area = area.vertical_scroll_offset(offset);
     } else if relaid {
         area = area.vertical_scroll_offset(rows.vscroll);
-    } else if follow && let Some(&(top, height)) = rows.row_spans.get(rows.row) {
-        // A row that is not wholly in view goes to the top, heading and
-        // all, the way console home screens settle on a row. Aligning
-        // its bottom instead would leave the row above it with its
-        // heading cut off.
-        let bottom = top + height;
-        let mut offset = rows.vscroll;
-        if top < offset || bottom > offset + viewport_height {
-            offset = top;
+    } else {
+        if follow && let Some(&(top, height)) = rows.row_spans.get(rows.row) {
+            // A row that is not wholly in view goes to the top, heading and
+            // all, the way console home screens settle on a row. Aligning
+            // its bottom instead would leave the row above it with its
+            // heading cut off. Measured from where the list is heading, so
+            // quick presses stack up instead of restarting from mid-glide.
+            let bottom = top + height;
+            let mut offset = rows.vgoal.unwrap_or(rows.vscroll);
+            if top < offset || bottom > offset + viewport_height {
+                offset = top;
+            }
+            rows.vgoal = Some(offset.max(0.0)).filter(|&goal| goal != rows.vscroll);
         }
-        area = area.vertical_scroll_offset(offset.max(0.0));
+        if glide(&mut rows.vscroll, &mut rows.vgoal, dt) {
+            area = area.vertical_scroll_offset(rows.vscroll);
+            sent_vscroll = Some(rows.vscroll);
+        }
     }
 
     // Only a pointer that moved between two frames takes focus, so the
@@ -648,6 +690,7 @@ pub fn library(
                     );
                 }
                 rows.hscroll[row] = 0.0;
+                rows.hgoal[row] = None;
                 rows.hmax[row] = 0.0;
                 rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
                 ui.add_space(m.section_gap);
@@ -660,27 +703,36 @@ pub fn library(
                 .scroll_source(no_drag)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .max_height(tile_height + 2.0 * ring);
+            let mut sent_hscroll = None;
             if let Some((swiped, offset)) = set_hscroll
                 && swiped == row
             {
+                rows.hgoal[row] = None;
                 strip = strip.horizontal_scroll_offset(offset);
             } else if relaid {
                 strip = strip.horizontal_scroll_offset(rows.hscroll[row]);
-            } else if follow && is_focused_row {
-                let left = ring + focused_col as f32 * stride;
-                let right = left + tile_width;
-                let width = ui.available_width() + 2.0 * ring;
-                let mut offset = rows.hscroll[row];
-                if left - gap < offset {
-                    offset = left - gap;
-                } else if right + gap > offset + width {
-                    offset = right + gap - width;
+            } else {
+                if follow && is_focused_row {
+                    let left = ring + focused_col as f32 * stride;
+                    let right = left + tile_width;
+                    let width = ui.available_width() + 2.0 * ring;
+                    let mut offset = rows.hgoal[row].unwrap_or(rows.hscroll[row]);
+                    if left - gap < offset {
+                        offset = left - gap;
+                    } else if right + gap > offset + width {
+                        offset = right + gap - width;
+                    }
+                    // egui shows an offset past the end for a frame before
+                    // clamping it, which reads as a shake at the ends of the row.
+                    let slots = section.games.len() + usize::from(section.more);
+                    let total = slots as f32 * stride - gap + 2.0 * ring;
+                    let goal = offset.clamp(0.0, (total - width).max(0.0));
+                    rows.hgoal[row] = Some(goal).filter(|&goal| goal != rows.hscroll[row]);
                 }
-                // egui shows an offset past the end for a frame before
-                // clamping it, which reads as a shake at the ends of the row.
-                let slots = section.games.len() + usize::from(section.more);
-                let total = slots as f32 * stride - gap + 2.0 * ring;
-                strip = strip.horizontal_scroll_offset(offset.clamp(0.0, (total - width).max(0.0)));
+                if glide(&mut rows.hscroll[row], &mut rows.hgoal[row], dt) {
+                    strip = strip.horizontal_scroll_offset(rows.hscroll[row]);
+                    sent_hscroll = Some(rows.hscroll[row]);
+                }
             }
             // The strip's clip region reaches into the page margin on both
             // sides, and the tiles are indented back by the same amount, so
@@ -746,6 +798,12 @@ pub fn library(
             // The strip lives in a child ui; move the parent's cursor past it.
             ui.add_space(tile_height + 2.0 * ring);
             rows.hscroll[row] = out.state.offset.x;
+            if sent_hscroll.is_some_and(|sent| (sent - out.state.offset.x).abs() > 0.5) {
+                rows.hgoal[row] = None;
+            }
+            if rows.hgoal[row].is_some() {
+                ui.ctx().request_repaint();
+            }
             rows.hmax[row] = (out.content_size.x - out.inner_rect.width()).max(0.0);
             rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
             ui.add_space(m.section_gap - m.space(6.0));
@@ -757,6 +815,12 @@ pub fn library(
         }
     });
     rows.vscroll = output.state.offset.y;
+    if sent_vscroll.is_some_and(|sent| (sent - output.state.offset.y).abs() > 0.5) {
+        rows.vgoal = None;
+    }
+    if rows.vgoal.is_some() {
+        ui.ctx().request_repaint();
+    }
     rows.vmax = (output.content_size.y - output.inner_rect.height()).max(0.0);
     rows.playing = playing;
 }
