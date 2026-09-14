@@ -83,7 +83,8 @@ jobs:
 
   muos:
     name: muOS package
-    runs-on: ubuntu-24.04-arm
+    # muOS is on glibc 2.38 so we need older linux to build it
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -97,8 +98,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsdl2-dev zip
       - run: make handheld-muxapp
-      # The runner's glibc is newer than the device's 2.38; the binary must
-      # not have picked up a symbol version the device lacks.
+      # check the binary will still load on muOS's glibc 2.38
       - name: glibc check
         run: |
           need=$(objdump -T target/aarch64-unknown-linux-gnu/release/zitch | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
