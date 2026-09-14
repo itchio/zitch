@@ -19,7 +19,8 @@ against the SDL2 that ships with the firmware. Everything else is static.
 - butler: the linux-arm64-head build from https://broth.itch.zone/butler works
   (the versioned linux-arm64 channel lags master).
   Copy `butler`, `7z.so` and `libc7zip.so` into
-  `/mnt/mmc/MUOS/application/zitch/` on the device. make doesn't do this.
+  `/mnt/mmc/MUOS/application/zitch/` on the device. `handheld-deploy`
+  doesn't do this; `handheld-muxapp` downloads them.
 
 ## Build, deploy, run
 
@@ -28,7 +29,24 @@ make handheld          # cross-compile (release)
 make handheld-deploy   # copy binary + mux_launch.sh into the muOS Applications menu
 make handheld-shot     # deploy, launch on the device, fetch /tmp/zitch-handheld.png
 make handheld-shot ARGS="--screenshot-script wait:10000,capture"
+make handheld-muxapp   # package with butler as target/zitch.muxapp
 ```
+
+## Packaging
+
+A `.muxapp` is what muOS's Archive Manager installs: a plain zip whose
+top level is the app folder, unpacked with `unzip -o` into the
+Applications directory (`script/mux/extract.sh` in MustardOS/internal).
+Paths must be relative with no `..`, entries must be regular files or
+directories, and the executable bits come from the zip. To install, copy
+`zitch.muxapp` to `/mnt/mmc/ARCHIVE` on the device and pick it under
+Applications > Archive Manager; the result is the same folder
+`handheld-deploy` writes, plus butler.
+
+CI builds one on an arm64 runner (`muos` job in `.github/workflows/build.yml`)
+without the device sysroot, so the binary links against the runner's
+glibc; a check there fails the job if it needs a symbol version newer than
+the device's 2.38. The firmware's SDL2 is still what it loads at run time.
 
 `handheld-shot` launches the app the same way picking it from the menu does:
 write `/tmp/app_go` and `/tmp/act_go`, kill `muxfrontend` (SIGKILL, it

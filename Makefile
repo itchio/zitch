@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-sdl-procs run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-muxapp handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -27,6 +27,7 @@ help:
 	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first; see handheld/README.md)"
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
+	@echo "make handheld-muxapp  package it with butler as target/zitch.muxapp for the muOS Archive Manager"
 	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
@@ -120,6 +121,27 @@ handheld-shot: handheld-deploy
 	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) 'cat > $(HANDHELD_APP)/args; rm -f /tmp/zitch.png; echo $(HANDHELD_APP) > /tmp/app_go; echo app > /tmp/act_go; kill -9 $$(pidof muxfrontend); touch /tmp/safe_quit; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ]; do sleep 0.5; done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(HANDHELD_APP)/args; cat $(HANDHELD_APP)/zitch.log'
 	scp -q $(HANDHELD):/tmp/zitch.png /tmp/zitch-handheld.png
 	@echo /tmp/zitch-handheld.png
+
+# butler for the device, from broth's linux-arm64-head channel (the
+# versioned linux-arm64 channel lags master).
+HANDHELD_BUTLER ?= target/handheld-butler
+$(HANDHELD_BUTLER)/butler:
+	mkdir -p $(HANDHELD_BUTLER)
+	curl -sSfL -o $(HANDHELD_BUTLER)/butler.zip https://broth.itch.zone/butler/linux-arm64-head/LATEST/archive/default
+	cd $(HANDHELD_BUTLER) && unzip -oq butler.zip && rm butler.zip
+	chmod +x $(HANDHELD_BUTLER)/butler
+
+# A muOS application archive: a zip holding the app folder, which the
+# Archive Manager unpacks into the Applications menu (see handheld/README.md).
+MUXAPP = target/zitch.muxapp
+handheld-muxapp: handheld $(HANDHELD_BUTLER)/butler
+	rm -rf target/muxapp $(MUXAPP)
+	mkdir -p target/muxapp/zitch
+	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
+		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so target/muxapp/zitch/
+	chmod +x target/muxapp/zitch/zitch target/muxapp/zitch/mux_launch.sh target/muxapp/zitch/butler
+	cd target/muxapp && zip -rq ../zitch.muxapp zitch
+	@ls -lh $(MUXAPP) | awk '{print "$(MUXAPP): " $$5}'
 
 # SDL2's jump table order on Linux, which the shim checks a game's stubs
 # against and uses to name the slots that have none.

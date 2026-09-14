@@ -80,3 +80,32 @@ jobs:
           name: zitch-${{ matrix.name }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
+
+  muos:
+    name: muOS package
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: muos
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev zip
+      - run: make handheld-muxapp
+      # The runner's glibc is newer than the device's 2.38; the binary must
+      # not have picked up a symbol version the device lacks.
+      - name: glibc check
+        run: |
+          need=$(objdump -T target/aarch64-unknown-linux-gnu/release/zitch | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "needs $need"
+          test "$(printf '%s\nGLIBC_2.38\n' "$need" | sort -V | tail -1)" = GLIBC_2.38
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zitch-muos
+          path: target/zitch.muxapp
+          if-no-files-found: error
