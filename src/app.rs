@@ -7,6 +7,7 @@ use crate::backend::{Backend, Command, Event};
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
+use crate::login::QrCode;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
     Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
@@ -104,6 +105,8 @@ pub struct App {
     /// Take keyboard focus out of the search box on the next frame.
     blur_search: bool,
     page: Page,
+    /// The sign-in code, while there is nothing to sign in with.
+    login: Option<QrCode>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -281,6 +284,7 @@ impl App {
             focus_search: false,
             blur_search: false,
             page: Page::Library,
+            login: None,
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -635,6 +639,18 @@ impl App {
                 Action::Back | Action::Menu => self.menu = None,
                 Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
                 Action::RefreshLibrary => self.refresh_library(),
+                _ => {}
+            }
+            return;
+        }
+        if self.login.is_some() {
+            match action {
+                Action::Activate => self.backend.send(Command::RetryLogin),
+                Action::Back | Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
+                Action::Menu => {
+                    self.raise_window();
+                    self.menu = Some(0);
+                }
                 _ => {}
             }
             return;
@@ -1287,7 +1303,7 @@ impl App {
             return;
         }
 
-        let loaded = !matches!(self.owned, Loadable::Loading);
+        let loaded = !matches!(self.owned, Loadable::Loading) || self.login.is_some();
         if let Some(until) = shot.wait_until {
             if now < until {
                 return;
@@ -1341,7 +1357,16 @@ impl App {
         for event in self.backend.poll() {
             match event {
                 Event::Status(text) => self.status = text,
-                Event::SignedIn(profile) => self.profile = Some(profile),
+                Event::LoginRequired { url } => match QrCode::encode(&url) {
+                    Some(qr) => self.login = Some(qr),
+                    None => {
+                        self.owned = Loadable::Failed("Couldn't encode the sign-in code".into())
+                    }
+                },
+                Event::SignedIn(profile) => {
+                    self.login = None;
+                    self.profile = Some(profile);
+                }
                 Event::OwnedGames(games) => {
                     self.refreshing = false;
                     self.owned = Loadable::Loaded(games);
@@ -1543,7 +1568,7 @@ impl App {
                     if message.starts_with("Couldn't check for updates") {
                         self.checking_updates = false;
                     }
-                    if self.owned.get().is_none() {
+                    if self.owned.get().is_none() && self.login.is_none() {
                         self.owned = Loadable::Failed(message);
                     } else {
                         self.notify(message);
@@ -1819,6 +1844,12 @@ impl App {
             hints.push((vec![Glyph::Back], "Dismiss".to_string()));
             return hints;
         }
+        if self.login.is_some() {
+            return vec![
+                (vec![Glyph::Confirm], "New code".to_string()),
+                (vec![Glyph::Back], "Quit".to_string()),
+            ];
+        }
         // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page.clone() {
             Page::Library => {
@@ -1987,7 +2018,9 @@ impl App {
         let policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
         self.handheld = policy.low_spec;
         self.covers.set_policy(policy);
-        if self.input_mode != InputMode::Touch && self.owned.get().is_some() {
+        if self.input_mode != InputMode::Touch
+            && (self.owned.get().is_some() || self.login.is_some())
+        {
             let hints = self.hints();
             ui::footer(
                 ui,
@@ -2013,7 +2046,12 @@ impl App {
                 let centered = egui::Layout::left_to_right(egui::Align::Center);
                 ui.allocate_ui_with_layout(row, centered, |ui| {
                     ui::logo(ui, &m, &self.glyphs);
-                    if self.page.is_library() {
+                    if self.login.is_some() {
+                        ui.allocate_exact_size(
+                            egui::vec2(0.0, ui::tab_strip_height(ui, &m)),
+                            egui::Sense::hover(),
+                        );
+                    } else if self.page.is_library() {
                         let downloading = self
                             .downloads
                             .iter()
@@ -2108,6 +2146,10 @@ impl App {
                 } else {
                     m.frame(12.0)
                 });
+                if let Some(login) = &self.login {
+                    ui::login(ui, &m, login);
+                    return;
+                }
                 match (&self.owned, self.page.clone()) {
                     (Loadable::NotLoaded | Loadable::Loading, _) => {
                         ui::loading(ui, &m, &self.status)

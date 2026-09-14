@@ -6,6 +6,7 @@ mod glyphs;
 #[cfg(feature = "sdl-host")]
 mod host_sdl;
 mod images;
+mod login;
 mod model;
 mod muos;
 mod ui;
@@ -88,6 +89,15 @@ struct Cli {
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
+
+    /// The site the sign-in QR code points at. For development.
+    #[arg(
+        long,
+        env = "ZITCH_WEB_URL",
+        default_value = "https://itch.io",
+        hide = true
+    )]
+    web_url: String,
 }
 
 fn parse_size(text: &str) -> Result<(f32, f32), String> {
@@ -147,6 +157,7 @@ fn main() -> anyhow::Result<()> {
         dbpath,
         api_key,
         profile_id: cli.profile_id,
+        web_url: cli.web_url.trim_end_matches('/').to_string(),
         // Same layout as the itch app, so a shared config dir shares games.
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),

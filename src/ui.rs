@@ -7,6 +7,7 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
+use crate::login::QrCode;
 pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, Prompt, Tab,
@@ -1118,6 +1119,63 @@ pub fn loading(ui: &mut Ui, m: &Metrics, status: &str) {
         rect.center() + vec2(0.0, m.space(40.0)),
         egui::Align2::CENTER_TOP,
         status,
+        FontId::proportional(m.caption),
+        DIM,
+    );
+}
+
+/// The sign-in page: the QR code beside what to do with it. Modules are
+/// whole points so their edges land on pixels, which a camera needs.
+pub fn login(ui: &mut Ui, m: &Metrics, qr: &QrCode) {
+    const QUIET: usize = 4;
+    let rect = ui.available_rect_before_wrap();
+    let painter = ui.painter();
+    let modules = qr.size + 2 * QUIET;
+    // Leaves the text a column; 5 points a module on a 640x480 screen.
+    let side_max = rect.height().min(rect.width() - m.space(220.0));
+    let module = (side_max / modules as f32).floor().max(1.0);
+    let side = module * modules as f32;
+    let origin = pos2(rect.left(), rect.center().y - side / 2.0).round();
+    let code = Rect::from_min_size(origin, vec2(side, side));
+    painter.rect_filled(code, CornerRadius::same(module as u8), Color32::WHITE);
+    for y in 0..qr.size {
+        for x in 0..qr.size {
+            if qr.dark(x, y) {
+                let min = origin + vec2((x + QUIET) as f32, (y + QUIET) as f32) * module;
+                painter.rect_filled(
+                    Rect::from_min_size(min, vec2(module, module)),
+                    CornerRadius::ZERO,
+                    Color32::BLACK,
+                );
+            }
+        }
+    }
+
+    let left = code.right() + m.space(32.0);
+    let width = (rect.right() - left).max(0.0);
+    let mut y = code.top() + m.space(8.0);
+    let heading = painter.layout("Sign in to itch.io".into(), bold(m.heading), TEXT, width);
+    painter.galley(pos2(left, y), heading.clone(), TEXT);
+    y += heading.size().y + m.space(16.0);
+    let body = painter.layout(
+        "Scan the code with your phone and approve the sign-in on itch.io. \
+         This screen continues on its own."
+            .into(),
+        FontId::proportional(m.body),
+        DIM,
+        width,
+    );
+    painter.galley(pos2(left, y), body.clone(), DIM);
+    y += body.size().y + m.space(24.0);
+    let spinner = m.space(18.0);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, y), vec2(spinner, spinner))),
+    );
+    child.add(egui::Spinner::new().size(spinner).color(DIM));
+    ui.painter().text(
+        pos2(left + spinner + m.space(10.0), y + spinner / 2.0),
+        egui::Align2::LEFT_CENTER,
+        "Waiting for approval",
         FontId::proportional(m.caption),
         DIM,
     );

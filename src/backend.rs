@@ -30,6 +30,7 @@ use crate::butlerd::types::{
     UninstallPerformParams, Upload, UploadType,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
+use crate::login::Login;
 use crate::model::{
     Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
     Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
@@ -42,6 +43,8 @@ pub struct Config {
     pub api_key: Option<String>,
     /// A saved profile to use instead of the most recent one.
     pub profile_id: Option<i64>,
+    /// Where the sign-in QR code sends the phone.
+    pub web_url: String,
     /// Where games go when the database has no install location yet.
     pub install_dir: PathBuf,
     /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
@@ -103,12 +106,19 @@ pub enum Command {
         prompt: u64,
         choice: Option<usize>,
     },
+    /// A fresh sign-in code in place of the one on screen.
+    RetryLogin,
     Shutdown,
 }
 
 pub enum Event {
     /// A one-line description of what the backend is doing.
     Status(String),
+    /// Nothing to sign in with: show this URL as a QR code until
+    /// [`Event::SignedIn`].
+    LoginRequired {
+        url: String,
+    },
     SignedIn(Profile),
     OwnedGames(Vec<Game>),
     /// The profile's collections with their games, in butler's order.
@@ -294,7 +304,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         current(&link).address
     ));
 
-    let profile = sign_in(&client, &config, emit)?;
+    let profile = match sign_in(&client, &config, emit)? {
+        Some(profile) => profile,
+        None => match await_login(&config, emit, &commands) {
+            Some(profile) => profile,
+            None => return Ok(()),
+        },
+    };
     let name = profile.user.as_ref().map_or("?", UserExt::name);
     emit.status(format!("Signed in as {name}"));
     emit.send(Event::SignedIn(profile.clone()));
@@ -672,6 +688,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
             }
             Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
+            // Only the sign-in page sends it, and that page is gone.
+            Ok(Command::RetryLogin) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         for incoming in client.poll() {
@@ -1660,7 +1678,9 @@ fn install_location(client: &Client, config: &Config) -> Result<String> {
         .ok_or_else(|| anyhow!("Install.Locations.Add returned no location"))
 }
 
-fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> {
+/// Signs in with what is saved or given. `None` means there is nothing to
+/// sign in with and the user has to.
+fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Option<Profile>> {
     let mut saved = client.call(ProfileListParams {})?.profiles;
     saved.sort_by(|a, b| b.last_connected.cmp(&a.last_connected));
     let chosen = match config.profile_id {
@@ -1696,13 +1716,12 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         })?;
         return result
             .profile
+            .map(Some)
             .ok_or_else(|| anyhow!("saved login returned no profile"));
     }
     let Some(api_key) = &config.api_key else {
-        bail!(
-            "no saved profile in {}; pass --api-key-file or set ZITCH_API_KEY to sign in once",
-            config.dbpath.display()
-        );
+        log::info!("no saved profile in {}", config.dbpath.display());
+        return Ok(None);
     };
     emit.status("Signing in with API key");
     let result = client
@@ -1712,7 +1731,29 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Profile> 
         .context("API key login")?;
     result
         .profile
+        .map(Some)
         .ok_or_else(|| anyhow!("login returned no profile"))
+}
+
+/// Shows a sign-in code and waits. Nothing polls the server for the
+/// approval yet, so only a shutdown ends this, with `None`.
+fn await_login(
+    config: &Config,
+    emit: &Emitter,
+    commands: &mpsc::Receiver<Command>,
+) -> Option<Profile> {
+    loop {
+        let login = Login::generate(&config.web_url);
+        log::info!("sign-in state {}", login.state);
+        emit.send(Event::LoginRequired { url: login.url });
+        loop {
+            match commands.recv() {
+                Ok(Command::RetryLogin) => break,
+                Ok(Command::Shutdown) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    }
 }
 
 /// The games the profile owns and whether butler's cache of them is stale.
