@@ -26,11 +26,11 @@ use crate::butlerd::types::{
     HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
     LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
     PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
-    ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
-    UninstallPerformParams, Upload, UploadType,
+    ProfileLoginWithOAuthCodeParams, ProfileUseSavedLoginParams, RuntimeLaunchResult,
+    ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, UploadType,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
-use crate::login::Login;
+use crate::login::{CLIENT_ID, DeviceLogin, Poll, REDIRECT_URI};
 use crate::model::{
     Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
     Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
@@ -43,8 +43,8 @@ pub struct Config {
     pub api_key: Option<String>,
     /// A saved profile to use instead of the most recent one.
     pub profile_id: Option<i64>,
-    /// Where the sign-in QR code sends the phone.
-    pub web_url: String,
+    /// Where the device sign-in talks to.
+    pub api_url: String,
     /// Where games go when the database has no install location yet.
     pub install_dir: PathBuf,
     /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
@@ -114,11 +114,15 @@ pub enum Command {
 pub enum Event {
     /// A one-line description of what the backend is doing.
     Status(String),
-    /// Nothing to sign in with: show this URL as a QR code until
+    /// Nothing to sign in with: show this URL as a QR code, with the
+    /// code the phone's page asks the user to compare, until
     /// [`Event::SignedIn`].
     LoginRequired {
         url: String,
+        user_code: String,
     },
+    /// The sign-in stopped; the page shows why and offers to start over.
+    LoginFailed(String),
     SignedIn(Profile),
     OwnedGames(Vec<Game>),
     /// The profile's collections with their games, in butler's order.
@@ -306,7 +310,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
 
     let profile = match sign_in(&client, &config, emit)? {
         Some(profile) => profile,
-        None => match await_login(&config, emit, &commands) {
+        None => match await_login(&client, &config, emit, &commands) {
             Some(profile) => profile,
             None => return Ok(()),
         },
@@ -1735,23 +1739,96 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Option<Pr
         .ok_or_else(|| anyhow!("login returned no profile"))
 }
 
-/// Shows a sign-in code and waits. Nothing polls the server for the
-/// approval yet, so only a shutdown ends this, with `None`.
+/// The device sign-in, until a profile is signed in or the app shuts
+/// down, which returns `None`. A failure is shown and waits for a retry;
+/// an expired request starts over on its own.
 fn await_login(
+    client: &Client,
     config: &Config,
     emit: &Emitter,
     commands: &mpsc::Receiver<Command>,
 ) -> Option<Profile> {
-    loop {
-        let login = Login::generate(&config.web_url);
-        log::info!("sign-in state {}", login.state);
-        emit.send(Event::LoginRequired { url: login.url });
-        loop {
-            match commands.recv() {
-                Ok(Command::RetryLogin) => break,
-                Ok(Command::Shutdown) | Err(_) => return None,
-                Ok(_) => {}
+    let fail = |message: String| {
+        log::warn!("{message}");
+        emit.send(Event::LoginFailed(message));
+        wait_for_retry(commands)
+    };
+    'request: loop {
+        emit.status("Requesting a sign-in code");
+        let login = match DeviceLogin::start(&config.api_url) {
+            Ok(login) => login,
+            Err(error) => {
+                if !fail(format!("{error:#}")) {
+                    return None;
+                }
+                continue;
             }
+        };
+        emit.status("Waiting for the sign-in to be approved");
+        emit.send(Event::LoginRequired {
+            url: login.verification_url.clone(),
+            user_code: login.user_code.clone(),
+        });
+        let started = Instant::now();
+        let mut interval = login.interval;
+        loop {
+            let deadline = Instant::now() + interval;
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match commands.recv_timeout(left) {
+                    Ok(Command::RetryLogin) => continue 'request,
+                    Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return None;
+                    }
+                    Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            if started.elapsed() >= login.expires_in {
+                continue 'request;
+            }
+            match login.poll(&config.api_url) {
+                Ok(Poll::Pending { interval: next }) => interval = next,
+                Ok(Poll::SlowDown) => interval *= 2,
+                Ok(Poll::Expired) => continue 'request,
+                Ok(Poll::Denied) => {
+                    if !fail("The sign-in was cancelled on the phone".into()) {
+                        return None;
+                    }
+                    continue 'request;
+                }
+                Ok(Poll::Approved { code }) => {
+                    emit.status("Signing in");
+                    let result = client.call(ProfileLoginWithOAuthCodeParams {
+                        code,
+                        code_verifier: login.verifier.clone(),
+                        redirect_uri: REDIRECT_URI.into(),
+                        client_id: CLIENT_ID.into(),
+                    });
+                    let message = match result {
+                        Ok(result) => match result.profile {
+                            Some(profile) => return Some(profile),
+                            None => "Signing in returned no profile".to_string(),
+                        },
+                        Err(error) => format!("Signing in: {error:#}"),
+                    };
+                    if !fail(message) {
+                        return None;
+                    }
+                    continue 'request;
+                }
+                // A network blip; the request expires on its own if not.
+                Err(error) => log::warn!("{error:#}"),
+            }
+        }
+    }
+}
+
+/// Whether the user asked for another go rather than quitting.
+fn wait_for_retry(commands: &mpsc::Receiver<Command>) -> bool {
+    loop {
+        match commands.recv() {
+            Ok(Command::RetryLogin) => return true,
+            Ok(Command::Shutdown) | Err(_) => return false,
+            Ok(_) => {}
         }
     }
 }

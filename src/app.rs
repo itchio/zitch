@@ -14,6 +14,7 @@ use crate::model::{
     UploadExt, UserExt, playable_here,
 };
 use crate::ui;
+use crate::ui::LoginView;
 
 /// How the window presents itself, from the command line.
 pub struct Options {
@@ -106,7 +107,7 @@ pub struct App {
     blur_search: bool,
     page: Page,
     /// The sign-in code, while there is nothing to sign in with.
-    login: Option<QrCode>,
+    login: Option<LoginView>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -1357,12 +1358,23 @@ impl App {
         for event in self.backend.poll() {
             match event {
                 Event::Status(text) => self.status = text,
-                Event::LoginRequired { url } => match QrCode::encode(&url) {
-                    Some(qr) => self.login = Some(qr),
-                    None => {
-                        self.owned = Loadable::Failed("Couldn't encode the sign-in code".into())
-                    }
-                },
+                Event::LoginRequired { url, user_code } => {
+                    let qr = QrCode::encode(&url);
+                    self.login = Some(LoginView {
+                        failure: qr
+                            .is_none()
+                            .then(|| "Couldn't draw the sign-in code".to_string()),
+                        qr,
+                        user_code: Some(user_code),
+                    });
+                }
+                Event::LoginFailed(message) => {
+                    self.login = Some(LoginView {
+                        qr: None,
+                        user_code: None,
+                        failure: Some(message),
+                    });
+                }
                 Event::SignedIn(profile) => {
                     self.login = None;
                     self.profile = Some(profile);
@@ -1844,9 +1856,14 @@ impl App {
             hints.push((vec![Glyph::Back], "Dismiss".to_string()));
             return hints;
         }
-        if self.login.is_some() {
+        if let Some(login) = &self.login {
+            let again = if login.failure.is_some() {
+                "Try again"
+            } else {
+                "New code"
+            };
             return vec![
-                (vec![Glyph::Confirm], "New code".to_string()),
+                (vec![Glyph::Confirm], again.to_string()),
                 (vec![Glyph::Back], "Quit".to_string()),
             ];
         }

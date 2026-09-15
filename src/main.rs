@@ -90,14 +90,14 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
-    /// The site the sign-in QR code points at. For development.
+    /// The API the sign-in talks to. For development.
     #[arg(
         long,
-        env = "ZITCH_WEB_URL",
-        default_value = "https://itch.io",
+        env = "ZITCH_API_URL",
+        default_value = "https://api.itch.io",
         hide = true
     )]
-    web_url: String,
+    api_url: String,
 }
 
 fn parse_size(text: &str) -> Result<(f32, f32), String> {
@@ -157,7 +157,7 @@ fn main() -> anyhow::Result<()> {
         dbpath,
         api_key,
         profile_id: cli.profile_id,
-        web_url: cli.web_url.trim_end_matches('/').to_string(),
+        api_url: cli.api_url.trim_end_matches('/').to_string(),
         // Same layout as the itch app, so a shared config dir shares games.
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),
