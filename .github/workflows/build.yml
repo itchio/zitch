@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [master, main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,6 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag $GITHUB_REF_NAME, Cargo.toml $version"
+          test "v$version" = "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,12 +46,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 22.04 for an older glibc baseline
           - name: linux-x64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: zitch
           - name: linux-arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             binary: zitch
           - name: macos-arm64
@@ -72,13 +80,22 @@ jobs:
         run: cargo test --locked --target ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Size
+      - name: Package
         shell: bash
-        run: ls -l target/${{ matrix.target }}/release/${{ matrix.binary }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
+          dir=zitch-$version-${{ matrix.name }}
+          mkdir -p dist/$dir
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} README.md dist/$dir/
+          cp assets/prompts/LICENSE-kenney.txt dist/$dir/
+          cd dist
+          if [[ "$RUNNER_OS" == Windows ]]; then 7z a -bd $dir.zip $dir; else tar czf $dir.tar.gz $dir; fi
+          rm -rf $dir
+          ls -l
       - uses: actions/upload-artifact@v4
         with:
           name: zitch-${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          path: dist/*
           if-no-files-found: error
 
   muos:
@@ -97,6 +114,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsdl2-dev zip
+      # bundles butler
       - run: make handheld-muxapp
       # check the binary will still load on muOS's glibc 2.38
       - name: glibc check
@@ -104,8 +122,35 @@ jobs:
           need=$(objdump -T target/aarch64-unknown-linux-gnu/release/zitch | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
           echo "needs $need"
           test "$(printf '%s\nGLIBC_2.38\n' "$need" | sort -V | tail -1)" = GLIBC_2.38
+      - name: Package
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
+          mkdir -p dist
+          cp target/zitch.muxapp dist/zitch-$version-muos.muxapp
       - uses: actions/upload-artifact@v4
         with:
           name: zitch-muos
-          path: target/zitch.muxapp
+          path: dist/*
           if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check, build, muos]
+    runs-on: ubuntu-latest
+    # waits for approval; create the release by hand before approving
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Upload
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
