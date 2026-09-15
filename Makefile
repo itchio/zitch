@@ -115,10 +115,15 @@ handheld-deploy: handheld
 	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)'
 	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh $(HANDHELD):$(HANDHELD_APP)/
 
+# The frontend's handoff files, which Andromeda moved out of /tmp. /run/muos
+# exists on Jacaranda too, so ask the launch script which names it uses.
+MUOS_GO = if grep -q /tmp/rom_go /opt/muos/script/mux/launch.sh 2>/dev/null; then APP_GO=/tmp/app_go; ACT_GO=/tmp/act_go; SAFE_QUIT=/tmp/safe_quit; else APP_GO=/run/muos/application; ACT_GO=/run/muos/action; SAFE_QUIT=/run/muos/safe_quit; fi
+
 # Launch through the muOS frontend (which it kills to get the screen, as a
 # menu pick would), wait for the screenshot, fetch it to /tmp/zitch-handheld.png.
+# The frontend spins until safe_quit exists, so the kill must be followed by one.
 handheld-shot: handheld-deploy
-	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) 'cat > $(HANDHELD_APP)/args; rm -f /tmp/zitch.png; echo $(HANDHELD_APP) > /tmp/app_go; echo app > /tmp/act_go; kill -9 $$(pidof muxfrontend); touch /tmp/safe_quit; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ]; do sleep 0.5; done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(HANDHELD_APP)/args; cat $(HANDHELD_APP)/zitch.log'
+	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) 'cat > $(HANDHELD_APP)/args; $(MUOS_GO); rm -f /tmp/zitch.png; echo $(HANDHELD_APP) > $$APP_GO; echo app > $$ACT_GO; kill -9 $$(pidof muxfrontend); touch $$SAFE_QUIT; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ]; do sleep 0.5; done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(HANDHELD_APP)/args; cat $(HANDHELD_APP)/zitch.log'
 	scp -q $(HANDHELD):/tmp/zitch.png /tmp/zitch-handheld.png
 	@echo /tmp/zitch-handheld.png
 

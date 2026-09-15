@@ -24,11 +24,8 @@ use anyhow::{Context, Result, bail};
 use crate::butlerd::types::{Arch, Candidate, Engine, Flavor, LinuxInfo};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
-/// What the frontend writes before running the launch script: the
-/// content to run, the CPU governor while it runs, and a colour filter.
-const ROM_GO: &str = "/tmp/rom_go";
-const GOV_GO: &str = "/tmp/gov_go";
-const FLT_GO: &str = "/tmp/flt_go";
+/// Where Andromeda keeps the launch handoff files; Jacaranda uses /tmp.
+const RUN_DIR: &str = "/run/muos";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
 /// One folder per system the firmware can run, holding a launcher ini
@@ -38,16 +35,16 @@ const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
 /// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
 /// The app launcher set it to zitch; while a game has the screen it must
 /// name the game, or the combo kills zitch under it and orphans the game.
-/// A name is looked up with busybox `pgrep -x`, which matches the whole
-/// `argv[0]`, so a process started by path only matches by pid.
+/// A name is looked up with `pgrep` (`-x` on Jacaranda, `-f` on
+/// Andromeda), so a process started by path only matches by pid.
 const FOREGROUND_PROCESS: &str = "/opt/muos/config/system/foreground_process";
 /// The firmware's LÖVE 11.5, shipped for its Moonlight client. The binary
 /// links `libs/liblove-11.5.so` and the system SDL2.
 const LOVE_DIR: &str = "/opt/muos/share/application/Moonlight";
 /// What that LÖVE reports, and the major version it runs games for.
 const LOVE_VERSION: &str = "11.5";
-/// The firmware's C library; a build wanting a newer one fails to load.
-const GLIBC_VERSION: (u32, u32) = (2, 38);
+/// What Jacaranda ships, assumed when the host's cannot be read.
+const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
 
 /// Routes a game's own SDL2 into the firmware's; see handheld/sdl-dynapi.c.
 /// Deployed next to our binary.
@@ -159,6 +156,10 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
 /// keeps 32-bit ARM builds as a fallback for arm64 hosts, which this
 /// firmware cannot honour: it has no 32-bit loader or libraries.
 pub fn native_blocker(info: &LinuxInfo) -> Option<String> {
+    blocker(info, glibc_version())
+}
+
+fn blocker(info: &LinuxInfo, glibc: (u32, u32)) -> Option<String> {
     match info.arch {
         Some(Arch::Arm64) | None => {}
         Some(Arch::Arm) => {
@@ -168,11 +169,11 @@ pub fn native_blocker(info: &LinuxInfo) -> Option<String> {
     }
     if let Some(version) = info.glibc_version.as_deref()
         && let Some(needed) = parse_version(version)
-        && needed > GLIBC_VERSION
+        && needed > glibc
     {
         return Some(format!(
             "needs glibc {version}; this device has {}.{}",
-            GLIBC_VERSION.0, GLIBC_VERSION.1
+            glibc.0, glibc.1
         ));
     }
     let bundled = info.sdl_bundled.unwrap_or(false);
@@ -205,6 +206,24 @@ fn parse_version(version: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
     Some((major, minor))
+}
+
+/// The host's C library; a build wanting a newer one fails to load.
+fn glibc_version() -> (u32, u32) {
+    static VERSION: OnceLock<(u32, u32)> = OnceLock::new();
+    *VERSION.get_or_init(|| host_glibc_version().unwrap_or(FALLBACK_GLIBC_VERSION))
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn host_glibc_version() -> Option<(u32, u32)> {
+    // SAFETY: returns a pointer to a static NUL-terminated string.
+    let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+    parse_version(version.to_str().ok()?)
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn host_glibc_version() -> Option<(u32, u32)> {
+    None
 }
 
 /// An emulated system the firmware has a core for.
@@ -337,6 +356,38 @@ impl System {
 pub fn available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| Path::new(LAUNCH_SCRIPT).exists())
+}
+
+/// What the frontend writes before running the launch script: the
+/// content to run, the CPU governor while it runs, and a colour filter.
+struct Handoff {
+    rom: PathBuf,
+    governor: PathBuf,
+    filter: PathBuf,
+}
+
+/// Which names this firmware uses. /run/muos exists on Jacaranda too, so
+/// the directory says nothing; the launch script names its own files, and
+/// only Jacaranda's spells out /tmp/rom_go.
+fn handoff() -> &'static Handoff {
+    static HANDOFF: OnceLock<Handoff> = OnceLock::new();
+    HANDOFF.get_or_init(|| {
+        let script = std::fs::read_to_string(LAUNCH_SCRIPT).unwrap_or_default();
+        if script.contains("/tmp/rom_go") {
+            Handoff {
+                rom: PathBuf::from("/tmp/rom_go"),
+                governor: PathBuf::from("/tmp/gov_go"),
+                filter: PathBuf::from("/tmp/flt_go"),
+            }
+        } else {
+            let run = Path::new(RUN_DIR);
+            Handoff {
+                rom: run.join("content"),
+                governor: run.join("governor"),
+                filter: run.join("filter"),
+            }
+        }
+    })
 }
 
 /// What the games butler launches need in their environment here: the
@@ -507,10 +558,14 @@ fn launch_rom(name: &str, system: System, rom: &Path, env: &HashMap<String, Stri
     // launch.sh reads nine lines: name, core, system, two it ignores,
     // launcher, then the folder in two parts it joins, and the file.
     let rom_go = format!("{name}\n{core}\n{assign}\n\n\n{launcher}\n{dir}\n\n{file}\n");
-    std::fs::write(ROM_GO, rom_go).with_context(|| format!("writing {ROM_GO}"))?;
+    let files = handoff();
+    std::fs::write(&files.rom, rom_go)
+        .with_context(|| format!("writing {}", files.rom.display()))?;
     let governor = std::fs::read_to_string(DEFAULT_GOVERNOR).unwrap_or_else(|_| "ondemand".into());
-    std::fs::write(GOV_GO, governor.trim()).with_context(|| format!("writing {GOV_GO}"))?;
-    std::fs::write(FLT_GO, "").with_context(|| format!("writing {FLT_GO}"))?;
+    std::fs::write(&files.governor, governor.trim())
+        .with_context(|| format!("writing {}", files.governor.display()))?;
+    std::fs::write(&files.filter, "")
+        .with_context(|| format!("writing {}", files.filter.display()))?;
     // The app's own config and cache live next to its binary (see
     // mux_launch.sh); the emulator has to find the firmware's instead, or
     // it starts with no button mappings.
@@ -661,6 +716,7 @@ mod tests {
 
     #[test]
     fn native_builds_are_judged_by_their_sdl() {
+        let native_blocker = |info: &LinuxInfo| blocker(info, (2, 38));
         let info = |sdl: Option<&str>, bundled: bool, dynamic: bool| LinuxInfo {
             sdl: sdl.map(str::to_string),
             sdl_bundled: Some(bundled),
