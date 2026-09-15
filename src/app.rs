@@ -69,8 +69,9 @@ pub struct App {
     /// butler's download queue and the latest progress per download.
     downloads: Vec<Download>,
     progress: std::collections::HashMap<String, DownloadProgress>,
-    /// Games the user asked to install that the queue has not listed yet.
-    pending_installs: std::collections::HashSet<i64>,
+    /// Games the user asked to install that the queue has not listed yet,
+    /// in the order asked.
+    pending_installs: Vec<i64>,
     /// Downloads the user asked to discard that the queue still lists.
     discarding: std::collections::HashSet<String>,
     /// What the interface shows per game, rebuilt from the fields above.
@@ -949,7 +950,7 @@ impl App {
                 }
                 // Shown as installing from this instant; the queue listing
                 // that follows replaces it.
-                self.pending_installs.insert(game_id);
+                self.pending_installs.push(game_id);
                 self.install_failures.remove(&game_id);
                 self.backend.send(Command::Install {
                     game: Box::new(game),
@@ -958,6 +959,22 @@ impl App {
             }
             Action::CancelInstall { game_id } => {
                 let Some(download) = self.download_for(game_id) else {
+                    if self.pending_installs.contains(&game_id) {
+                        self.pending_installs.retain(|id| *id != game_id);
+                        self.backend.send(Command::SkipInstall { game_id });
+                        // Close its picker so the queue behind it moves on.
+                        // The skip is sent first so the worker reads the
+                        // answer as a cancel, not a decline.
+                        let title = self.game(game_id).map(|g| g.title.clone());
+                        if let Some(prompt) = title.and_then(|title| self.upload_picker_for(&title))
+                        {
+                            let id = prompt.id;
+                            let choice = Some(prompt.choices.len().saturating_sub(1));
+                            self.prompt = self.prompt_queue.pop_front();
+                            self.backend.send(Command::Answer { prompt: id, choice });
+                        }
+                        self.rebuild_installs();
+                    }
                     return;
                 };
                 let download_id = download.id.clone();
@@ -1160,6 +1177,14 @@ impl App {
             .filter_map(|cave| cave.game_id())
             .filter(|id| seen.insert(*id))
             .collect()
+    }
+
+    /// Prompts carry no game id, so the picker is matched by the title in
+    /// its body.
+    fn upload_picker_for(&self, title: &str) -> Option<&Prompt> {
+        self.prompt
+            .as_ref()
+            .filter(|p| p.title == crate::backend::UPLOAD_PICKER && p.body.starts_with(title))
     }
 
     fn download_for(&self, game_id: i64) -> Option<&Download> {
@@ -1453,11 +1478,11 @@ impl App {
                         downloads.iter().map(|d| d.id.clone()).collect();
                     self.progress.retain(|id, _| listed.contains(id));
                     self.discarding.retain(|id| listed.contains(id));
-                    for download in &downloads {
-                        if let Some(game) = &download.game {
-                            self.pending_installs.remove(&game.id);
-                        }
-                    }
+                    self.pending_installs.retain(|id| {
+                        !downloads
+                            .iter()
+                            .any(|d| d.game.as_ref().is_some_and(|g| g.id == *id))
+                    });
                     self.downloads = downloads;
                     self.rebuild_installs();
                 }
@@ -1559,11 +1584,11 @@ impl App {
                     }
                 }
                 Event::InstallDeclined { game_id } => {
-                    self.pending_installs.remove(&game_id);
+                    self.pending_installs.retain(|id| *id != game_id);
                     self.rebuild_installs();
                 }
                 Event::InstallFailed { game_id, error } => {
-                    self.pending_installs.remove(&game_id);
+                    self.pending_installs.retain(|id| *id != game_id);
                     self.rebuild_installs();
                     self.install_failed(game_id, error);
                 }
@@ -1605,9 +1630,10 @@ impl App {
     }
 
     /// What the Downloads tab lists, split the way the itch app splits it:
-    /// butler's pending queue in its order, then everything with a
-    /// `finished_at`, done or failed, newest first. Finished entries stay
-    /// in butler's queue until the user clears them.
+    /// butler's pending queue in its order, then installs asked for that
+    /// butler has not listed yet, then everything with a `finished_at`,
+    /// done or failed, newest first. Finished entries stay in butler's
+    /// queue until the user clears them.
     fn download_rows(&self) -> Vec<ui::DownloadRow<'_>> {
         let mut pending: Vec<&Download> = Vec::new();
         let mut finished: Vec<&Download> = Vec::new();
@@ -1722,6 +1748,28 @@ impl App {
                 section: ui::DownloadSection::Queue,
                 direct_update: false,
                 buttons,
+            });
+        }
+        for game_id in &self.pending_installs {
+            if self.download_for(*game_id).is_some() {
+                continue;
+            }
+            let game = self.game(*game_id);
+            let title = game.map_or_else(|| "Game".to_string(), |g| g.title.clone());
+            let detail = if self.upload_picker_for(&title).is_some() {
+                "Choose a download"
+            } else {
+                "Queueing"
+            };
+            rows.push(ui::DownloadRow {
+                game,
+                title,
+                detail: detail.to_string(),
+                progress: None,
+                failed: false,
+                section: ui::DownloadSection::Queue,
+                direct_update: false,
+                buttons: vec![("Cancel", Action::CancelInstall { game_id: *game_id })],
             });
         }
         for download in finished {

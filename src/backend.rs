@@ -7,7 +7,7 @@
 //! `Downloads.Discard` cancels. butler then owns staging folders, resume
 //! after a restart, and ordering.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -57,6 +57,10 @@ pub struct Config {
 pub enum Command {
     Install {
         game: Box<Game>,
+    },
+    /// Drop a game from the install queue unless it has reached butler.
+    SkipInstall {
+        game_id: i64,
     },
     /// The next page of a collection's games.
     CollectionPage {
@@ -332,6 +336,12 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let prompts = Prompts::default();
     let launches = Launches::default();
     let config = Arc::new(config);
+    let installer = spawn_installer(
+        Arc::clone(&link),
+        emit.clone(),
+        Arc::clone(&config),
+        prompts.clone(),
+    );
     let sync = Sync {
         profile_id: profile.id,
         online: Arc::new(AtomicBool::new(true)),
@@ -395,29 +405,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         }
         match commands.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(Command::Install { game }) => {
-                // Picking an upload blocks on the answer, which arrives
-                // through this loop, so the install runs on its own thread.
-                let config = Arc::clone(&config);
-                let prompts = prompts.clone();
-                let game_id = game.id;
-                spawn_op(
-                    format!("install-{game_id}"),
-                    Arc::clone(&link),
-                    emit.clone(),
-                    move |error| Event::InstallFailed {
-                        game_id,
-                        error: format!("{error:#}"),
-                    },
-                    move |client, emit| {
-                        if !queue_install(client, &config, &prompts, emit, *game)? {
-                            emit.send(Event::InstallDeclined { game_id });
-                        }
-                        refresh_downloads(client, emit);
-                        Ok(())
-                    },
-                );
-            }
+            Ok(Command::Install { game }) => installer.push(game),
+            Ok(Command::SkipInstall { game_id }) => installer.skip(game_id),
             Ok(Command::CollectionPage {
                 collection_id,
                 cursor,
@@ -1443,6 +1432,114 @@ where
     }
 }
 
+/// One worker queues installs in the order asked, so butler's queue
+/// matches the taps. It has its own thread because the upload picker
+/// blocks on an answer from the main loop. A game on the picker holds up
+/// the rest.
+struct Installer {
+    queue: mpsc::Sender<Box<Game>>,
+    state: Arc<Mutex<InstallQueue>>,
+}
+
+#[derive(Default)]
+struct InstallQueue {
+    /// Games sent down the channel and not yet finished with.
+    held: HashSet<i64>,
+    /// Games to drop at the worker's next check.
+    skipped: HashSet<i64>,
+}
+
+impl Installer {
+    /// Queues the game, or if the worker already holds it, only takes back
+    /// a cancel.
+    fn push(&self, game: Box<Game>) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.skipped.remove(&game.id);
+        if state.held.insert(game.id) {
+            let _ = self.queue.send(game);
+        }
+    }
+
+    fn skip(&self, game_id: i64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .skipped
+            .insert(game_id);
+    }
+}
+
+fn take_skip(state: &Mutex<InstallQueue>, game_id: i64) -> bool {
+    state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .skipped
+        .remove(&game_id)
+}
+
+fn spawn_installer(link: Link, emit: Emitter, config: Arc<Config>, prompts: Prompts) -> Installer {
+    let (tx, rx) = mpsc::channel::<Box<Game>>();
+    let state: Arc<Mutex<InstallQueue>> = Arc::default();
+    let worker_state = Arc::clone(&state);
+    let result = std::thread::Builder::new()
+        .name("zitch-installer".into())
+        .spawn(move || {
+            for game in rx {
+                let game_id = game.id;
+                install_one(&link, &emit, &config, &prompts, &worker_state, game);
+                let mut state = worker_state.lock().unwrap_or_else(|p| p.into_inner());
+                state.held.remove(&game_id);
+                state.skipped.remove(&game_id);
+            }
+        });
+    if let Err(error) = result {
+        log::error!("spawning the installer: {error}");
+    }
+    Installer { queue: tx, state }
+}
+
+fn install_one(
+    link: &Link,
+    emit: &Emitter,
+    config: &Config,
+    prompts: &Prompts,
+    state: &Mutex<InstallQueue>,
+    game: Box<Game>,
+) {
+    let game_id = game.id;
+    if take_skip(state, game_id) {
+        log::info!("skipped install of {}", game.title);
+        return;
+    }
+    let fail = |error: anyhow::Error| Event::InstallFailed {
+        game_id,
+        error: format!("{error:#}"),
+    };
+    // A fresh connection each time, so a restarted daemon is found.
+    let client = match connect(link) {
+        Ok(client) => client,
+        Err(error) => {
+            emit.send(fail(error));
+            return;
+        }
+    };
+    let skipped = || take_skip(state, game_id);
+    match queue_install(&client, config, prompts, emit, *game, &skipped) {
+        Ok(Queued::Yes) => {}
+        Ok(Queued::Declined) => emit.send(Event::InstallDeclined { game_id }),
+        Ok(Queued::Skipped) => log::info!("skipped install of game {game_id}"),
+        Err(error) if !current(link).alive() => {
+            // The main loop restarts and reports the daemon.
+            log::warn!("install-{game_id}: {error:#} (butler exited)");
+        }
+        Err(error) => {
+            log::error!("install-{game_id}: {error:#}");
+            emit.send(fail(error));
+        }
+    }
+    refresh_downloads(&client, emit);
+}
+
 fn discard(client: &Client, emit: &Emitter, download_id: String) {
     if let Err(error) = client.call(DownloadsDiscardParams {
         download_id: download_id.clone(),
@@ -1473,16 +1570,26 @@ fn refresh_downloads(client: &Client, emit: &Emitter) {
     }
 }
 
+enum Queued {
+    Yes,
+    /// The user backed out of the upload picker.
+    Declined,
+    /// The user cancelled while the uploads were being fetched or picked.
+    Skipped,
+}
+
 /// Puts a game on the download queue; the driver takes it from there.
 /// Queues an install, asking which upload when the game has more than one
-/// for this device. `Ok(false)` when the user backed out.
+/// for this device. `skipped` is checked again just before queueing, since
+/// the user may cancel during the fetch or the picker.
 fn queue_install(
     client: &Client,
     config: &Config,
     prompts: &Prompts,
     emit: &Emitter,
     game: Game,
-) -> Result<bool> {
+    skipped: &dyn Fn() -> bool,
+) -> Result<Queued> {
     let location = install_location(client, config)?;
     // butler's compatibility filter goes by platform tags, which a ROM
     // does not carry; on muOS every upload is fetched and judged by name.
@@ -1505,9 +1612,13 @@ fn queue_install(
     } else {
         match pick_upload(prompts, emit, &game, &uploads) {
             Some(index) => index,
-            None => return Ok(false),
+            None if skipped() => return Ok(Queued::Skipped),
+            None => return Ok(Queued::Declined),
         }
     };
+    if skipped() {
+        return Ok(Queued::Skipped);
+    }
     let upload = uploads.swap_remove(index);
     // butler knows a few ROM extensions and sniffs the rest as "unknown",
     // for which it has no installer. A ROM is a file to copy, so on muOS
@@ -1523,7 +1634,7 @@ fn queue_install(
         ..Default::default()
     })?;
     log::info!("queued {} as download {}", game.title, queued.id);
-    Ok(true)
+    Ok(Queued::Yes)
 }
 
 /// One line per upload for the picker: its name, size, and what marks it
@@ -1559,6 +1670,9 @@ fn upload_label(upload: &Upload) -> String {
     label
 }
 
+/// The upload picker's title; the Downloads tab recognises it by this.
+pub const UPLOAD_PICKER: &str = "Which download?";
+
 /// Asks which upload to install. `None` when the user backs out.
 fn pick_upload(
     prompts: &Prompts,
@@ -1570,7 +1684,7 @@ fn pick_upload(
     let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
     choices.push("Cancel");
     let body = format!("{} has more than one download for this device.", game.title);
-    let picked = prompts.pick(emit, "Which download?", &body, &choices)?;
+    let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
     (picked < labels.len()).then_some(picked)
 }
 
