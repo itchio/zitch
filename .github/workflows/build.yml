@@ -26,6 +26,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Build scripts link the image's glibc; rust-cache only keys on runner.os.
+          env-vars: ImageOS
       - name: Linux build dependencies
         run: |
           sudo apt-get update
@@ -71,6 +74,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          # Build scripts link the image's glibc; rust-cache only keys on runner.os.
+          env-vars: ImageOS
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -110,6 +115,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: muos
+          # Build scripts link the image's glibc; rust-cache only keys on runner.os.
+          env-vars: ImageOS
       - name: Build dependencies
         run: |
           sudo apt-get update
