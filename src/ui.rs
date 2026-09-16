@@ -2064,6 +2064,7 @@ pub fn drawer(
     screen: Rect,
     items: &[MenuItem],
     focus: Option<usize>,
+    butler_version: Option<&str>,
     actions: &mut Vec<Action>,
 ) {
     let open = drawer_open(ctx, focus.is_some());
@@ -2148,14 +2149,22 @@ pub fn drawer(
                     .max_rect(version)
                     .layout(egui::Layout::bottom_up(egui::Align::Min)),
             );
-            child.add(
+            let caption = |text: String| {
                 egui::Label::new(
-                    egui::RichText::new(concat!("zitch ", env!("ZITCH_VERSION")))
+                    egui::RichText::new(text)
                         .font(FontId::proportional(m.caption))
                         .color(DIM),
                 )
-                .truncate(),
-            );
+                .truncate()
+            };
+            // Bottom-up: butler goes in first so zitch ends up above it.
+            if let Some(butler) = butler_version {
+                let butler = butler.strip_prefix('v').unwrap_or(butler);
+                child.add(caption(format!("butler {butler}")));
+            }
+            child.add(caption(
+                concat!("zitch ", env!("ZITCH_VERSION")).to_string(),
+            ));
         });
 }
 

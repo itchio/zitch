@@ -28,6 +28,7 @@ use crate::butlerd::types::{
     PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithOAuthCodeParams, ProfileUseSavedLoginParams, RuntimeLaunchResult,
     ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, UploadType,
+    VersionGetParams,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::login::{CLIENT_ID, DeviceLogin, Poll, REDIRECT_URI};
@@ -118,6 +119,8 @@ pub enum Command {
 pub enum Event {
     /// A one-line description of what the backend is doing.
     Status(String),
+    /// butler's short version, like `v15.20.0`.
+    ButlerVersion(String),
     /// Nothing to sign in with: show this URL as a QR code, with the
     /// code the phone's page asks the user to compare, until
     /// [`Event::SignedIn`].
@@ -311,6 +314,10 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         "Connected to butlerd at {}",
         current(&link).address
     ));
+    match client.call(VersionGetParams {}) {
+        Ok(version) => emit.send(Event::ButlerVersion(version.version)),
+        Err(error) => log::warn!("butler version: {error:#}"),
+    }
 
     let profile = match sign_in(&client, &config, emit)? {
         Some(profile) => profile,

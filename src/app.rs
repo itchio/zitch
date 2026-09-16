@@ -47,6 +47,7 @@ pub struct App {
     quitting: Option<u32>,
     /// The backend's latest progress line, shown while the library loads.
     status: String,
+    butler_version: Option<String>,
     /// A failure with no page of its own, shown briefly above the footer.
     notice: Option<(String, Instant)>,
     profile: Option<Profile>,
@@ -255,6 +256,7 @@ impl App {
             input_mode: InputMode::Keyboard,
             input_seen: false,
             status: String::new(),
+            butler_version: None,
             notice: None,
             profile: None,
             owned: Loadable::Loading,
@@ -1383,6 +1385,7 @@ impl App {
         for event in self.backend.poll() {
             match event {
                 Event::Status(text) => self.status = text,
+                Event::ButlerVersion(version) => self.butler_version = Some(version),
                 Event::LoginRequired { url, user_code } => {
                     let qr = QrCode::encode(&url);
                     self.login = Some(LoginView {
@@ -2363,6 +2366,7 @@ impl App {
             ui.max_rect(),
             &items,
             self.menu,
+            self.butler_version.as_deref(),
             &mut self.actions,
         );
         if let Some(frames) = self.quitting {
