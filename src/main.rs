@@ -17,7 +17,7 @@ use clap::Parser;
 
 /// A controller-friendly big picture itch.io client.
 #[derive(Debug, Parser)]
-#[command(name = "zitch", version, about)]
+#[command(name = "zitch", version = env!("ZITCH_VERSION"), about)]
 struct Cli {
     /// Path to the butler binary. Defaults to the one the itch app installed
     /// under the config directory (see --app-name), or `butler` on PATH when

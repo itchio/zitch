@@ -91,7 +91,7 @@ impl Daemon {
             .arg("--destiny-pid")
             .arg(std::process::id().to_string())
             .arg("--user-agent")
-            .arg(concat!("zitch/", env!("CARGO_PKG_VERSION")))
+            .arg(concat!("zitch/", env!("ZITCH_VERSION")))
             .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

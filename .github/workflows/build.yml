@@ -81,6 +81,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libudev-dev
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
+          echo "ZITCH_VERSION=$version" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --locked --target ${{ matrix.target }}
       - name: Build
@@ -88,8 +93,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
-          dir=zitch-$version-${{ matrix.name }}
+          dir=zitch-$ZITCH_VERSION-${{ matrix.name }}
           mkdir -p dist/$dir
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} README.md dist/$dir/
           cp assets/prompts/LICENSE-kenney.txt dist/$dir/
@@ -121,6 +125,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsdl2-dev zip
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
+          echo "ZITCH_VERSION=$version" >> "$GITHUB_ENV"
       # bundles butler
       - run: make handheld-muxapp
       # check the binary will still load on muOS's glibc 2.38
@@ -131,9 +139,8 @@ jobs:
           test "$(printf '%s\nGLIBC_2.38\n' "$need" | sort -V | tail -1)" = GLIBC_2.38
       - name: Package
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
           mkdir -p dist
-          cp target/zitch.muxapp dist/zitch-$version-muos.muxapp
+          cp target/zitch.muxapp dist/zitch-$ZITCH_VERSION-muos.muxapp
       - uses: actions/upload-artifact@v4
         with:
           name: zitch-muos

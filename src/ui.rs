@@ -247,6 +247,9 @@ pub struct Metrics {
     /// Height of the title line under a tile's cover.
     pub title_height: f32,
     pub header_height: f32,
+    /// Height of the hint bar, for things painted over the whole screen
+    /// that must stop short of it.
+    pub footer_height: f32,
     pub section_gap: f32,
     pub heading: f32,
     pub title: f32,
@@ -282,6 +285,7 @@ impl Metrics {
             .min((usable - Self::MIN_COLUMNS * gap) / Self::MIN_COLUMNS)
             .round();
         let font = |base: f32, floor: f32| (base * scale).max(floor);
+        let icon = |base: f32| (base * scale.max(Self::ICON_MIN_SCALE)).round();
         Self {
             scale,
             chrome,
@@ -292,6 +296,7 @@ impl Metrics {
             ring: space(6.0),
             title_height: space(26.0),
             header_height: frame(30.0),
+            footer_height: frame(8.0) * 2.0 + icon(22.0),
             section_gap: frame(16.0),
             heading: font(30.0, 20.0),
             title: font(26.0, 18.0),
@@ -2134,6 +2139,23 @@ pub fn drawer(
                 }
                 cursor += row_height;
             }
+            let version = Rect::from_min_max(
+                egui::pos2(panel.min.x + pad, cursor),
+                egui::pos2(panel.max.x - pad, panel.max.y - m.footer_height - pad),
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(version)
+                    .layout(egui::Layout::bottom_up(egui::Align::Min)),
+            );
+            child.add(
+                egui::Label::new(
+                    egui::RichText::new(concat!("zitch ", env!("ZITCH_VERSION")))
+                        .font(FontId::proportional(m.caption))
+                        .color(DIM),
+                )
+                .truncate(),
+            );
         });
 }
 
