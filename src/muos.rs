@@ -39,13 +39,30 @@ const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
 /// A name is looked up with `pgrep` (`-x` on Jacaranda, `-f` on
 /// Andromeda), so a process started by path only matches by pid.
 const FOREGROUND_PROCESS: &str = "/opt/muos/config/system/foreground_process";
-/// The firmware's LÖVE 11.5, shipped for its Moonlight client. The binary
-/// links `libs/liblove-11.5.so` and the system SDL2.
-const LOVE_DIR: &str = "/opt/muos/share/application/Moonlight";
-/// What that LÖVE reports, and the major version it runs games for.
-const LOVE_VERSION: &str = "11.5";
+/// Where the firmware keeps its apps. An app installed to the SD card
+/// lands under the second.
+const APPLICATION_DIRS: [&str; 2] = [
+    "/opt/muos/share/application",
+    "/run/muos/storage/application",
+];
 /// What Jacaranda ships, assumed when the host's cannot be read.
 const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
+
+/// Why a game cannot run on the LÖVE that is here. The 0.x series is a
+/// different API, so 11.x will not load those at all.
+fn love_blocker(wanted: &str, have: &str) -> Option<String> {
+    wanted
+        .starts_with("0.")
+        .then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
+}
+
+/// A LÖVE the firmware happens to carry: the binary and the directory
+/// holding its `liblove`.
+struct Love {
+    binary: PathBuf,
+    libs: PathBuf,
+    version: String,
+}
 
 /// Routes a game's own SDL2 into the firmware's; see handheld/sdl-dynapi.c.
 /// Deployed next to our binary.
@@ -96,6 +113,59 @@ impl Content {
 /// Whether the firmware can run a file with this name. Used before an
 /// install, when the name is all there is; once installed, butler's
 /// targets decide ([`content_for`]).
+/// muOS ships no LÖVE of its own; what is here belongs to whichever
+/// bundled app happens to be written in LÖVE, and those come and go
+/// between releases. Take the first one found.
+fn love() -> Option<&'static Love> {
+    static LOVE: OnceLock<Option<Love>> = OnceLock::new();
+    LOVE.get_or_init(|| {
+        let apps = APPLICATION_DIRS
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten()
+            .filter_map(|entry| entry.ok());
+        apps.flat_map(|app| {
+            let app = app.path();
+            [app.join("love"), app.join(".game/bin/love")]
+        })
+        .find_map(love_at)
+    })
+    .as_ref()
+}
+
+/// The runtime around a `love` binary, if it is one: `liblove` sits in a
+/// sibling directory, named for the architecture on newer builds.
+fn love_at(binary: PathBuf) -> Option<Love> {
+    if !binary.is_file() {
+        return None;
+    }
+    let parent = binary.parent()?;
+    ["libs", "libs.aarch64"]
+        .iter()
+        .map(|name| parent.join(name))
+        .find_map(|libs| {
+            let version = liblove_version(&libs)?;
+            Some(Love {
+                binary: binary.clone(),
+                libs,
+                version,
+            })
+        })
+}
+
+/// The version out of `liblove-<version>.so`, which is how the firmware
+/// names it and the only place the runtime says what it is.
+fn liblove_version(libs: &Path) -> Option<String> {
+    std::fs::read_dir(libs)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .find_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let version = name.strip_prefix("liblove-")?.strip_suffix(".so")?;
+            Some(version.to_string())
+        })
+}
+
 pub fn runs_here(path: &Path) -> bool {
     Content::for_file(path).is_some() || disc_runs_here(path)
 }
@@ -116,7 +186,10 @@ fn is_disc_image(path: &Path) -> bool {
 /// The payload flavors the firmware has runtimes for, in dash's words,
 /// for `Launch.GetTargets`.
 pub fn runtimes() -> Vec<String> {
-    let mut runtimes = vec!["love".to_string()];
+    let mut runtimes = Vec::new();
+    if love().is_some() {
+        runtimes.push("love".to_string());
+    }
     if System::for_id(PICO8).is_some() {
         runtimes.push("pico8-cart".to_string());
     }
@@ -138,13 +211,13 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
     let engine = candidate.engine.as_ref();
     let id = match candidate.flavor {
         Flavor::Love => {
-            let version = engine.and_then(|e| e.version.as_deref()).unwrap_or("");
-            return if version.starts_with("0.") {
-                Err(format!(
-                    "made for LÖVE {version}; this device has LÖVE {LOVE_VERSION}"
-                ))
-            } else {
-                Ok(Content::Love { path })
+            let Some(love) = love() else {
+                return Err("this device has no LÖVE".to_string());
+            };
+            let wanted = engine.and_then(|e| e.version.as_deref()).unwrap_or("");
+            return match love_blocker(wanted, &love.version) {
+                Some(why) => Err(why),
+                None => Ok(Content::Love { path }),
             };
         }
         Flavor::ROM => engine
@@ -581,24 +654,25 @@ fn set_foreground(process: &str) {
 /// window takes the screen, like RetroArch's. The panic combo gets its
 /// pid, as there is no launcher script to name it.
 fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> Result<()> {
-    let dir = Path::new(LOVE_DIR);
-    let mut command = Command::new(dir.join("love"));
+    let love = love().context("no LÖVE on this device")?;
+    let dir = love.binary.parent().unwrap_or(Path::new("/"));
+    let mut command = Command::new(&love.binary);
     command
         .arg(path)
         .args(args)
         .current_dir(dir)
-        .env("LD_LIBRARY_PATH", dir.join("libs"))
+        .env("LD_LIBRARY_PATH", &love.libs)
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
         .envs(env);
-    let mut child = spawn_group(&mut command)
-        .with_context(|| format!("running {}", dir.join("love").display()))?;
+    let mut child =
+        spawn_group(&mut command).with_context(|| format!("running {}", love.binary.display()))?;
     set_foreground(&child.id().to_string());
     let status = child
         .wait()
-        .with_context(|| format!("waiting for {}", dir.join("love").display()))?;
+        .with_context(|| format!("waiting for {}", love.binary.display()))?;
     if !status.success() {
         bail!("love exited with {status}");
     }
@@ -845,28 +919,28 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
     }
 
     #[test]
-    fn love_payloads_become_content() {
-        let love = EngineInfo {
-            engine: Engine::Love,
-            version: Some("11.5".into()),
-            details: None,
-        };
-        let new = payload(Flavor::Love, Some(love.clone()));
-        assert_eq!(
-            content_for(&new, PathBuf::from("/g/game.love")),
-            Ok(Content::Love {
-                path: PathBuf::from("/g/game.love")
-            })
-        );
-        let old = payload(
+    fn old_love_games_are_turned_away() {
+        assert_eq!(love_blocker("11.5", "11.5"), None);
+        assert_eq!(love_blocker("", "11.5"), None);
+        assert!(love_blocker("0.8.0", "11.5").is_some());
+        assert!(love_blocker("0.10.2", "11.5").unwrap().contains("11.5"));
+    }
+
+    #[test]
+    fn payloads_without_a_runtime_are_turned_away() {
+        // no LÖVE off-device, and no runtime for a native build either
+        let love = payload(
             Flavor::Love,
             Some(EngineInfo {
-                version: Some("0.8.0".into()),
-                ..love
+                engine: Engine::Love,
+                version: Some("11.5".into()),
+                details: None,
             }),
         );
-        assert!(content_for(&old, PathBuf::from("/g/old.love")).is_err());
-
+        assert_eq!(
+            content_for(&love, PathBuf::from("/g/game.love")),
+            Err("this device has no LÖVE".to_string())
+        );
         let native = payload(Flavor::NativeLinux, None);
         assert!(content_for(&native, PathBuf::from("/g/bin")).is_err());
     }
