@@ -28,9 +28,10 @@ const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 const RUN_DIR: &str = "/run/muos";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
-/// One folder per system the firmware can run, holding a launcher ini
-/// per emulator. The launch script reads the launcher named in rom_go
-/// from here, and exits with a bare error when the folder is missing.
+/// The firmware's systems: `assign.json` maps ids to a folder per system,
+/// each with a `global.ini` naming its default launcher and an ini per
+/// launcher naming the core. The launch script reads the launcher named
+/// in rom_go from here.
 const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
 /// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
 /// The app launcher set it to zitch; while a game has the screen it must
@@ -55,7 +56,10 @@ const SDL_SHIM: &str = "libzitch-sdl.so";
 pub enum Content {
     /// A file RetroArch plays with the system's core; fantasy console
     /// carts count.
-    Rom { path: PathBuf, system: System },
+    Rom {
+        path: PathBuf,
+        system: &'static System,
+    },
     /// A `.love` file, or a folder with `main.lua` at its root.
     Love { path: PathBuf },
 }
@@ -75,9 +79,9 @@ impl Content {
         })
     }
 
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
-            Content::Rom { system, .. } => system.label(),
+            Content::Rom { system, .. } => &system.label,
             Content::Love { .. } => "LÖVE",
         }
     }
@@ -99,15 +103,18 @@ pub fn runs_here(path: &Path) -> bool {
 /// The payload flavors the firmware has runtimes for, in dash's words,
 /// for `Launch.GetTargets`.
 pub fn runtimes() -> Vec<String> {
-    let mut runtimes = vec![
-        "love".to_string(),
-        "pico8-cart".to_string(),
-        "tic80-cart".to_string(),
-    ];
+    let mut runtimes = vec!["love".to_string()];
+    if System::for_id(PICO8).is_some() {
+        runtimes.push("pico8-cart".to_string());
+    }
+    if System::for_id(TIC80).is_some() {
+        runtimes.push("tic80-cart".to_string());
+    }
     runtimes.extend(
-        System::ALL
+        ROM_IDS
             .iter()
-            .filter_map(|s| Some(format!("rom:{}", s.rom_id()?))),
+            .filter(|id| System::for_id(id).is_some())
+            .map(|id| format!("rom:{id}")),
     );
     runtimes
 }
@@ -116,36 +123,28 @@ pub fn runtimes() -> Vec<String> {
 /// even though the firmware was said to run its kind.
 pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, String> {
     let engine = candidate.engine.as_ref();
-    match candidate.flavor {
+    let id = match candidate.flavor {
         Flavor::Love => {
             let version = engine.and_then(|e| e.version.as_deref()).unwrap_or("");
-            if version.starts_with("0.") {
+            return if version.starts_with("0.") {
                 Err(format!(
                     "made for LÖVE {version}; this device has LÖVE {LOVE_VERSION}"
                 ))
             } else {
                 Ok(Content::Love { path })
-            }
+            };
         }
-        Flavor::ROM => {
-            let system = engine
-                .filter(|e| e.engine == Engine::ROM)
-                .and_then(|e| e.details.as_ref()?.get("system")?.as_str())
-                .unwrap_or("");
-            match System::from_rom_id(system) {
-                Some(system) => Ok(Content::Rom { path, system }),
-                None => Err(format!("no emulator for {system} on this device")),
-            }
-        }
-        Flavor::Pico8Cart => Ok(Content::Rom {
-            path,
-            system: System::Pico8,
-        }),
-        Flavor::TIC80Cart => Ok(Content::Rom {
-            path,
-            system: System::Tic80,
-        }),
-        other => Err(format!("no runtime for {other:?} on this device")),
+        Flavor::ROM => engine
+            .filter(|e| e.engine == Engine::ROM)
+            .and_then(|e| e.details.as_ref()?.get("system")?.as_str())
+            .unwrap_or(""),
+        Flavor::Pico8Cart => PICO8,
+        Flavor::TIC80Cart => TIC80,
+        other => return Err(format!("no runtime for {other:?} on this device")),
+    };
+    match System::for_id(id) {
+        Some(system) => Ok(Content::Rom { path, system }),
+        None => Err(format!("no emulator for {id} on this device")),
     }
 }
 
@@ -226,130 +225,183 @@ fn host_glibc_version() -> Option<(u32, u32)> {
     None
 }
 
-/// An emulated system the firmware has a core for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum System {
-    Nes,
-    Snes,
-    GameBoy,
-    GameBoyColor,
-    GameBoyAdvance,
-    MegaDrive,
-    Commodore64,
-    Amiga,
-    Nintendo64,
-    /// Not consoles: carts are `.p8`/`.p8.png` and `.tic`, and dash names
-    /// each as a payload of its own rather than a ROM system.
-    Pico8,
-    Tic80,
+/// dash's ROM system ids: what `Launch.GetTargets` runtimes take and
+/// what a ROM payload's `engine.details["system"]` holds.
+const ROM_IDS: [&str; 23] = [
+    "nes",
+    "snes",
+    "gb",
+    "gbc",
+    "gba",
+    "nds",
+    "md",
+    "32x",
+    "sms",
+    "gg",
+    "pce",
+    "lynx",
+    "ngp",
+    "a26",
+    "c64",
+    "amiga",
+    "n64",
+    "psx",
+    "ps2",
+    "psp",
+    "saturn",
+    "segacd",
+    "dreamcast",
+];
+/// Fantasy consoles: dash names their carts as payloads of their own,
+/// the firmware assigns them like any system.
+const PICO8: &str = "pico8";
+const TIC80: &str = "tic80";
+
+/// dash ids that `assign.json` spells differently.
+fn assign_key(id: &str) -> &str {
+    match id {
+        "a26" => "a2600",
+        other => other,
+    }
+}
+
+/// An emulated system this firmware has an emulator for, from its assign
+/// metadata. A user who reassigned a system in the menu is not followed,
+/// since that assignment is per ROM folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct System {
+    /// dash's id, e.g. `gba`.
+    pub id: String,
+    /// The folder under [`ASSIGN_DIR`].
+    assign: String,
+    /// `global.ini` `default=`: the launcher ini's stem.
+    launcher: String,
+    /// The launcher ini's `core=`.
+    core: String,
+    /// `global.ini` `name=`.
+    label: String,
 }
 
 impl System {
-    const ALL: [System; 11] = [
-        System::Nes,
-        System::Snes,
-        System::GameBoy,
-        System::GameBoyColor,
-        System::GameBoyAdvance,
-        System::MegaDrive,
-        System::Commodore64,
-        System::Amiga,
-        System::Nintendo64,
-        System::Pico8,
-        System::Tic80,
-    ];
-
-    /// dash's id for the system, as `Launch.GetTargets` names ROMs.
-    fn rom_id(self) -> Option<&'static str> {
-        Some(match self {
-            System::Nes => "nes",
-            System::Snes => "snes",
-            System::GameBoy => "gb",
-            System::GameBoyColor => "gbc",
-            System::GameBoyAdvance => "gba",
-            System::MegaDrive => "md",
-            System::Commodore64 => "c64",
-            System::Amiga => "amiga",
-            System::Nintendo64 => "n64",
-            System::Pico8 | System::Tic80 => return None,
-        })
+    /// The system dash's `id` names, if this firmware has one.
+    pub fn for_id(id: &str) -> Option<&'static System> {
+        systems().get(id)
     }
 
-    fn from_rom_id(id: &str) -> Option<System> {
-        System::ALL.iter().copied().find(|s| s.rom_id() == Some(id))
+    /// The system a file is a ROM for, by extension, if it runs here.
+    pub fn for_file(path: &Path) -> Option<&'static System> {
+        System::for_id(id_for_file(path)?)
     }
+}
 
-    /// The system a file is a ROM for, by extension.
-    pub fn for_file(path: &Path) -> Option<System> {
-        let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-        if name.ends_with(".p8.png") {
-            return Some(System::Pico8);
-        }
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        Some(match ext.as_str() {
-            "nes" | "unf" | "unif" => System::Nes,
-            "sfc" | "smc" | "swc" => System::Snes,
-            "gb" => System::GameBoy,
-            "gbc" => System::GameBoyColor,
-            "gba" => System::GameBoyAdvance,
-            "md" | "gen" | "smd" => System::MegaDrive,
-            "prg" | "d64" | "t64" | "crt" | "d81" => System::Commodore64,
-            "adf" | "hdf" | "lha" => System::Amiga,
-            "z64" | "n64" | "v64" => System::Nintendo64,
-            "p8" => System::Pico8,
-            "tic" => System::Tic80,
-            _ => return None,
-        })
-    }
+/// Every system that resolves here, by dash id. Read once.
+fn systems() -> &'static HashMap<String, System> {
+    static SYSTEMS: OnceLock<HashMap<String, System>> = OnceLock::new();
+    SYSTEMS.get_or_init(|| {
+        let dir = Path::new(ASSIGN_DIR);
+        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok();
+        let aliases = read("assign.json")
+            .map(|json| parse_assign(&json))
+            .unwrap_or_default();
+        ROM_IDS
+            .iter()
+            .chain(&[PICO8, TIC80])
+            .filter_map(|id| Some((id.to_string(), resolve(id, &aliases, read)?)))
+            .collect()
+    })
+}
 
-    pub fn label(self) -> &'static str {
-        match self {
-            System::Nes => "NES",
-            System::Snes => "Super Nintendo",
-            System::GameBoy => "Game Boy",
-            System::GameBoyColor => "Game Boy Color",
-            System::GameBoyAdvance => "Game Boy Advance",
-            System::MegaDrive => "Mega Drive",
-            System::Commodore64 => "Commodore 64",
-            System::Amiga => "Amiga",
-            System::Nintendo64 => "Nintendo 64",
-            System::Pico8 => "PICO-8",
-            System::Tic80 => "TIC-80",
+/// `assign.json`: aliases to assign folder names.
+fn parse_assign(json: &str) -> HashMap<String, String> {
+    match serde_json::from_str::<HashMap<String, serde_json::Value>>(json) {
+        Ok(map) => map
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
+            .collect(),
+        Err(error) => {
+            log::warn!("{ASSIGN_DIR}/assign.json: {error}");
+            HashMap::new()
         }
     }
+}
 
-    /// The firmware's name for the system (a folder under
-    /// `/opt/muos/share/info/assign`), the launcher ini in it, and the
-    /// libretro core that ini names. These are the `default=` cores of
-    /// muOS 2601; a user who reassigned a system in the menu is not
-    /// followed, since that assignment is per ROM folder.
-    fn assignment(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            System::Nes => ("Nintendo NES - Famicom", "fceumm", "fceumm_libretro.so"),
-            System::Snes => ("Nintendo SNES - SFC", "snes9x", "snes9x_libretro.so"),
-            System::GameBoy => ("Nintendo Game Boy", "gambatte", "gambatte_libretro.so"),
-            System::GameBoyColor => (
-                "Nintendo Game Boy Color",
-                "gambatte",
-                "gambatte_libretro.so",
-            ),
-            System::GameBoyAdvance => ("Nintendo Game Boy Advance", "mgba", "mgba_libretro.so"),
-            System::MegaDrive => (
-                "Sega Mega Drive - Genesis",
-                "genesis plus gx",
-                "genesis_plus_gx_libretro.so",
-            ),
-            System::Commodore64 => ("Commodore C64", "vice x64 fast", "vice_x64_libretro.so"),
-            System::Amiga => ("Commodore Amiga", "puae 2021", "puae2021_libretro.so"),
-            System::Nintendo64 => (
-                "Nintendo N64",
-                "mupen64plus next",
-                "mupen64plus_next_libretro.so",
-            ),
-            System::Pico8 => ("PICO-8", "fake-08", "fake08_libretro.so"),
-            System::Tic80 => ("TIC-80", "tic80", "tic80_libretro.so"),
+/// `key=` under `[section]`; bare lines are skipped.
+fn ini_value<'a>(ini: &'a str, section: &str, key: &str) -> Option<&'a str> {
+    let mut in_section = false;
+    for line in ini.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_section = name.trim() == section;
+        } else if in_section
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim());
         }
     }
+    None
+}
+
+/// Resolves a dash id through `assign.json`, `global.ini` and the default
+/// launcher's ini. `read` takes a path relative to the assign folder.
+fn resolve(
+    id: &str,
+    aliases: &HashMap<String, String>,
+    read: impl Fn(&str) -> Option<String>,
+) -> Option<System> {
+    let assign = aliases.get(assign_key(id))?;
+    let global = read(&format!("{assign}/global.ini"))?;
+    let Some(launcher) = ini_value(&global, "global", "default") else {
+        log::warn!("{assign}/global.ini names no default launcher");
+        return None;
+    };
+    let Some(ini) = read(&format!("{assign}/{launcher}.ini")) else {
+        log::warn!("{assign}/{launcher}.ini is missing");
+        return None;
+    };
+    let Some(core) = ini_value(&ini, launcher, "core") else {
+        log::warn!("{assign}/{launcher}.ini names no core");
+        return None;
+    };
+    let label = ini_value(&global, "global", "name").unwrap_or(assign);
+    Some(System {
+        id: id.to_string(),
+        assign: assign.to_string(),
+        launcher: launcher.to_string(),
+        core: core.to_string(),
+        label: label.to_string(),
+    })
+}
+
+/// The dash id a file's name says it is a ROM for. Only extensions dash
+/// takes on the name alone; `.bin`, `.cue`, `.iso` and `.chd` need a
+/// header and would match too much here.
+fn id_for_file(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.ends_with(".p8.png") {
+        return Some(PICO8);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "nes" => "nes",
+        "sfc" | "smc" => "snes",
+        "gb" => "gb",
+        "gbc" => "gbc",
+        "gba" => "gba",
+        "md" | "gen" => "md",
+        "32x" => "32x",
+        "sms" => "sms",
+        "gg" => "gg",
+        "pce" => "pce",
+        "lnx" => "lynx",
+        "ngp" | "ngc" => "ngp",
+        "a26" => "a26",
+        "d64" | "prg" | "t64" => "c64",
+        "adf" => "amiga",
+        "z64" | "n64" | "v64" => "n64",
+        "p8" => PICO8,
+        "tic" => TIC80,
+        _ => return None,
+    })
 }
 
 /// Whether this is a muOS device: its launch script is present.
@@ -445,7 +497,7 @@ pub fn launch(
             if !args.is_empty() {
                 log::warn!("ignoring manifest arguments {args:?} for a ROM");
             }
-            launch_rom(name, *system, path, env)
+            launch_rom(name, system, path, env)
         }
         Content::Love { path } => launch_love(path, args, env),
     };
@@ -533,10 +585,20 @@ fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> R
 }
 
 /// Runs `rom` in the firmware's emulator for `system`.
-fn launch_rom(name: &str, system: System, rom: &Path, env: &HashMap<String, String>) -> Result<()> {
-    let (assign, launcher, core) = system.assignment();
-    // muOS 2601 ships no TIC-80, so its cart would otherwise exit at once
-    // with the reason only in the log.
+fn launch_rom(
+    name: &str,
+    system: &System,
+    rom: &Path,
+    env: &HashMap<String, String>,
+) -> Result<()> {
+    let System {
+        assign,
+        launcher,
+        core,
+        ..
+    } = system;
+    // Without the ini the launch script exits at once with the reason
+    // only in the log.
     let ini = Path::new(ASSIGN_DIR)
         .join(assign)
         .join(format!("{launcher}.ini"));
@@ -600,33 +662,113 @@ mod tests {
     use super::*;
     use crate::butlerd::types::EngineInfo;
 
+    const ASSIGN_JSON: &str = r#"{ "nes": "Nintendo NES - Famicom", "gba": "Nintendo Game Boy Advance",
+  "md": "Sega Mega Drive - Genesis", "a2600": "Atari 2600", "pico8": "PICO-8" }"#;
+
+    const NES_GLOBAL: &str = "[global]\nname=Nintendo NES - Famicom\ndefault=mu-fceumm\n\
+catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom\nNES\nFamicom\n";
+
+    const NES_LAUNCHER: &str = "[mu-fceumm]\nname=mu-FCEUmm\ncore=fceumm_libretro.so\n\n\
+[launch]\nprep=\nexec=/opt/muos/script/launch/mu-general.sh\ndone=\n";
+
+    fn fixture() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            ("Nintendo NES - Famicom/global.ini", NES_GLOBAL),
+            ("Nintendo NES - Famicom/mu-fceumm.ini", NES_LAUNCHER),
+            (
+                "Atari 2600/global.ini",
+                "[global]\nname=Atari 2600\ndefault=stella\n",
+            ),
+            (
+                "Atari 2600/stella.ini",
+                "[stella]\nname=Stella\ncore=stella_libretro.so\n",
+            ),
+            (
+                "Nintendo Game Boy Advance/global.ini",
+                "[global]\nname=Nintendo Game Boy Advance\ndefault=mgba\n",
+            ),
+        ])
+    }
+
+    fn lookup(id: &str) -> Option<System> {
+        let files = fixture();
+        resolve(id, &parse_assign(ASSIGN_JSON), |rel| {
+            files.get(rel).map(|s| s.to_string())
+        })
+    }
+
     #[test]
-    fn extension_picks_the_system() {
+    fn assign_json_maps_ids_to_folders() {
+        let aliases = parse_assign(ASSIGN_JSON);
+        assert_eq!(aliases["nes"], "Nintendo NES - Famicom");
+        assert_eq!(aliases["md"], "Sega Mega Drive - Genesis");
+        assert!(!aliases.contains_key("nds"));
+        assert!(parse_assign("not json").is_empty());
+    }
+
+    #[test]
+    fn ini_values_come_from_their_section() {
         assert_eq!(
-            System::for_file(Path::new("Bobl 1.2.NES")),
-            Some(System::Nes)
+            ini_value(NES_GLOBAL, "global", "default"),
+            Some("mu-fceumm")
         );
         assert_eq!(
-            System::for_file(Path::new("tobudx.gb")),
-            Some(System::GameBoy)
+            ini_value(NES_GLOBAL, "global", "name"),
+            Some("Nintendo NES - Famicom")
         );
+        assert_eq!(ini_value(NES_GLOBAL, "friendly", "default"), None);
         assert_eq!(
-            System::for_file(Path::new("a/b/game.gbc")),
-            Some(System::GameBoyColor)
+            ini_value(NES_LAUNCHER, "mu-fceumm", "core"),
+            Some("fceumm_libretro.so")
         );
-        assert_eq!(System::for_file(Path::new("game.SFC")), Some(System::Snes));
+        assert_eq!(ini_value(NES_LAUNCHER, "launch", "prep"), Some(""));
+        assert_eq!(ini_value(NES_LAUNCHER, "mu-fceumm", "exec"), None);
+    }
+
+    #[test]
+    fn ids_resolve_through_the_assign_metadata() {
         assert_eq!(
-            System::for_file(Path::new("power_pong.p8.png")),
-            Some(System::Pico8)
+            lookup("nes"),
+            Some(System {
+                id: "nes".into(),
+                assign: "Nintendo NES - Famicom".into(),
+                launcher: "mu-fceumm".into(),
+                core: "fceumm_libretro.so".into(),
+                label: "Nintendo NES - Famicom".into(),
+            })
         );
-        assert_eq!(System::for_file(Path::new("cart.P8")), Some(System::Pico8));
-        assert_eq!(
-            System::for_file(Path::new("island.tic")),
-            Some(System::Tic80)
-        );
-        assert_eq!(System::for_file(Path::new("cover.png")), None);
-        assert_eq!(System::for_file(Path::new("setup.exe")), None);
-        assert_eq!(System::for_file(Path::new("README")), None);
+        // a26 is a2600 in assign.json.
+        let a26 = lookup("a26").unwrap();
+        assert_eq!(a26.id, "a26");
+        assert_eq!(a26.assign, "Atari 2600");
+        assert_eq!(a26.core, "stella_libretro.so");
+        // Not in assign.json at all.
+        assert_eq!(lookup("nds"), None);
+        // In assign.json, but no folder.
+        assert_eq!(lookup("md"), None);
+        // A folder whose default launcher ini is missing.
+        assert_eq!(lookup("gba"), None);
+    }
+
+    #[test]
+    fn extension_picks_the_id() {
+        assert_eq!(id_for_file(Path::new("Bobl 1.2.NES")), Some("nes"));
+        assert_eq!(id_for_file(Path::new("tobudx.gb")), Some("gb"));
+        assert_eq!(id_for_file(Path::new("a/b/game.gbc")), Some("gbc"));
+        assert_eq!(id_for_file(Path::new("game.SFC")), Some("snes"));
+        assert_eq!(id_for_file(Path::new("knuckles.32x")), Some("32x"));
+        assert_eq!(id_for_file(Path::new("pitfall.a26")), Some("a26"));
+        assert_eq!(id_for_file(Path::new("game.lnx")), Some("lynx"));
+        assert_eq!(id_for_file(Path::new("power_pong.p8.png")), Some(PICO8));
+        assert_eq!(id_for_file(Path::new("cart.P8")), Some(PICO8));
+        assert_eq!(id_for_file(Path::new("island.tic")), Some(TIC80));
+        assert_eq!(id_for_file(Path::new("game.bin")), None);
+        assert_eq!(id_for_file(Path::new("game.cue")), None);
+        assert_eq!(id_for_file(Path::new("game.iso")), None);
+        assert_eq!(id_for_file(Path::new("game.chd")), None);
+        assert_eq!(id_for_file(Path::new("cover.png")), None);
+        assert_eq!(id_for_file(Path::new("setup.exe")), None);
+        assert_eq!(id_for_file(Path::new("README")), None);
     }
 
     #[test]
@@ -643,52 +785,8 @@ mod tests {
         }
     }
 
-    fn rom_engine(system: &str) -> EngineInfo {
-        EngineInfo {
-            engine: Engine::ROM,
-            version: None,
-            details: Some(HashMap::from([(
-                "system".to_string(),
-                serde_json::Value::String(system.to_string()),
-            )])),
-        }
-    }
-
     #[test]
-    fn payloads_become_content() {
-        let gba = payload(Flavor::ROM, Some(rom_engine("gba")));
-        assert_eq!(
-            content_for(&gba, PathBuf::from("/g/game.gba")),
-            Ok(Content::Rom {
-                path: PathBuf::from("/g/game.gba"),
-                system: System::GameBoyAdvance
-            })
-        );
-        let nds = payload(Flavor::ROM, Some(rom_engine("nds")));
-        assert!(content_for(&nds, PathBuf::from("/g/game.nds")).is_err());
-
-        let cart = payload(Flavor::Pico8Cart, None);
-        assert_eq!(
-            content_for(&cart, PathBuf::from("/g/cart.p8.png")),
-            Ok(Content::Rom {
-                path: PathBuf::from("/g/cart.p8.png"),
-                system: System::Pico8
-            })
-        );
-        assert!(runtimes().iter().any(|r| r == "pico8-cart"));
-        assert!(!runtimes().iter().any(|r| r.starts_with("rom:pico")));
-
-        let cart = payload(Flavor::TIC80Cart, None);
-        assert_eq!(
-            content_for(&cart, PathBuf::from("/g/island.tic")),
-            Ok(Content::Rom {
-                path: PathBuf::from("/g/island.tic"),
-                system: System::Tic80
-            })
-        );
-        assert!(runtimes().iter().any(|r| r == "tic80-cart"));
-        assert!(!runtimes().iter().any(|r| r.starts_with("rom:tic")));
-
+    fn love_payloads_become_content() {
         let love = EngineInfo {
             engine: Engine::Love,
             version: Some("11.5".into()),
