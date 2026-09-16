@@ -114,28 +114,27 @@ handheld:
 
 # LÖVE for the device. muOS has no runtime of its own: the binaries ride
 # inside whichever bundled app is written in LÖVE, and those move between
-# releases, so ours come from a pinned commit of the firmware repo.
-MUOS_INTERNAL_SHA = 71da9b6c070d47fc9ff1ad9777f330fa1fcb5c8e
-MUOS_LOVE_URL = https://raw.githubusercontent.com/MustardOS/internal/$(MUOS_INTERNAL_SHA)/share/application/2048%20Plus/.game
+# releases, so itch hosts muOS's build as a redist (see itch-redists).
+HANDHELD_LOVE_URL = https://broth.itch.zone/itch-redists/love-muos-11.5-arm64-linux/_1/archive/default
 HANDHELD_LOVE ?= target/handheld-love
-# Our path, the path under MUOS_LOVE_URL, and the md5.
+# The files in that build. A new build ships only after someone checks it
+# and updates the build number and these md5s.
 HANDHELD_LOVE_FILES = \
-	love bin/love 3aac90fe8a035e7c9d36d88ac948cabd \
-	libs/liblove-11.5.so bin/libs.aarch64/liblove-11.5.so ed09397d6f061c2ae346559d9534c23a \
-	libs/libluajit-5.1.so.2 bin/libs.aarch64/libluajit-5.1.so.2 4256a24e2675e8a36da4e0859ed8cafd \
-	love.LICENSE licenses/love.LICENSE d7ca6588576042bf127bc7ae71ad3b41
-# raw.github answers a moved path with a 404 page, which would otherwise
-# land on disk as the runtime. Hence the md5.
+	love 3aac90fe8a035e7c9d36d88ac948cabd \
+	libs/liblove-11.5.so ed09397d6f061c2ae346559d9534c23a \
+	libs/libluajit-5.1.so.2 4256a24e2675e8a36da4e0859ed8cafd \
+	love.LICENSE 9643614bb2e63f0649ab5b2ec7143281 \
+	luajit.LICENSE a2c43bf4a9ea63755af2131b0ae59ff3
 $(HANDHELD_LOVE)/love:
 	rm -rf $(HANDHELD_LOVE)
-	mkdir -p $(HANDHELD_LOVE)/libs
-	@set -- $(HANDHELD_LOVE_FILES); while [ $$# -ge 3 ]; do \
-		{ curl -sSfL -o $(HANDHELD_LOVE)/$$1 "$(MUOS_LOVE_URL)/$$2" \
-			&& echo "$$3  $(HANDHELD_LOVE)/$$1" | md5sum -c --quiet; } \
-		|| { echo "error: $$2 at MustardOS/internal@$(MUOS_INTERNAL_SHA) is not the pinned LÖVE runtime;" \
-			"the muOS path moved. Update MUOS_INTERNAL_SHA, MUOS_LOVE_URL and the md5s in HANDHELD_LOVE_FILES." >&2; \
+	mkdir -p $(HANDHELD_LOVE)
+	curl -sSfL -o $(HANDHELD_LOVE)/love.zip $(HANDHELD_LOVE_URL)
+	cd $(HANDHELD_LOVE) && unzip -q love.zip && rm love.zip
+	@set -- $(HANDHELD_LOVE_FILES); while [ $$# -ge 2 ]; do \
+		echo "$$2  $(HANDHELD_LOVE)/$$1" | md5sum -c --quiet \
+		|| { echo "error: $$1 from $(HANDHELD_LOVE_URL) does not match HANDHELD_LOVE_FILES." >&2; \
 			rm -rf $(HANDHELD_LOVE); exit 1; }; \
-		shift 3; \
+		shift 2; \
 	done
 	chmod +x $(HANDHELD_LOVE)/love
 
@@ -144,7 +143,7 @@ handheld-love: $(HANDHELD_LOVE)/love
 handheld-deploy: handheld $(HANDHELD_LOVE)/love
 	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs'
 	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
-		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD):$(HANDHELD_APP)/
+		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(HANDHELD):$(HANDHELD_APP)/
 	scp -q $(HANDHELD_LOVE)/libs/* $(HANDHELD):$(HANDHELD_APP)/libs/
 
 # The frontend's handoff files, which Andromeda moved out of /tmp. /run/muos
@@ -176,7 +175,7 @@ handheld-muxapp: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
 	mkdir -p target/muxapp/zitch/libs
 	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
 		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
-		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE target/muxapp/zitch/
+		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE target/muxapp/zitch/
 	cp $(HANDHELD_LOVE)/libs/* target/muxapp/zitch/libs/
 	chmod +x target/muxapp/zitch/zitch target/muxapp/zitch/mux_launch.sh target/muxapp/zitch/butler target/muxapp/zitch/love
 	cd target/muxapp && zip -rq ../zitch.muxapp zitch

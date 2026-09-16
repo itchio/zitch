@@ -119,16 +119,12 @@ is ignored. Quit with Menu held + Start.
 
 Files: `.love`, or a folder with `main.lua` at its root.
 
-Runs in the LÖVE 11.5 deployed next to `zitch` (`love` with `libs/` on
-`LD_LIBRARY_PATH`). muOS has no LÖVE of its own; the binaries ride
-inside whichever bundled app is written in LÖVE (Moonlight and RGB
-Controller on FUNKY_JACARANDA, 2048 Plus on Andromeda), so
-`make handheld-love` fetches the same blobs from a pinned commit of
-MustardOS/internal, md5-checked, and the deploy and muxapp targets ship
-them. Without them `muos::love` falls back to whatever the firmware
-carries. The game's own pad handling applies; there is no
-keyboard mapping helper (Moonlight runs `gptokeyb2` for its GUI). Quit
-with the game's own quit or the panic combo.
+Runs in LÖVE 11.5, shipped next to `zitch`. muOS only has LÖVE inside some
+of its bundled apps, so itch hosts muOS's build as the
+`love-muos-11.5-arm64` redist; `make handheld-love` fetches it and the deploy
+and muxapp targets include it. Without it, zitch uses a LÖVE the firmware's
+apps carry, if any. Games handle the pad themselves (there is no keyboard
+mapping helper) and quit with their own quit or the panic combo.
 
 ### Linux builds
 
