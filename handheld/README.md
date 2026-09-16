@@ -4,10 +4,11 @@ muOS has no X11 or Wayland, so zitch is built with the SDL2 host
 (`--no-default-features --features sdl-host`, `src/host_sdl.rs`) and linked
 against the SDL2 that ships with the firmware. Everything else is static.
 
+
 ## Setup
 
 - ssh access to the device as root. The Makefile defaults to
-  `root@192.168.4.121`, override with `HANDHELD=root@<ip>`.
+  `root@DEVICE_IP`, override with `HANDHELD=root@<ip>`.
 - `aarch64-linux-gnu-gcc` and a rustup toolchain with the
   `aarch64-unknown-linux-gnu` target. `CARGO_CROSS` in the Makefile points at
   `~/.cargo/bin/cargo +stable`, change it if rustup is your system cargo.
@@ -26,10 +27,10 @@ against the SDL2 that ships with the firmware. Everything else is static.
 
 ```
 make handheld          # cross-compile (release)
-make handheld-deploy   # copy binary + mux_launch.sh into the muOS Applications menu
+make handheld-deploy   # copy binary + mux_launch.sh + LÖVE into the muOS Applications menu
 make handheld-shot     # deploy, launch on the device, fetch /tmp/zitch-handheld.png
 make handheld-shot ARGS="--screenshot-script wait:10000,capture"
-make handheld-muxapp   # package with butler as target/zitch.muxapp
+make handheld-muxapp   # package with butler and LÖVE as target/zitch.muxapp
 ```
 
 ## Packaging
@@ -118,9 +119,14 @@ is ignored. Quit with Menu held + Start.
 
 Files: `.love`, or a folder with `main.lua` at its root.
 
-Runs in the firmware's LÖVE 11.5 at
-`/opt/muos/share/application/Moonlight/love` with its `libs` on
-`LD_LIBRARY_PATH`. The game's own pad handling applies; there is no
+Runs in the LÖVE 11.5 deployed next to `zitch` (`love` with `libs/` on
+`LD_LIBRARY_PATH`). muOS has no LÖVE of its own; the binaries ride
+inside whichever bundled app is written in LÖVE (Moonlight and RGB
+Controller on FUNKY_JACARANDA, 2048 Plus on Andromeda), so
+`make handheld-love` fetches the same blobs from a pinned commit of
+MustardOS/internal, md5-checked, and the deploy and muxapp targets ship
+them. Without them `muos::love` falls back to whatever the firmware
+carries. The game's own pad handling applies; there is no
 keyboard mapping helper (Moonlight runs `gptokeyb2` for its GUI). Quit
 with the game's own quit or the panic combo.
 

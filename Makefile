@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-muxapp handheld-sdl-procs run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-muxapp handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -27,7 +27,8 @@ help:
 	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first; see handheld/README.md)"
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
-	@echo "make handheld-muxapp  package it with butler as target/zitch.muxapp for the muOS Archive Manager"
+	@echo "make handheld-love    fetch the LÖVE runtime the device builds ship, into target/handheld-love"
+	@echo "make handheld-muxapp  package it with butler and LÖVE as target/zitch.muxapp for the muOS Archive Manager"
 	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
@@ -111,9 +112,40 @@ handheld:
 	aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o $(SDL_SHIM) handheld/sdl-dynapi.c -ldl
 	@ls -lh target/$(HANDHELD_TARGET)/release/zitch | awk '{print "target/$(HANDHELD_TARGET)/release/zitch: " $$5}'
 
-handheld-deploy: handheld
-	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)'
-	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh $(HANDHELD):$(HANDHELD_APP)/
+# LÖVE for the device. muOS has no runtime of its own: the binaries ride
+# inside whichever bundled app is written in LÖVE, and those move between
+# releases, so ours come from a pinned commit of the firmware repo.
+MUOS_INTERNAL_SHA = 71da9b6c070d47fc9ff1ad9777f330fa1fcb5c8e
+MUOS_LOVE_URL = https://raw.githubusercontent.com/MustardOS/internal/$(MUOS_INTERNAL_SHA)/share/application/2048%20Plus/.game
+HANDHELD_LOVE ?= target/handheld-love
+# Our path, the path under MUOS_LOVE_URL, and the md5.
+HANDHELD_LOVE_FILES = \
+	love bin/love 3aac90fe8a035e7c9d36d88ac948cabd \
+	libs/liblove-11.5.so bin/libs.aarch64/liblove-11.5.so ed09397d6f061c2ae346559d9534c23a \
+	libs/libluajit-5.1.so.2 bin/libs.aarch64/libluajit-5.1.so.2 4256a24e2675e8a36da4e0859ed8cafd \
+	love.LICENSE licenses/love.LICENSE d7ca6588576042bf127bc7ae71ad3b41
+# raw.github answers a moved path with a 404 page, which would otherwise
+# land on disk as the runtime. Hence the md5.
+$(HANDHELD_LOVE)/love:
+	rm -rf $(HANDHELD_LOVE)
+	mkdir -p $(HANDHELD_LOVE)/libs
+	@set -- $(HANDHELD_LOVE_FILES); while [ $$# -ge 3 ]; do \
+		{ curl -sSfL -o $(HANDHELD_LOVE)/$$1 "$(MUOS_LOVE_URL)/$$2" \
+			&& echo "$$3  $(HANDHELD_LOVE)/$$1" | md5sum -c --quiet; } \
+		|| { echo "error: $$2 at MustardOS/internal@$(MUOS_INTERNAL_SHA) is not the pinned LÖVE runtime;" \
+			"the muOS path moved. Update MUOS_INTERNAL_SHA, MUOS_LOVE_URL and the md5s in HANDHELD_LOVE_FILES." >&2; \
+			rm -rf $(HANDHELD_LOVE); exit 1; }; \
+		shift 3; \
+	done
+	chmod +x $(HANDHELD_LOVE)/love
+
+handheld-love: $(HANDHELD_LOVE)/love
+
+handheld-deploy: handheld $(HANDHELD_LOVE)/love
+	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs'
+	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
+		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD):$(HANDHELD_APP)/
+	scp -q $(HANDHELD_LOVE)/libs/* $(HANDHELD):$(HANDHELD_APP)/libs/
 
 # The frontend's handoff files, which Andromeda moved out of /tmp. /run/muos
 # exists on Jacaranda too, so ask the launch script which names it uses.
@@ -139,12 +171,14 @@ $(HANDHELD_BUTLER)/butler:
 # A muOS application archive: a zip holding the app folder, which the
 # Archive Manager unpacks into the Applications menu (see handheld/README.md).
 MUXAPP = target/zitch.muxapp
-handheld-muxapp: handheld $(HANDHELD_BUTLER)/butler
+handheld-muxapp: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
 	rm -rf target/muxapp $(MUXAPP)
-	mkdir -p target/muxapp/zitch
+	mkdir -p target/muxapp/zitch/libs
 	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
-		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so target/muxapp/zitch/
-	chmod +x target/muxapp/zitch/zitch target/muxapp/zitch/mux_launch.sh target/muxapp/zitch/butler
+		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
+		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE target/muxapp/zitch/
+	cp $(HANDHELD_LOVE)/libs/* target/muxapp/zitch/libs/
+	chmod +x target/muxapp/zitch/zitch target/muxapp/zitch/mux_launch.sh target/muxapp/zitch/butler target/muxapp/zitch/love
 	cd target/muxapp && zip -rq ../zitch.muxapp zitch
 	@ls -lh $(MUXAPP) | awk '{print "$(MUXAPP): " $$5}'
 

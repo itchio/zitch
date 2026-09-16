@@ -1,10 +1,10 @@
 //! Games on muOS. The handheld firmware ships RetroArch with a core for
-//! each system it knows (PICO-8 and TIC-80 carts among them), and
-//! a LÖVE runtime; most games there are a ROM, a cart or a `.love`.
+//! each system it knows (PICO-8 and TIC-80 carts among them), and we
+//! ship a LÖVE runtime; most games there are a ROM, a cart or a `.love`.
 //! butler's launch targets say which an install holds ([`content_for`]),
 //! and this module runs them the way the firmware's own menu does: a ROM
 //! or cart through its launch script and RetroArch, a `.love` through
-//! its LÖVE binary. A Linux build is butler's to launch,
+//! the LÖVE binary. A Linux build is butler's to launch,
 //! through the SDL shim; [`native_blocker`] says beforehand when one
 //! cannot reach the screen.
 //!
@@ -56,8 +56,6 @@ fn love_blocker(wanted: &str, have: &str) -> Option<String> {
         .then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
 }
 
-/// A LÖVE the firmware happens to carry: the binary and the directory
-/// holding its `liblove`.
 struct Love {
     binary: PathBuf,
     libs: PathBuf,
@@ -110,25 +108,27 @@ impl Content {
     }
 }
 
-/// Whether the firmware can run a file with this name. Used before an
-/// install, when the name is all there is; once installed, butler's
-/// targets decide ([`content_for`]).
-/// muOS ships no LÖVE of its own; what is here belongs to whichever
-/// bundled app happens to be written in LÖVE, and those come and go
-/// between releases. Take the first one found.
+/// Ours, deployed next to the binary by handheld-love, else one the
+/// firmware carries. muOS ships no LÖVE of its own: what is there
+/// belongs to whichever bundled app happens to be written in LÖVE, and
+/// those come and go between releases.
 fn love() -> Option<&'static Love> {
     static LOVE: OnceLock<Option<Love>> = OnceLock::new();
     LOVE.get_or_init(|| {
+        let ours = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join("love")));
         let apps = APPLICATION_DIRS
             .iter()
             .filter_map(|dir| std::fs::read_dir(dir).ok())
             .flatten()
             .filter_map(|entry| entry.ok());
-        apps.flat_map(|app| {
-            let app = app.path();
-            [app.join("love"), app.join(".game/bin/love")]
-        })
-        .find_map(love_at)
+        ours.into_iter()
+            .chain(apps.flat_map(|app| {
+                let app = app.path();
+                [app.join("love"), app.join(".game/bin/love")]
+            }))
+            .find_map(love_at)
     })
     .as_ref()
 }
@@ -166,6 +166,9 @@ fn liblove_version(libs: &Path) -> Option<String> {
         })
 }
 
+/// Whether the firmware can run a file with this name. Used before an
+/// install, when the name is all there is; once installed, butler's
+/// targets decide ([`content_for`]).
 pub fn runs_here(path: &Path) -> bool {
     Content::for_file(path).is_some() || disc_runs_here(path)
 }
@@ -650,9 +653,9 @@ fn set_foreground(process: &str) {
     }
 }
 
-/// Runs a `.love` (or a folder) in the firmware's LÖVE. Its own SDL
-/// window takes the screen, like RetroArch's. The panic combo gets its
-/// pid, as there is no launcher script to name it.
+/// Runs a `.love` (or a folder) in LÖVE. Its own SDL window takes the
+/// screen, like RetroArch's. The panic combo gets its pid, as there is
+/// no launcher script to name it.
 fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> Result<()> {
     let love = love().context("no LÖVE on this device")?;
     let dir = love.binary.parent().unwrap_or(Path::new("/"));
