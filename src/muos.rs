@@ -97,7 +97,20 @@ impl Content {
 /// install, when the name is all there is; once installed, butler's
 /// targets decide ([`content_for`]).
 pub fn runs_here(path: &Path) -> bool {
-    Content::for_file(path).is_some()
+    Content::for_file(path).is_some() || disc_runs_here(path)
+}
+
+/// A disc image names its system in its header, which butler only reads
+/// once the game is installed, so before that any disc system being here
+/// has to do.
+fn disc_runs_here(path: &Path) -> bool {
+    is_disc_image(path) && DISC_IDS.iter().any(|id| System::for_id(id).is_some())
+}
+
+fn is_disc_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| DISC_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 /// The payload flavors the firmware has runtimes for, in dash's words,
@@ -142,6 +155,10 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
         Flavor::TIC80Cart => TIC80,
         other => return Err(format!("no runtime for {other:?} on this device")),
     };
+    if id.is_empty() {
+        // dash leaves the system empty for a disc image it could not read.
+        return Err("could not tell which system this is for".to_string());
+    }
     match System::for_id(id) {
         Some(system) => Ok(Content::Rom { path, system }),
         None => Err(format!("no emulator for {id} on this device")),
@@ -252,6 +269,10 @@ const ROM_IDS: [&str; 23] = [
     "segacd",
     "dreamcast",
 ];
+/// dash's disc formats, and the systems it reads out of their headers.
+/// `.bin` is not one: it needs its `.cue`, and alone it matches far too much.
+const DISC_EXTS: [&str; 3] = ["cue", "iso", "chd"];
+const DISC_IDS: [&str; 6] = ["psx", "ps2", "psp", "saturn", "segacd", "dreamcast"];
 /// Fantasy consoles: dash names their carts as payloads of their own,
 /// the firmware assigns them like any system.
 const PICO8: &str = "pico8";
@@ -783,6 +804,44 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
             engine,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn disc_images_are_named_only_by_their_header() {
+        assert!(is_disc_image(Path::new("game.cue")));
+        assert!(is_disc_image(Path::new("game.CHD")));
+        assert!(is_disc_image(Path::new("a/b/game.iso")));
+        assert!(!is_disc_image(Path::new("game.bin")));
+        assert!(!is_disc_image(Path::new("game.nes")));
+        assert!(!is_disc_image(Path::new("cover.png")));
+        assert!(!is_disc_image(Path::new("README")));
+        // nothing resolves without the firmware
+        assert!(!disc_runs_here(Path::new("game.cue")));
+    }
+
+    #[test]
+    fn a_rom_with_no_system_says_so() {
+        let unread = payload(
+            Flavor::ROM,
+            Some(EngineInfo {
+                engine: Engine::ROM,
+                version: None,
+                details: Some(HashMap::from([(
+                    "system".to_string(),
+                    serde_json::Value::String(String::new()),
+                )])),
+            }),
+        );
+        assert_eq!(
+            content_for(&unread, PathBuf::from("/g/game.chd")),
+            Err("could not tell which system this is for".to_string())
+        );
+        // and with no details at all, rather than "no emulator for "
+        let bare = payload(Flavor::ROM, None);
+        assert_eq!(
+            content_for(&bare, PathBuf::from("/g/game.chd")),
+            Err("could not tell which system this is for".to_string())
+        );
     }
 
     #[test]
