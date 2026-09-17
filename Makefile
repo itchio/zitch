@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-muxapp handheld-sdl-procs run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-muxapp handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -28,6 +28,7 @@ help:
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
 	@echo "make handheld-love    fetch the LÖVE runtime the device builds ship, into target/handheld-love"
+	@echo "make handheld-glyph   render handheld/glyph.svg as the muOS list icon, target/zitch-glyph.{png,svg}"
 	@echo "make handheld-muxapp  package it with butler and LÖVE as target/zitch.muxapp for the muOS Archive Manager"
 	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
 	@echo "make run-sdl      the SDL host on the desktop"
@@ -140,11 +141,27 @@ $(HANDHELD_LOVE)/love:
 
 handheld-love: $(HANDHELD_LOVE)/love
 
-handheld-deploy: handheld $(HANDHELD_LOVE)/love
+# The list icon mux_launch.sh names with ICON:, for the active theme's glyph
+# dir. Jacaranda themes use 26x26 grayscale+alpha PNGs (color type 4, not
+# RGBA); Andromeda themes use 80x80 black-filled SVGs. Both are deployed and
+# the theme ignores the other. Box/grid catalogue art (GRID:) is a follow-up.
+HANDHELD_GLYPH = target/zitch-glyph.png
+HANDHELD_GLYPH_SVG = target/zitch-glyph.svg
+HANDHELD_GLYPH_DIR = /mnt/mmc/MUOS/theme/MustardOS/glyph/muxapp
+$(HANDHELD_GLYPH): handheld/glyph.svg
+	rsvg-convert -w 26 -h 26 $< | magick png:- -colorspace Gray -define png:color-type=4 $@
+$(HANDHELD_GLYPH_SVG): handheld/glyph.svg
+	sed 's|<svg |<svg width="80" height="80" |' $< >$@
+
+handheld-glyph: $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
+
+handheld-deploy: handheld $(HANDHELD_LOVE)/love $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
 	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs'
 	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
 		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(HANDHELD):$(HANDHELD_APP)/
 	scp -q $(HANDHELD_LOVE)/libs/* $(HANDHELD):$(HANDHELD_APP)/libs/
+	scp -q $(HANDHELD_GLYPH) $(HANDHELD):$(HANDHELD_GLYPH_DIR)/zitch.png
+	scp -q $(HANDHELD_GLYPH_SVG) $(HANDHELD):$(HANDHELD_GLYPH_DIR)/zitch.svg
 
 # The frontend's handoff files, which Andromeda moved out of /tmp. /run/muos
 # exists on Jacaranda too, so ask the launch script which names it uses.

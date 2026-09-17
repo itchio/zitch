@@ -27,7 +27,7 @@ against the SDL2 that ships with the firmware. Everything else is static.
 
 ```
 make handheld          # cross-compile (release)
-make handheld-deploy   # copy binary + mux_launch.sh + LÖVE into the muOS Applications menu
+make handheld-deploy   # copy binary + mux_launch.sh + LÖVE into the muOS Applications menu, plus the list icon into the theme
 make handheld-shot     # deploy, launch on the device, fetch /tmp/zitch-handheld.png
 make handheld-shot ARGS="--screenshot-script wait:10000,capture"
 make handheld-muxapp   # package with butler and LÖVE as target/zitch.muxapp
