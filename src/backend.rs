@@ -113,6 +113,8 @@ pub enum Command {
     },
     /// A fresh sign-in code in place of the one on screen.
     RetryLogin,
+    /// Whether the sign-in reports what device this is.
+    SetShareDeviceInfo(bool),
     Shutdown,
 }
 
@@ -688,8 +690,8 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 }
             }
             Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
-            // Only the sign-in page sends it, and that page is gone.
-            Ok(Command::RetryLogin) => {}
+            // Only the sign-in page sends these, and that page is gone.
+            Ok(Command::RetryLogin | Command::SetShareDeviceInfo(_)) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         for incoming in client.poll() {
@@ -1892,11 +1894,14 @@ fn await_login(
         });
         let started = Instant::now();
         let mut interval = login.interval;
+        // The page's checkbox; on with each new code, as the page is.
+        let mut share_device_info = true;
         loop {
             let deadline = Instant::now() + interval;
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 match commands.recv_timeout(left) {
                     Ok(Command::RetryLogin) => continue 'request,
+                    Ok(Command::SetShareDeviceInfo(flag)) => share_device_info = flag,
                     Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         return None;
                     }
@@ -1918,11 +1923,17 @@ fn await_login(
                 }
                 Ok(Poll::Approved { code }) => {
                     emit.status("Signing in");
+                    let device_info = if share_device_info {
+                        crate::device_info::gather()
+                    } else {
+                        String::new()
+                    };
                     let result = client.call(ProfileLoginWithOAuthCodeParams {
                         code,
                         code_verifier: login.verifier.clone(),
                         redirect_uri: REDIRECT_URI.into(),
                         client_id: CLIENT_ID.into(),
+                        device_info,
                     });
                     let message = match result {
                         Ok(result) => match result.profile {

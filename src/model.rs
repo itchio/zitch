@@ -351,6 +351,8 @@ pub enum Action {
     SetTab(Tab),
     /// Narrow the Collections tab to installed games, or show everything.
     SetCollectionsInstalledOnly(bool),
+    /// The sign-in page's checkbox: report what device this is.
+    SetShareDeviceInfo(bool),
     /// Step through the tabs, wrapping.
     CycleTab(i32),
     /// Put the cursor in the search box.

@@ -647,9 +647,27 @@ impl App {
             }
             return;
         }
-        if self.login.is_some() {
+        if let Some(login) = &mut self.login {
             match action {
+                // Down onto the checkbox, up off it; nothing else to reach.
+                Action::MoveFocus(direction) if login.has_checkbox() => {
+                    login.focused = matches!(
+                        direction,
+                        Direction::Down | Direction::Right | Direction::End
+                    );
+                }
+                Action::Activate if login.focused && login.has_checkbox() => {
+                    login.share_device_info = !login.share_device_info;
+                    self.backend
+                        .send(Command::SetShareDeviceInfo(login.share_device_info));
+                }
                 Action::Activate => self.backend.send(Command::RetryLogin),
+                Action::SetShareDeviceInfo(on) => {
+                    if login.share_device_info != on {
+                        login.share_device_info = on;
+                        self.backend.send(Command::SetShareDeviceInfo(on));
+                    }
+                }
                 Action::Back | Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
                 Action::Menu => {
                     self.raise_window();
@@ -1012,6 +1030,8 @@ impl App {
                     .map_or_else(|| "this game".to_string(), |game| game.title.clone());
                 self.backend.send(Command::Uninstall { cave_id, title });
             }
+            // Only the sign-in page has the checkbox, and it is handled above.
+            Action::SetShareDeviceInfo(_) => {}
         }
     }
 
@@ -1394,6 +1414,8 @@ impl App {
                             .then(|| "Couldn't draw the sign-in code".to_string()),
                         qr,
                         user_code: Some(user_code),
+                        share_device_info: true,
+                        focused: false,
                     });
                 }
                 Event::LoginFailed(message) => {
@@ -1401,6 +1423,8 @@ impl App {
                         qr: None,
                         user_code: None,
                         failure: Some(message),
+                        share_device_info: true,
+                        focused: false,
                     });
                 }
                 Event::SignedIn(profile) => {
@@ -1908,15 +1932,24 @@ impl App {
             return hints;
         }
         if let Some(login) = &self.login {
-            let again = if login.failure.is_some() {
+            let mut hints = Vec::new();
+            if login.has_checkbox() {
+                hints.push((vec![Glyph::NavigateVertical], "Choose".to_string()));
+            }
+            let confirm = if login.focused && login.has_checkbox() {
+                if login.share_device_info {
+                    "Don't send device info"
+                } else {
+                    "Send device info"
+                }
+            } else if login.failure.is_some() {
                 "Try again"
             } else {
                 "New code"
             };
-            return vec![
-                (vec![Glyph::Confirm], again.to_string()),
-                (vec![Glyph::Back], "Quit".to_string()),
-            ];
+            hints.push((vec![Glyph::Confirm], confirm.to_string()));
+            hints.push((vec![Glyph::Back], "Quit".to_string()));
+            return hints;
         }
         // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page.clone() {
@@ -2082,6 +2115,13 @@ impl App {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
+        // Pixels: an emulated screen is laid out at 1x, a real one may not be.
+        let pixels = if self.emulate.is_some() {
+            screen.size()
+        } else {
+            screen.size() * ui.ctx().pixels_per_point()
+        };
+        crate::device_info::set_resolution(pixels.x, pixels.y);
         let m = ui::Metrics::for_screen(screen);
         let policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
         self.handheld = policy.low_spec;
@@ -2215,7 +2255,7 @@ impl App {
                     m.frame(12.0)
                 });
                 if let Some(login) = &self.login {
-                    ui::login(ui, &m, login);
+                    ui::login(ui, &m, login, &mut self.actions);
                     return;
                 }
                 match (&self.owned, self.page.clone()) {

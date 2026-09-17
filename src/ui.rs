@@ -1136,11 +1136,22 @@ pub struct LoginView {
     /// Shown under the code; the phone's page asks the user to compare it.
     pub user_code: Option<String>,
     pub failure: Option<String>,
+    /// The checkbox under the instructions; sent with the sign-in.
+    pub share_device_info: bool,
+    /// The checkbox has controller focus.
+    pub focused: bool,
+}
+
+impl LoginView {
+    /// Whether the checkbox is on screen: only while a code is up.
+    pub fn has_checkbox(&self) -> bool {
+        self.qr.is_some() && self.failure.is_none()
+    }
 }
 
 /// The sign-in page: the QR code beside what to do with it. Modules are
 /// whole points so their edges land on pixels, which a camera needs.
-pub fn login(ui: &mut Ui, m: &Metrics, login: &LoginView) {
+pub fn login(ui: &mut Ui, m: &Metrics, login: &LoginView, actions: &mut Vec<Action>) {
     const QUIET: usize = 4;
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
@@ -1215,6 +1226,42 @@ pub fn login(ui: &mut Ui, m: &Metrics, login: &LoginView) {
         FontId::proportional(m.caption),
         DIM,
     );
+    y += spinner + m.space(24.0);
+
+    let icon = m.icon(12.0);
+    let galley = ui.painter().layout_no_wrap(
+        "Send itch.io my device info".into(),
+        FontId::proportional(m.caption),
+        TEXT,
+    );
+    let pad = m.space(4.0);
+    let size = vec2(
+        icon + m.caption * 0.5 + galley.size().x + pad * 2.0,
+        icon.max(galley.size().y) + pad * 2.0,
+    );
+    let rect = Rect::from_min_size(pos2(left - pad, y - pad), size);
+    let response = ui.allocate_rect(rect, Sense::click());
+    let icon_rect = Rect::from_min_size(pos2(left, rect.center().y - icon / 2.0), vec2(icon, icon));
+    if login.share_device_info {
+        checkbox_icon(ui, icon_rect, TEXT);
+    } else {
+        checkbox_box(ui, icon_rect, TEXT.gamma_multiply(0.5));
+    }
+    ui.painter().galley(
+        pos2(
+            icon_rect.right() + m.caption * 0.5,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        TEXT,
+    );
+    if login.focused {
+        focus_ring(ui, rect, [m.space(6.0); 4], m);
+    }
+    if response.clicked() {
+        actions.push(Action::SetShareDeviceInfo(!login.share_device_info));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
 }
 
 /// The page when the library could not load at all.
@@ -2405,7 +2452,8 @@ fn filter_group(
     out
 }
 
-fn checkbox_icon(ui: &Ui, rect: Rect, color: Color32) {
+/// The box alone: an unchecked checkbox.
+fn checkbox_box(ui: &Ui, rect: Rect, color: Color32) {
     let w = (rect.width() * 0.11).max(1.5);
     ui.painter().rect_stroke(
         rect.shrink(w / 2.0),
@@ -2413,6 +2461,11 @@ fn checkbox_icon(ui: &Ui, rect: Rect, color: Color32) {
         Stroke::new(w, color),
         egui::StrokeKind::Inside,
     );
+}
+
+fn checkbox_icon(ui: &Ui, rect: Rect, color: Color32) {
+    checkbox_box(ui, rect, color);
+    let w = (rect.width() * 0.11).max(1.5);
     let p = |x: f32, y: f32| rect.min + vec2(x, y) * rect.width();
     ui.painter().add(egui::Shape::line(
         vec![p(0.27, 0.52), p(0.44, 0.69), p(0.74, 0.36)],

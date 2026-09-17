@@ -3772,6 +3772,12 @@ pub struct ProfileLoginWithOAuthCodeParams {
     /// The OAuth client ID used in the authorization request
     #[serde(rename = "clientId", default, deserialize_with = "null_default")]
     pub client_id: String,
+    /// Optional JSON describing the device and platform, for itch.io's
+    /// device statistics; empty sends nothing.
+    // Hand-added ahead of butler shipping the field; re-run `make
+    // sync-butler` once it does, so the generated name and shape win.
+    #[serde(rename = "deviceInfo", default, deserialize_with = "null_default")]
+    pub device_info: String,
 }
 
 impl Request for ProfileLoginWithOAuthCodeParams {

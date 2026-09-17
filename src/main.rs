@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod butlerd;
+mod device_info;
 mod gamepad;
 mod glyphs;
 #[cfg(feature = "sdl-host")]

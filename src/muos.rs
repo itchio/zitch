@@ -26,6 +26,8 @@ use crate::butlerd::types::{Arch, Candidate, Engine, Flavor, LinuxInfo};
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// Where Andromeda keeps the launch handoff files; Jacaranda uses /tmp.
 const RUN_DIR: &str = "/run/muos";
+/// The hardware model, e.g. `rg35xx-h` or `tui-brick-pro`.
+const BOARD_NAME: &str = "/opt/muos/device/config/board/name";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
 /// The firmware's systems: `assign.json` maps ids to a folder per system,
@@ -301,7 +303,7 @@ fn parse_version(version: &str) -> Option<(u32, u32)> {
 }
 
 /// The host's C library; a build wanting a newer one fails to load.
-fn glibc_version() -> (u32, u32) {
+pub fn glibc_version() -> (u32, u32) {
     static VERSION: OnceLock<(u32, u32)> = OnceLock::new();
     *VERSION.get_or_init(|| host_glibc_version().unwrap_or(FALLBACK_GLIBC_VERSION))
 }
@@ -515,20 +517,54 @@ struct Handoff {
     filter: PathBuf,
 }
 
-/// Which names this firmware uses. /run/muos exists on Jacaranda too, so
-/// the directory says nothing; the launch script names its own files, and
+/// The firmware releases whose launch handoff differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Release {
+    Jacaranda,
+    Andromeda,
+}
+
+impl Release {
+    pub fn name(self) -> &'static str {
+        match self {
+            Release::Jacaranda => "jacaranda",
+            Release::Andromeda => "andromeda",
+        }
+    }
+}
+
+/// Which release this is. /run/muos exists on Jacaranda too, so the
+/// directory says nothing; the launch script names its own files, and
 /// only Jacaranda's spells out /tmp/rom_go.
-fn handoff() -> &'static Handoff {
-    static HANDOFF: OnceLock<Handoff> = OnceLock::new();
-    HANDOFF.get_or_init(|| {
+pub fn release() -> Release {
+    static RELEASE: OnceLock<Release> = OnceLock::new();
+    *RELEASE.get_or_init(|| {
         let script = std::fs::read_to_string(LAUNCH_SCRIPT).unwrap_or_default();
         if script.contains("/tmp/rom_go") {
-            Handoff {
-                rom: PathBuf::from("/tmp/rom_go"),
-                governor: PathBuf::from("/tmp/gov_go"),
-                filter: PathBuf::from("/tmp/flt_go"),
-            }
+            Release::Jacaranda
         } else {
+            Release::Andromeda
+        }
+    })
+}
+
+/// The hardware model the firmware was built for, e.g. `rg35xx-h`.
+pub fn board() -> Option<String> {
+    let name = std::fs::read_to_string(BOARD_NAME).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Which names this firmware uses for the launch handoff.
+fn handoff() -> &'static Handoff {
+    static HANDOFF: OnceLock<Handoff> = OnceLock::new();
+    HANDOFF.get_or_init(|| match release() {
+        Release::Jacaranda => Handoff {
+            rom: PathBuf::from("/tmp/rom_go"),
+            governor: PathBuf::from("/tmp/gov_go"),
+            filter: PathBuf::from("/tmp/flt_go"),
+        },
+        Release::Andromeda => {
             let run = Path::new(RUN_DIR);
             Handoff {
                 rom: run.join("content"),
