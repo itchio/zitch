@@ -829,6 +829,11 @@ impl App {
             }
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
             Action::RefreshLibrary => self.refresh_library(),
+            Action::ChangeUser => {
+                if self.profile.is_some() {
+                    self.backend.send(Command::ChangeUser);
+                }
+            }
             Action::UpdateAll => {
                 for cave_id in self.pending_updates(true) {
                     self.apply(Action::Update { cave_id });
@@ -1431,6 +1436,7 @@ impl App {
                     self.login = None;
                     self.profile = Some(profile);
                 }
+                Event::SignedOut => self.sign_out(),
                 Event::OwnedGames(games) => {
                     self.refreshing = false;
                     self.owned = Loadable::Loaded(games);
@@ -1882,24 +1888,53 @@ impl App {
         }
     }
 
+    /// Drops what belonged to the profile. Installs and downloads are the
+    /// database's, not the profile's, and the next session resends them.
+    fn sign_out(&mut self) {
+        self.profile = None;
+        self.owned = Loadable::Loading;
+        self.collections = Loadable::default();
+        self.collection_installed = None;
+        self.collection_loading.clear();
+        self.updates.clear();
+        self.refreshing = false;
+        self.checking_updates = false;
+        self.up_to_date_at = None;
+        self.page = Page::Library;
+        self.tab = Tab::default();
+        self.toolbar_focus = [None; Tab::ALL.len()];
+        self.query.clear();
+        self.rows = ui::Rows::default();
+        self.collection_rows = ui::Rows::default();
+        self.rebuild_catalog();
+        self.rebuild_sections();
+        self.rebuild_collection_sections();
+    }
+
     /// What the menu drawer offers, top to bottom.
     fn menu_items(&self) -> Vec<ui::MenuItem> {
-        vec![
-            ui::MenuItem {
-                label: if self.refreshing {
-                    "Refreshing…"
-                } else {
-                    "Refresh library"
-                },
-                action: Action::RefreshLibrary,
-                busy: self.refreshing,
+        let mut items = vec![ui::MenuItem {
+            label: if self.refreshing {
+                "Refreshing…"
+            } else {
+                "Refresh library"
             },
-            ui::MenuItem {
-                label: "Quit",
-                action: Action::Quit,
+            action: Action::RefreshLibrary,
+            busy: self.refreshing,
+        }];
+        if self.profile.is_some() {
+            items.push(ui::MenuItem {
+                label: "Change user",
+                action: Action::ChangeUser,
                 busy: false,
-            },
-        ]
+            });
+        }
+        items.push(ui::MenuItem {
+            label: "Quit",
+            action: Action::Quit,
+            busy: false,
+        });
+        items
     }
 
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {

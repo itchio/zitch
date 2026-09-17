@@ -25,7 +25,7 @@ use crate::butlerd::types::{
     FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
     HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
     LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
-    PrereqsFailedResult, ProfileListParams, ProfileLoginWithAPIKeyParams,
+    PrereqsFailedResult, ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithOAuthCodeParams, ProfileUseSavedLoginParams, RuntimeLaunchResult,
     ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, UploadType,
     VersionGetParams,
@@ -115,6 +115,8 @@ pub enum Command {
     RetryLogin,
     /// Whether the sign-in reports what device this is.
     SetShareDeviceInfo(bool),
+    /// Forget the saved login and go back to the sign-in page.
+    ChangeUser,
     Shutdown,
 }
 
@@ -133,6 +135,8 @@ pub enum Event {
     /// The sign-in stopped; the page shows why and offers to start over.
     LoginFailed(String),
     SignedIn(Profile),
+    /// The profile is gone; a new sign-in follows.
+    SignedOut,
     OwnedGames(Vec<Game>),
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
@@ -321,34 +325,65 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         Err(error) => log::warn!("butler version: {error:#}"),
     }
 
-    let profile = match sign_in(&client, &config, emit)? {
-        Some(profile) => profile,
-        None => match await_login(&client, &config, emit, &commands) {
-            Some(profile) => profile,
-            None => return Ok(()),
-        },
-    };
+    let config = Arc::new(config);
+    // Saved logins and the API key are for the first sign-in only; after
+    // "Change user" the page is the point.
+    let mut saved = true;
+    loop {
+        let profile = match saved.then(|| sign_in(&client, &config, emit)).transpose()? {
+            Some(Some(profile)) => profile,
+            _ => match await_login(&client, &config, emit, &commands) {
+                Some(profile) => profile,
+                None => return Ok(()),
+            },
+        };
+        match session(&config, &link, &mut client, emit, &commands, profile)? {
+            SessionEnd::Shutdown => return Ok(()),
+            SessionEnd::ChangeUser => {
+                saved = false;
+                emit.send(Event::SignedOut);
+            }
+        }
+    }
+}
+
+/// Why a signed-in session ended.
+enum SessionEnd {
+    Shutdown,
+    /// The profile was forgotten; sign in again.
+    ChangeUser,
+}
+
+/// Everything done as one profile, from loading its library until the app
+/// shuts down or the user changes account.
+fn session(
+    config: &Arc<Config>,
+    link: &Link,
+    client: &mut Client,
+    emit: &Emitter,
+    commands: &mpsc::Receiver<Command>,
+    profile: Profile,
+) -> Result<SessionEnd> {
     let name = profile.user.as_ref().map_or("?", UserExt::name);
     emit.status(format!("Signed in as {name}"));
     emit.send(Event::SignedIn(profile.clone()));
 
     emit.status("Loading library");
     // butler answers from its cache, so this works offline too.
-    let (games, stale) = owned_games(&client, profile.id, false)?;
+    let (games, stale) = owned_games(client, profile.id, false)?;
     emit.send(Event::OwnedGames(games));
     emit.status("Library loaded");
-    refresh_caves(&client, emit);
-    refresh_downloads(&client, emit);
+    refresh_caves(client, emit);
+    refresh_downloads(client, emit);
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let driver = spawn_driver(Arc::clone(&link), emit.clone(), Arc::clone(&stopping));
+    let driver = spawn_driver(Arc::clone(link), emit.clone(), Arc::clone(&stopping));
     let prompts = Prompts::default();
     let launches = Launches::default();
-    let config = Arc::new(config);
     let installer = spawn_installer(
-        Arc::clone(&link),
+        Arc::clone(link),
         emit.clone(),
-        Arc::clone(&config),
+        Arc::clone(config),
         prompts.clone(),
     );
     let sync = Sync {
@@ -359,36 +394,36 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         collections_stale: Arc::new(AtomicBool::new(false)),
         retry: Arc::new(AtomicBool::new(false)),
     };
-    sync.spawn(&link, emit);
+    sync.spawn(link, emit);
     let mut next_probe = Instant::now() + PROBE_EVERY;
     let mut next_update_check = Instant::now() + UPDATE_EVERY;
 
-    loop {
+    let end = loop {
         // Anything can take butler down: the kernel's memory killer on a
         // small device, a crash, a firmware reaping background processes.
-        if !current(&link).alive() {
+        if !current(link).alive() {
             emit.status("butler exited; restarting");
             match Daemon::spawn(&config.butler, &config.dbpath, &config.game_env) {
                 Ok(daemon) => {
                     *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
-                    client = connect(&link)?;
+                    *client = connect(link)?;
                     if let Err(error) = client.call(ProfileUseSavedLoginParams {
                         profile_id: profile.id,
                     }) {
                         log::warn!("signing in again: {error:#}");
                     }
                     emit.status("butler restarted");
-                    refresh_caves(&client, emit);
-                    refresh_downloads(&client, emit);
+                    refresh_caves(client, emit);
+                    refresh_downloads(client, emit);
                     // Whatever the old daemon was checking died with it.
-                    sync.spawn(&link, emit);
+                    sync.spawn(link, emit);
                 }
                 Err(error) => {
                     emit.send(Event::Error(format!("restarting butler: {error:#}")));
                     if let Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) =
                         commands.recv_timeout(RESPAWN_DELAY)
                     {
-                        break;
+                        break SessionEnd::Shutdown;
                     }
                     continue;
                 }
@@ -396,7 +431,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         }
         let due = !sync.online.load(Ordering::Relaxed) || sync.retry.load(Ordering::Relaxed);
         if due && Instant::now() >= next_probe {
-            sync.spawn(&link, emit);
+            sync.spawn(link, emit);
             next_probe = Instant::now() + PROBE_EVERY;
         }
         if Instant::now() >= next_update_check {
@@ -405,7 +440,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             if sync.online.load(Ordering::Relaxed) {
                 spawn_op(
                     "update-check".into(),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     |error| Event::SyncFailed(format!("{error:#}")),
                     |client, emit| check_updates(client, emit).map(|_| ()),
@@ -413,7 +448,18 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             }
         }
         match commands.recv_timeout(Duration::from_millis(100)) {
-            Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break SessionEnd::Shutdown;
+            }
+            Ok(Command::ChangeUser) => {
+                emit.status("Signing out");
+                if let Err(error) = client.call(ProfileForgetParams {
+                    profile_id: profile.id,
+                }) {
+                    log::warn!("forgetting profile {}: {error:#}", profile.id);
+                }
+                break SessionEnd::ChangeUser;
+            }
             Ok(Command::Install { game }) => installer.push(game),
             Ok(Command::SkipInstall { game_id }) => installer.skip(game_id),
             Ok(Command::CollectionPage {
@@ -423,7 +469,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 let profile_id = profile.id;
                 spawn_op(
                     format!("collection-{collection_id}"),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     move |error| Event::CollectionPageFailed {
                         collection_id,
@@ -445,7 +491,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 let profile_id = profile.id;
                 spawn_op(
                     "collections-installed".into(),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     |error| Event::Error(format!("{error:#}")),
                     move |client, emit| {
@@ -481,7 +527,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             Ok(Command::Discard {
                 download_id,
                 confirm: None,
-            }) => discard(&client, emit, download_id),
+            }) => discard(client, emit, download_id),
             Ok(Command::Discard {
                 download_id,
                 confirm: Some(title),
@@ -489,7 +535,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 let prompts = prompts.clone();
                 spawn_op(
                     format!("discard-{download_id}"),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     {
                         let download_id = download_id.clone();
@@ -520,19 +566,19 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 if let Err(error) = client.call(DownloadsRetryParams { download_id }) {
                     log::warn!("retry: {error:#}");
                 }
-                refresh_downloads(&client, emit);
+                refresh_downloads(client, emit);
             }
             Ok(Command::ClearFinished) => {
                 if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
                     log::warn!("clearing finished downloads: {error:#}");
                 }
-                refresh_downloads(&client, emit);
+                refresh_downloads(client, emit);
             }
             Ok(Command::Uninstall { cave_id, title }) => {
                 let prompts = prompts.clone();
                 spawn_op(
                     format!("uninstall-{cave_id}"),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     {
                         let cave_id = cave_id.clone();
@@ -577,13 +623,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     continue;
                 }
                 crate::muos::begin();
-                let config = Arc::clone(&config);
+                let config = Arc::clone(config);
                 let prompts = prompts.clone();
                 let launches = launches.clone();
                 let profile_id = profile.id;
                 spawn_op(
                     format!("launch-{cave_id}"),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     {
                         let cave_id = cave_id.clone();
@@ -650,13 +696,13 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                 sync.collections_stale.store(true, Ordering::Relaxed);
                 next_update_check = Instant::now() + UPDATE_EVERY;
                 emit.status("Refreshing library");
-                sync.spawn(&link, emit);
+                sync.spawn(link, emit);
             }
             Ok(Command::CheckUpdates) => {
                 next_update_check = Instant::now() + UPDATE_EVERY;
                 spawn_op(
                     "update-check".into(),
-                    Arc::clone(&link),
+                    Arc::clone(link),
                     emit.clone(),
                     |error| Event::Error(format!("Couldn't check for updates: {error:#}")),
                     move |client, emit| check_updates(client, emit).map(|_| ()),
@@ -664,11 +710,11 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             }
             Ok(Command::Update { update }) => {
                 if update.direct {
-                    if let Err(error) = queue_update(&client, &update, 0) {
+                    if let Err(error) = queue_update(client, &update, 0) {
                         log::error!("{error:#}");
                         emit.send(Event::Error(format!("{error:#}")));
                     }
-                    refresh_downloads(&client, emit);
+                    refresh_downloads(client, emit);
                 } else {
                     // Indirect updates are butler's guesses, so the user
                     // picks. Asking blocks on the answer, which arrives
@@ -676,7 +722,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
                     let prompts = prompts.clone();
                     spawn_op(
                         format!("update-{}", update.cave_id),
-                        Arc::clone(&link),
+                        Arc::clone(link),
                         emit.clone(),
                         |error| Event::Error(format!("{error:#}")),
                         move |client, emit| {
@@ -695,16 +741,16 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         for incoming in client.poll() {
-            log_incoming(&client, incoming);
+            log_incoming(client, incoming);
         }
-    }
+    };
 
     stopping.store(true, Ordering::Relaxed);
     if let Err(error) = client.call(DownloadsDriveCancelParams {}) {
         log::debug!("stopping the download driver: {error:#}");
     }
     let _ = driver.join();
-    Ok(())
+    Ok(end)
 }
 
 /// Keeps one `Downloads.Drive` call up for the life of the process, on its

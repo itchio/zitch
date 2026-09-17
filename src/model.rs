@@ -383,6 +383,8 @@ pub enum Action {
     CheckUpdates,
     /// Refetch the owned list and collections from itch.io.
     RefreshLibrary,
+    /// Forget the signed-in profile and show the sign-in page.
+    ChangeUser,
     Uninstall {
         cave_id: String,
     },
