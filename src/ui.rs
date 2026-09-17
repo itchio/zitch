@@ -2214,7 +2214,7 @@ pub fn drawer(
                 .vline(panel.max.x, panel.y_range(), Stroke::new(1.0, BORDER));
             let pad = m.space(16.0);
             let mut cursor = panel.min.y + m.header_height;
-            let row_height = m.space(44.0);
+            let row_height = m.space(32.0);
             for (index, item) in items.iter().enumerate() {
                 let row =
                     Rect::from_min_size(egui::pos2(panel.min.x, cursor), vec2(width, row_height));
