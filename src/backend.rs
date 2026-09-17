@@ -28,7 +28,7 @@ use crate::butlerd::types::{
     PrereqsFailedResult, ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithOAuthCodeParams, ProfileUseSavedLoginParams, RuntimeLaunchResult,
     ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, UploadType,
-    VersionGetParams,
+    VersionGetParams, VersionGetResult,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
 use crate::login::{CLIENT_ID, DeviceLogin, Poll, REDIRECT_URI};
@@ -126,7 +126,8 @@ pub enum Command {
 pub enum Event {
     /// A one-line description of what the backend is doing.
     Status(String),
-    /// butler's short version, like `v15.20.0`.
+    /// butler's short version, like `v15.20.0`, or `head 2e450f1` for a
+    /// build off the head channel.
     ButlerVersion(String),
     /// Nothing to sign in with: show this URL as a QR code, with the
     /// code the phone's page asks the user to compare, until
@@ -314,6 +315,19 @@ impl Emitter {
     }
 }
 
+/// A head build's short version is just `head`; the ref in the long one
+/// says which.
+fn butler_version_label(version: &VersionGetResult) -> String {
+    let short = version.version.as_str();
+    if short != "head" {
+        return short.to_string();
+    }
+    match version.version_string.split("ref ").nth(1) {
+        Some(sha) if sha.len() >= 7 && sha.is_char_boundary(7) => format!("head {}", &sha[..7]),
+        _ => short.to_string(),
+    }
+}
+
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
     let link: Link = Arc::new(Mutex::new(Arc::new(Daemon::spawn(
@@ -328,7 +342,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         current(&link).address
     ));
     match client.call(VersionGetParams {}) {
-        Ok(version) => emit.send(Event::ButlerVersion(version.version)),
+        Ok(version) => emit.send(Event::ButlerVersion(butler_version_label(&version))),
         Err(error) => log::warn!("butler version: {error:#}"),
     }
 
@@ -2141,4 +2155,31 @@ fn all_caves(client: &Client) -> Result<Vec<Cave>> {
         }
     }
     Ok(caves)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn butler_version_labels() {
+        let version = |short: &str, long: &str| VersionGetResult {
+            version: short.into(),
+            version_string: long.into(),
+        };
+        let head =
+            "head, built on Sep 17 2026 @ 00:53:24, ref 2e450f1220d0ed876acc24dc21681a964e207cf3";
+        assert_eq!(butler_version_label(&version("head", head)), "head 2e450f1");
+        assert_eq!(
+            butler_version_label(&version("head", "head, no build date")),
+            "head"
+        );
+        assert_eq!(
+            butler_version_label(&version(
+                "v15.24.0",
+                "v15.24.0, built on ..., ref abcdef0123"
+            )),
+            "v15.24.0"
+        );
+    }
 }

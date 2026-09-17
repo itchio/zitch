@@ -1945,8 +1945,8 @@ impl App {
                 State::Available(release) => (
                     format!("zitch {} is available", release.version),
                     format!(
-                        "You have zitch {running}. The download ({}) goes to the Archive \
-                         Manager's folder; you install it from there after quitting zitch.",
+                        "You have zitch {running}. The download ({}) goes into Archive \
+                         Manager for you to manually install after quitting zitch.",
                         human_size(release.size as i64)
                     ),
                     vec!["Download", "Not now"],

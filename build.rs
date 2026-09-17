@@ -4,7 +4,14 @@ use std::process::Command;
 /// ZITCH_VERSION, else `git describe`, else the crate version.
 fn main() {
     println!("cargo::rerun-if-env-changed=ZITCH_VERSION");
-    for path in [".git/HEAD", ".git/packed-refs", ".git/refs/tags"] {
+    // HEAD names the branch and stays the same across commits; its log
+    // grows with every commit, checkout and reset.
+    for path in [
+        ".git/HEAD",
+        ".git/logs/HEAD",
+        ".git/packed-refs",
+        ".git/refs/tags",
+    ] {
         if std::path::Path::new(path).exists() {
             println!("cargo::rerun-if-changed={path}");
         }
