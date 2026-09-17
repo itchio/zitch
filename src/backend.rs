@@ -53,6 +53,9 @@ pub struct Config {
     /// Variables for the games butler launches, on top of our own. On
     /// muOS this is what routes their SDL to the screen (`muos::game_env`).
     pub game_env: Vec<(String, OsString)>,
+    /// Start butler with `--low-power`. Only for a butler we ship, since
+    /// one older than the flag refuses to start with it.
+    pub low_power: bool,
 }
 
 pub enum Command {
@@ -317,6 +320,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
         &config.butler,
         &config.dbpath,
         &config.game_env,
+        config.low_power,
     )?)));
     let mut client = connect(&link)?;
     emit.status(format!(
@@ -406,7 +410,12 @@ fn session(
         // small device, a crash, a firmware reaping background processes.
         if !current(link).alive() {
             emit.status("butler exited; restarting");
-            match Daemon::spawn(&config.butler, &config.dbpath, &config.game_env) {
+            match Daemon::spawn(
+                &config.butler,
+                &config.dbpath,
+                &config.game_env,
+                config.low_power,
+            ) {
                 Ok(daemon) => {
                     *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
                     *client = connect(link)?;

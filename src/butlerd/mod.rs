@@ -73,12 +73,18 @@ struct ListenTcp {
 impl Daemon {
     /// `env` is added to the daemon's environment, and so to every
     /// game it launches.
-    pub fn spawn(butler: &Path, dbpath: &Path, env: &[(String, OsString)]) -> Result<Self> {
+    pub fn spawn(
+        butler: &Path,
+        dbpath: &Path,
+        env: &[(String, OsString)],
+        low_power: bool,
+    ) -> Result<Self> {
         if let Some(parent) = dbpath.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut child = Command::new(butler)
+        let mut command = Command::new(butler);
+        command
             .arg("daemon")
             .arg("--json")
             .arg("--transport")
@@ -89,7 +95,11 @@ impl Daemon {
             .arg("--destiny-pid")
             .arg(std::process::id().to_string())
             .arg("--user-agent")
-            .arg(concat!("zitch/", env!("ZITCH_VERSION")))
+            .arg(concat!("zitch/", env!("ZITCH_VERSION")));
+        if low_power {
+            command.arg("--low-power");
+        }
+        let mut child = command
             .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

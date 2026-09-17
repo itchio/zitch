@@ -165,6 +165,8 @@ fn main() -> anyhow::Result<()> {
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),
         game_env: muos::game_env(),
+        // The muxapp bundles its own butler; elsewhere it is the itch app's.
+        low_power: muos::available(),
     };
 
     let script = match cli.screenshot_script.as_deref().map(app::parse_script) {
