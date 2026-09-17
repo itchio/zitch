@@ -44,6 +44,16 @@ directories, and the executable bits come from the zip. To install, copy
 Applications > Archive Manager; the result is the same folder
 `handheld-deploy` writes, plus butler.
 
+## Updating
+
+"Check for zitch update" in the menu drawer downloads the latest GitHub
+release's `.muxapp` into `/mnt/mmc/ARCHIVE`. Installing it is still done
+by hand in the Archive Manager, after quitting.
+
+To try it off the device:
+
+    ZITCH_SELF_UPDATE_DIR=/tmp/archive ZITCH_SELF_UPDATE_VERSION=0.0.1 make run
+
 CI builds one on an arm64 runner (`muos` job in `.github/workflows/build.yml`)
 without the device sysroot, so the binary links against the runner's
 glibc; a check there fails the job if it needs a symbol version newer than

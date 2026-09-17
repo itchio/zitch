@@ -10,6 +10,7 @@ mod images;
 mod login;
 mod model;
 mod muos;
+mod self_update;
 mod ui;
 
 use std::path::{Path, PathBuf};

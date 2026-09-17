@@ -2032,6 +2032,20 @@ pub fn prompt(
                             .max_height(budget)
                             .scroll_bar_visibility(scroll_bar(ui, true))
                             .show(ui, |ui| {
+                                if let Some((line, fraction)) = &prompt.progress {
+                                    ui.label(
+                                        egui::RichText::new(line)
+                                            .font(FontId::proportional(m.caption))
+                                            .color(ACCENT),
+                                    );
+                                    ui.add_space(m.space(8.0));
+                                    let (bar, _) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), 8.0),
+                                        Sense::hover(),
+                                    );
+                                    progress_bar(ui, bar, *fraction);
+                                    ui.add_space(m.space(14.0));
+                                }
                                 if !prompt.body.is_empty() {
                                     ui.label(
                                         egui::RichText::new(&prompt.body)
@@ -2096,7 +2110,7 @@ fn drawer_width(m: &Metrics, screen: Rect) -> f32 {
 
 /// One row of the menu drawer.
 pub struct MenuItem {
-    pub label: &'static str,
+    pub label: String,
     pub action: Action,
     /// Its work is under way; drawn with a spinner.
     pub busy: bool,
@@ -2164,7 +2178,7 @@ pub fn drawer(
                 let text = ui.painter().text(
                     egui::pos2(row.min.x + pad + m.space(4.0), row.center().y),
                     egui::Align2::LEFT_CENTER,
-                    item.label,
+                    &item.label,
                     bold(m.button),
                     if focused { TEXT } else { DIM },
                 );

@@ -102,6 +102,8 @@ pub struct Prompt {
     /// The choices stand in a column stepped with Up and Down, rather
     /// than a row stepped with Left and Right.
     pub stacked: bool,
+    /// Work under way: a status line and how far along it is, 0 to 1.
+    pub progress: Option<(String, f32)>,
 }
 
 /// Which part of the library the main row shows.
@@ -385,6 +387,8 @@ pub enum Action {
     RefreshLibrary,
     /// Forget the signed-in profile and show the sign-in page.
     ChangeUser,
+    /// Open the dialog for updating zitch itself, checking for a release.
+    SelfUpdate,
     Uninstall {
         cave_id: String,
     },

@@ -11,8 +11,9 @@ use crate::login::QrCode;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
     Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
-    UploadExt, UserExt, playable_here,
+    UploadExt, UserExt, human_size, playable_here,
 };
+use crate::self_update::{self, SelfUpdate};
 use crate::ui;
 use crate::ui::LoginView;
 
@@ -123,6 +124,7 @@ pub struct App {
     handheld: bool,
     /// An update check the user asked for is still running.
     checking_updates: bool,
+    self_update: Option<SelfUpdate>,
     /// When a check the user asked for last came back with nothing; the
     /// button says so for a moment.
     up_to_date_at: Option<Instant>,
@@ -298,6 +300,7 @@ impl App {
             low_spec,
             handheld: false,
             checking_updates: false,
+            self_update: SelfUpdate::supported().then(|| SelfUpdate::new(ctx)),
             up_to_date_at: None,
             refreshing: false,
             minimize_while_playing,
@@ -569,6 +572,7 @@ impl App {
                     focus: 0,
                     primary: None,
                     stacked: true,
+                    progress: None,
                 },
                 None => Prompt {
                     id: 0,
@@ -578,6 +582,7 @@ impl App {
                     focus: 0,
                     primary: Some(0),
                     stacked: false,
+                    progress: None,
                 },
             });
             return;
@@ -614,8 +619,12 @@ impl App {
                     self.actions.push(answer);
                 }
                 Action::Answer { prompt: id, choice } if id == prompt.id => {
-                    self.prompt = self.prompt_queue.pop_front();
-                    self.backend.send(Command::Answer { prompt: id, choice });
+                    if id == Self::SELF_UPDATE_PROMPT {
+                        self.answer_self_update(choice);
+                    } else {
+                        self.prompt = self.prompt_queue.pop_front();
+                        self.backend.send(Command::Answer { prompt: id, choice });
+                    }
                 }
                 Action::Menu => self.raise_window(),
                 _ => {}
@@ -1037,6 +1046,7 @@ impl App {
             }
             // Only the sign-in page has the checkbox, and it is handled above.
             Action::SetShareDeviceInfo(_) => {}
+            Action::SelfUpdate => self.open_self_update(),
         }
     }
 
@@ -1881,6 +1891,131 @@ impl App {
         self.notice = Some((message, Instant::now()));
     }
 
+    /// The backend counts its prompt ids up from 1.
+    const SELF_UPDATE_PROMPT: u64 = u64::MAX;
+
+    /// The drawer's row: open the dialog, checking unless there is
+    /// already something to show.
+    fn open_self_update(&mut self) {
+        let Some(update) = self.self_update.as_mut() else {
+            return;
+        };
+        update.check();
+        self.menu = None;
+        if let Some(prompt) = self.self_update_prompt(0)
+            && let Some(open) = self.prompt.replace(prompt)
+        {
+            self.prompt_queue.push_front(open);
+        }
+    }
+
+    fn self_update_prompt(&self, focus: usize) -> Option<Prompt> {
+        use self_update::State;
+        let running = env!("ZITCH_VERSION");
+        let progress = match self.self_update.as_ref()?.state() {
+            State::Downloading { release, done } => {
+                let fraction = *done as f32 / release.size.max(1) as f32;
+                let line = format!(
+                    "{:.0}%, {} of {}",
+                    fraction * 100.0,
+                    human_size(*done as i64),
+                    human_size(release.size as i64)
+                );
+                Some((line, fraction))
+            }
+            _ => None,
+        };
+        let (title, body, choices): (String, String, Vec<&str>) =
+            match self.self_update.as_ref()?.state() {
+                State::Idle => return None,
+                State::Checking => (
+                    "Checking for a zitch update…".into(),
+                    format!("You have zitch {running}."),
+                    vec!["Close"],
+                ),
+                State::UpToDate => (
+                    "zitch is up to date".into(),
+                    format!("You have zitch {running}, the latest release."),
+                    vec!["Close"],
+                ),
+                State::Failed(message) => ("zitch update".into(), message.clone(), vec!["Close"]),
+                State::Available(release) => (
+                    format!("zitch {} is available", release.version),
+                    format!(
+                        "You have zitch {running}. The download ({}) goes to the Archive \
+                         Manager's folder; you install it from there after quitting zitch.",
+                        human_size(release.size as i64)
+                    ),
+                    vec!["Download", "Not now"],
+                ),
+                State::Downloading { release, .. } => (
+                    format!("Downloading zitch {}", release.version),
+                    "It carries on if you close this.".into(),
+                    vec!["Close"],
+                ),
+                State::Ready(release) => (
+                    format!("zitch {} is ready to install", release.version),
+                    format!(
+                        "Quit zitch, open Applications > Archive Manager, and pick {}.",
+                        release.file_name
+                    ),
+                    vec!["Quit now", "Later"],
+                ),
+            };
+        Some(Prompt {
+            id: Self::SELF_UPDATE_PROMPT,
+            title,
+            body,
+            focus: focus.min(choices.len() - 1),
+            primary: (choices.len() > 1).then_some(0),
+            choices: choices.into_iter().map(String::from).collect(),
+            stacked: false,
+            progress,
+        })
+    }
+
+    fn answer_self_update(&mut self, choice: Option<usize>) {
+        use self_update::State;
+        let Some(update) = self.self_update.as_mut() else {
+            return;
+        };
+        match (update.state(), choice) {
+            // The dialog stays up to show the download.
+            (State::Available(_), Some(0)) => {
+                update.download();
+                return;
+            }
+            (State::Ready(_), Some(0)) => self.quitting = Some(Self::QUIT_FRAMES),
+            _ => update.dismiss(),
+        }
+        self.prompt = self.prompt_queue.pop_front();
+    }
+
+    fn poll_self_update(&mut self) {
+        let Some(update) = self.self_update.as_mut() else {
+            return;
+        };
+        let finished = update.poll();
+        let open = self
+            .prompt
+            .as_ref()
+            .filter(|p| p.id == Self::SELF_UPDATE_PROMPT)
+            .map(|p| (p.focus, p.choices.len()));
+        match open {
+            Some((focus, choices)) => {
+                let mut prompt = self.self_update_prompt(focus);
+                // Different buttons: start from the first again.
+                if let Some(prompt) = prompt.as_mut().filter(|p| p.choices.len() != choices) {
+                    prompt.focus = 0;
+                }
+                self.prompt = prompt.or_else(|| self.prompt_queue.pop_front());
+            }
+            // The download finished behind a closed dialog.
+            None if finished => self.open_self_update(),
+            None => {}
+        }
+    }
+
     fn refresh_library(&mut self) {
         if self.online && !self.refreshing {
             self.refreshing = true;
@@ -1915,22 +2050,29 @@ impl App {
     fn menu_items(&self) -> Vec<ui::MenuItem> {
         let mut items = vec![ui::MenuItem {
             label: if self.refreshing {
-                "Refreshing…"
+                "Refreshing…".into()
             } else {
-                "Refresh library"
+                "Refresh library".into()
             },
             action: Action::RefreshLibrary,
             busy: self.refreshing,
         }];
         if self.profile.is_some() {
             items.push(ui::MenuItem {
-                label: "Change user",
+                label: "Change user".into(),
                 action: Action::ChangeUser,
                 busy: false,
             });
         }
+        if let Some(update) = &self.self_update {
+            items.push(ui::MenuItem {
+                label: "Check for zitch update".into(),
+                action: Action::SelfUpdate,
+                busy: matches!(update.state(), self_update::State::Downloading { .. }),
+            });
+        }
         items.push(ui::MenuItem {
-            label: "Quit",
+            label: "Quit".into(),
             action: Action::Quit,
             busy: false,
         });
@@ -2071,6 +2213,7 @@ impl App {
             }
         }
         self.handle_events();
+        self.poll_self_update();
         if let Some(at) = self.up_to_date_at {
             let left = Self::UP_TO_DATE_FOR.saturating_sub(at.elapsed());
             if left.is_zero() {

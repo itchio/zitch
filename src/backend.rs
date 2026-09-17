@@ -898,6 +898,7 @@ impl Prompts {
             focus: 0,
             primary,
             stacked,
+            progress: None,
         }));
         let choice = rx.recv().ok().flatten();
         self.waiting
