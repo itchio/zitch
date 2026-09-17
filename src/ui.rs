@@ -234,6 +234,10 @@ pub struct Metrics {
     pub chrome: f32,
     /// Space between the page edge and content.
     pub margin: f32,
+    /// Space above the header.
+    pub top: f32,
+    /// Space above and below the footer's hints.
+    pub footer_pad: f32,
     pub tile_width: f32,
     /// Space between tiles in a row.
     pub gap: f32,
@@ -269,13 +273,22 @@ impl Metrics {
     /// across, so a narrow screen still reads as a carousel.
     const MIN_COLUMNS: f32 = 3.5;
 
-    pub fn for_screen(screen: Rect) -> Self {
+    /// `handheld` trades the frame around the page for content, down to
+    /// about what the muOS frontend leaves.
+    pub fn for_screen(screen: Rect, handheld: bool) -> Self {
         let scale = (screen.height() / Self::DESIGN_HEIGHT).clamp(0.8, 2.4);
         let chrome = scale.sqrt();
         // Whole points keep widget edges on pixels at 1x density.
         let space = |base: f32| (base * scale).round();
         let frame = |base: f32| (base * chrome).round();
-        let margin = (screen.width() * 0.03).clamp(12.0, 48.0).round();
+        let ring = space(6.0);
+        let margin = if handheld {
+            // The focus ring is painted in the margin.
+            ring + 4.0
+        } else {
+            (screen.width() * 0.03).clamp(12.0, 48.0).round()
+        };
+        let footer_pad = frame(if handheld { 4.0 } else { 8.0 });
         let gap = space(14.0);
         let strip_gap = (screen.width() * 0.017)
             .clamp(space(8.0), space(18.0))
@@ -290,13 +303,15 @@ impl Metrics {
             scale,
             chrome,
             margin,
+            top: frame(if handheld { 6.0 } else { 18.0 }),
+            footer_pad,
             tile_width,
             gap,
             strip_gap,
-            ring: space(6.0),
+            ring,
             title_height: space(26.0),
             header_height: frame(30.0),
-            footer_height: frame(8.0) * 2.0 + icon(22.0),
+            footer_height: footer_pad * 2.0 + icon(22.0),
             section_gap: frame(16.0),
             heading: font(30.0, 20.0),
             title: font(26.0, 18.0),
@@ -1105,6 +1120,47 @@ pub fn subtle_truncated(ui: &mut Ui, m: &Metrics, text: &str) {
         )
         .truncate(),
     );
+}
+
+/// The header's battery, shaped like the muOS frontend's: a heavy outline
+/// and a fill to the charge in one colour, green on external power and
+/// accent when nearly empty.
+pub fn battery(ui: &mut Ui, m: &Metrics, reading: crate::battery::Reading) {
+    let height = (m.body * 1.6).round();
+    let line = (height / 11.0).round().max(1.0);
+    let nub = vec2((line * 1.5).round(), (height * 0.45).round());
+    let (rect, response) = ui.allocate_exact_size(
+        vec2((height * 1.55).round() + nub.x, height),
+        Sense::hover(),
+    );
+    let color = if reading.charging {
+        GREEN
+    } else if reading.percent <= 15 {
+        ACCENT
+    } else {
+        DIM
+    };
+    let body = Rect::from_min_max(rect.min, egui::pos2(rect.max.x - nub.x, rect.max.y));
+    let painter = ui.painter();
+    painter.rect_stroke(
+        body,
+        CornerRadius::same((line * 2.0) as u8),
+        Stroke::new(line, color),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        Rect::from_center_size(egui::pos2(rect.max.x - nub.x / 2.0, rect.center().y), nub),
+        CornerRadius::same(1),
+        color,
+    );
+    let inner = body.shrink(line * 2.0);
+    let filled = (inner.width() * f32::from(reading.percent) / 100.0).max(line);
+    painter.rect_filled(
+        Rect::from_min_size(inner.min, vec2(filled, inner.height())),
+        CornerRadius::same(line as u8),
+        color,
+    );
+    response.on_hover_text(format!("{}%", reading.percent));
 }
 
 pub fn offline(ui: &mut Ui, m: &Metrics) {
@@ -2269,7 +2325,7 @@ pub fn footer(
         .frame(
             egui::Frame::new()
                 .fill(BG)
-                .inner_margin(egui::Margin::symmetric(m.margin as i8, m.frame(8.0) as i8)),
+                .inner_margin(egui::Margin::symmetric(m.margin as i8, m.footer_pad as i8)),
         )
         .show_separator_line(false)
         .show(ui, |ui| {

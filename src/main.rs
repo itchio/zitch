@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod battery;
 mod butlerd;
 mod device_info;
 mod gamepad;

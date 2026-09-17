@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Command, Event};
+use crate::battery::Battery;
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
@@ -125,6 +126,7 @@ pub struct App {
     /// An update check the user asked for is still running.
     checking_updates: bool,
     self_update: Option<SelfUpdate>,
+    battery: Battery,
     /// When a check the user asked for last came back with nothing; the
     /// button says so for a moment.
     up_to_date_at: Option<Instant>,
@@ -301,6 +303,7 @@ impl App {
             handheld: false,
             checking_updates: false,
             self_update: SelfUpdate::supported().then(|| SelfUpdate::new(ctx)),
+            battery: Battery::new(),
             up_to_date_at: None,
             refreshing: false,
             minimize_while_playing,
@@ -2300,9 +2303,9 @@ impl App {
             screen.size() * ui.ctx().pixels_per_point()
         };
         crate::device_info::set_resolution(pixels.x, pixels.y);
-        let m = ui::Metrics::for_screen(screen);
         let policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
         self.handheld = policy.low_spec;
+        let m = ui::Metrics::for_screen(screen, self.handheld);
         self.covers.set_policy(policy);
         if self.input_mode != InputMode::Touch
             && (self.owned.get().is_some() || self.login.is_some())
@@ -2322,7 +2325,7 @@ impl App {
             .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin {
                 left: m.margin as i8,
                 right: m.margin as i8,
-                top: m.frame(18.0) as i8,
+                top: m.top as i8,
                 bottom: m.frame(6.0) as i8,
             }))
             .show(ui, |ui| {
@@ -2369,6 +2372,9 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = m.space(12.0);
+                        if let Some(reading) = self.battery.reading() {
+                            ui::battery(ui, &m, reading);
+                        }
                         if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
                             // Elide rather than wrap: on a 640-wide screen a
                             // long display name meets the tab strip.
