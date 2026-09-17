@@ -225,6 +225,9 @@ const PROBE_EVERY: Duration = Duration::from_secs(60);
 const UPDATE_EVERY: Duration = Duration::from_secs(30 * 60);
 /// How long to wait before trying to start butler again after it died.
 const RESPAWN_DELAY: Duration = Duration::from_secs(5);
+/// How often the session loop looks at butler's health and its timers
+/// when no command arrives; commands wake it at once.
+const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Repaints the window when the backend has news. egui only repaints on
 /// input, so without this a reply would sit unseen until the mouse moved.
@@ -447,7 +450,7 @@ fn session(
                 );
             }
         }
-        match commands.recv_timeout(Duration::from_millis(100)) {
+        match commands.recv_timeout(IDLE_TICK) {
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break SessionEnd::Shutdown;
             }

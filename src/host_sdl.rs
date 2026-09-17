@@ -35,6 +35,10 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// cost 5% of a core doing nothing. A frame's worth of latency on input
 /// is not felt in a menu, and brings idle down to 0.6%.
 const POLL: Duration = Duration::from_millis(16);
+/// While a game has the screen its input is thrown away, so the pump only
+/// has to keep SDL's queue from filling. The backend's wake ends the wait
+/// when the game exits.
+const HIDDEN_POLL: Duration = Duration::from_secs(1);
 
 /// Dark enough not to flash, and unlike any tile the interface draws.
 const SCRUB_COLOR: [f32; 4] = [0.02, 0.0, 0.03, 1.0];
@@ -158,7 +162,8 @@ pub fn run(
         let mut sdl_events: Vec<Event> = event_pump.poll_iter().collect();
         while sdl_events.is_empty() {
             let now = Instant::now();
-            if now >= due || wake.wait(POLL.min(due - now)) {
+            let poll = if hidden { HIDDEN_POLL } else { POLL };
+            if now >= due || wake.wait(poll.min(due - now)) {
                 break;
             }
             sdl_events = event_pump.poll_iter().collect();

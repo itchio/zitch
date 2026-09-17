@@ -8,16 +8,14 @@
 
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -202,14 +200,34 @@ pub enum Incoming {
     },
 }
 
-type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, RpcError>>>>>;
+/// What the reader thread has taken off the socket and nobody has
+/// collected yet. Callers sleep on `arrived` rather than poll.
+#[derive(Default)]
+struct Inbox {
+    state: Mutex<InboxState>,
+    arrived: Condvar,
+}
+
+#[derive(Default)]
+struct InboxState {
+    /// Requests sent whose reply has not been collected; a reply sits in
+    /// its slot until its caller wakes.
+    replies: HashMap<u64, Option<Result<Value, RpcError>>>,
+    incoming: VecDeque<Incoming>,
+    closed: bool,
+}
+
+impl Inbox {
+    fn lock(&self) -> std::sync::MutexGuard<'_, InboxState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
 
 /// One authenticated JSON-RPC connection to the daemon.
 pub struct Client {
     writer: Mutex<TcpStream>,
-    pending: Pending,
+    inbox: Arc<Inbox>,
     next_id: AtomicU64,
-    incoming: Mutex<mpsc::Receiver<Incoming>>,
 }
 
 /// Ends a connection from another thread. butlerd cancels the call in
@@ -254,18 +272,16 @@ impl Client {
             .with_context(|| format!("connecting to butlerd at {}", daemon.address))?;
         stream.set_nodelay(true)?;
         let reader = stream.try_clone()?;
-        let pending: Pending = Arc::default();
-        let (incoming_tx, incoming_rx) = mpsc::channel();
-        let reader_pending = Arc::clone(&pending);
+        let inbox: Arc<Inbox> = Arc::default();
+        let reader_inbox = Arc::clone(&inbox);
         std::thread::Builder::new()
             .name("butlerd-reader".into())
-            .spawn(move || read_loop(reader, reader_pending, incoming_tx))
+            .spawn(move || read_loop(reader, &reader_inbox))
             .expect("spawning butlerd reader");
         let client = Self {
             writer: Mutex::new(stream),
-            pending,
+            inbox,
             next_id: AtomicU64::new(1),
-            incoming: Mutex::new(incoming_rx),
         };
         let ok = client.call(types::MetaAuthenticateParams {
             secret: daemon.secret.clone(),
@@ -333,27 +349,41 @@ impl Client {
         mut on_incoming: impl FnMut(Incoming),
     ) -> Result<R> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, tx);
+        self.inbox.lock().replies.insert(id, None);
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if redact {
             log::trace!("-> {method} <credentials redacted>");
         } else {
             log::trace!("-> {method} {}", message["params"]);
         }
-        self.send(&message)?;
+        if let Err(error) = self.send(&message) {
+            self.inbox.lock().replies.remove(&id);
+            return Err(error);
+        }
         let result = loop {
-            match rx.try_recv() {
-                Ok(result) => break result,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    bail!("butlerd connection closed while waiting for {method}")
+            let mut state = self.inbox.lock();
+            let batch: Vec<Incoming> = loop {
+                if !state.incoming.is_empty() {
+                    break state.incoming.drain(..).collect();
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
+                if matches!(state.replies.get(&id), Some(Some(_))) || state.closed {
+                    break Vec::new();
+                }
+                state = self
+                    .inbox
+                    .arrived
+                    .wait(state)
+                    .unwrap_or_else(|p| p.into_inner());
+            };
+            if batch.is_empty() {
+                match state.replies.remove(&id).flatten() {
+                    Some(result) => break result,
+                    None => bail!("butlerd connection closed while waiting for {method}"),
+                }
             }
-            for incoming in self.poll_timeout(Duration::from_millis(50)) {
+            // Handlers write back to the daemon; not under the lock.
+            drop(state);
+            for incoming in batch {
                 on_incoming(incoming);
             }
         };
@@ -375,22 +405,7 @@ impl Client {
 
     /// Everything the daemon sent that was not a reply, in order.
     pub fn poll(&self) -> Vec<Incoming> {
-        self.incoming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .try_iter()
-            .collect()
-    }
-
-    /// Like [`Self::poll`] but waits up to `timeout` for the first message.
-    pub fn poll_timeout(&self, timeout: Duration) -> Vec<Incoming> {
-        let rx = self.incoming.lock().unwrap_or_else(|p| p.into_inner());
-        let mut out = Vec::new();
-        if let Ok(first) = rx.recv_timeout(timeout) {
-            out.push(first);
-            out.extend(rx.try_iter());
-        }
-        out
+        self.inbox.lock().incoming.drain(..).collect()
     }
 
     fn send(&self, message: &Value) -> Result<()> {
@@ -402,7 +417,7 @@ impl Client {
     }
 }
 
-fn read_loop(stream: TcpStream, pending: Pending, incoming: mpsc::Sender<Incoming>) {
+fn read_loop(stream: TcpStream, inbox: &Inbox) {
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let line = match line {
@@ -421,29 +436,23 @@ fn read_loop(stream: TcpStream, pending: Pending, incoming: mpsc::Sender<Incomin
         };
         match (message.id, message.method) {
             (Some(id), Some(method)) => {
-                let _ = incoming.send(Incoming::Request {
+                inbox.lock().incoming.push_back(Incoming::Request {
                     id,
                     method,
                     params: message.params.unwrap_or(Value::Null),
                 });
+                inbox.arrived.notify_all();
             }
             (None, Some(method)) => {
-                let _ = incoming.send(Incoming::Notification {
+                inbox.lock().incoming.push_back(Incoming::Notification {
                     method,
                     params: message.params.unwrap_or(Value::Null),
                 });
+                inbox.arrived.notify_all();
             }
             (Some(id), None) => {
                 let Some(id) = id.as_u64() else {
                     log::warn!("reply with a non-numeric id: {id}");
-                    continue;
-                };
-                let waiter = pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
-                let Some(waiter) = waiter else {
-                    log::warn!("reply to unknown request {id}");
                     continue;
                 };
                 let outcome = match (message.result, message.error) {
@@ -451,13 +460,21 @@ fn read_loop(stream: TcpStream, pending: Pending, incoming: mpsc::Sender<Incomin
                     (Some(result), None) => Ok(result),
                     (None, None) => Ok(Value::Null),
                 };
-                let _ = waiter.send(outcome);
+                match inbox.lock().replies.get_mut(&id) {
+                    Some(slot) => *slot = Some(outcome),
+                    None => {
+                        log::warn!("reply to unknown request {id}");
+                        continue;
+                    }
+                }
+                inbox.arrived.notify_all();
             }
             (None, None) => log::warn!("message with neither id nor method: {line}"),
         }
     }
     // Wake every caller still waiting so they fail instead of hanging.
-    pending.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    inbox.lock().closed = true;
+    inbox.arrived.notify_all();
 }
 
 #[cfg(test)]
