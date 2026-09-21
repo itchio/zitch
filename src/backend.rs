@@ -649,6 +649,7 @@ fn session(
                     continue;
                 }
                 crate::muos::begin();
+                launches.begin(&cave_id);
                 let config = Arc::clone(config);
                 let prompts = prompts.clone();
                 let launches = launches.clone();
@@ -952,10 +953,25 @@ type Launching = (Cancel, Arc<AtomicBool>);
 /// Launch calls in flight, so a running game can be quit from the loop.
 #[derive(Clone, Default)]
 struct Launches {
-    active: Arc<Mutex<HashMap<String, Launching>>>,
+    inner: Arc<Mutex<LaunchesInner>>,
+}
+
+#[derive(Default)]
+struct LaunchesInner {
+    active: HashMap<String, Launching>,
+    /// Quits asked for while the launch was still being planned, before
+    /// it had a connection to cancel.
+    pending: HashSet<String>,
 }
 
 impl Launches {
+    /// Clears what an earlier launch of the cave left behind.
+    fn begin(&self, cave_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.active.remove(cave_id);
+        inner.pending.remove(cave_id);
+    }
+
     /// Registers the connection carrying `cave_id`'s launch. Returns the
     /// flag that `quit` sets, so the thread knows the drop was asked for.
     fn track(&self, cave_id: &str, client: &Client) -> Result<Arc<AtomicBool>> {
@@ -963,37 +979,46 @@ impl Launches {
         let cancel = client
             .cancel_handle()
             .context("cloning launch connection")?;
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.pending.remove(cave_id) {
+            log::info!("quitting {cave_id} before it started");
+            quit.store(true, Ordering::Relaxed);
+            cancel.cancel();
+        }
+        inner
+            .active
             .insert(cave_id.to_string(), (cancel, Arc::clone(&quit)));
         Ok(quit)
     }
 
     fn any(&self) -> bool {
         !self
-            .active
+            .inner
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .active
             .is_empty()
     }
 
     fn forget(&self, cave_id: &str) {
-        self.active
+        self.inner
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .active
             .remove(cave_id);
     }
 
     fn quit(&self, cave_id: &str) {
-        let active = self.active.lock().unwrap_or_else(|p| p.into_inner());
-        match active.get(cave_id) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match inner.active.get(cave_id) {
             Some((cancel, quit)) => {
                 log::info!("quitting {cave_id}");
                 quit.store(true, Ordering::Relaxed);
                 cancel.cancel();
             }
-            None => log::warn!("quit: no launch in flight for {cave_id}"),
+            None => {
+                inner.pending.insert(cave_id.to_string());
+            }
         }
     }
 }

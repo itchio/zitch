@@ -1601,7 +1601,7 @@ impl App {
                     }
                 }
                 Event::LaunchRunning { .. } => {
-                    if self.minimize_while_playing {
+                    if self.handoff || self.minimize_while_playing {
                         self.hide_window();
                     }
                 }
