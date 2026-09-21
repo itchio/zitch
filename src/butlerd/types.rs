@@ -2232,6 +2232,14 @@ pub struct Candidate {
     /// Any other info.
     #[serde(rename = "metadata", default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, Value>>,
+    /// Helper names the runtime a native belongs to when it is plumbing
+    /// shipped next to the game rather than something a player launches:
+    /// "renpy" for its python and zsync, "electron" or "nwjs" for crashpad
+    /// and sandbox processes, "dotnet" for createdump, "java" for a bundled
+    /// JRE, "node" for anything under node_modules, "unity" and "unreal"
+    /// for their crash handlers. Filter drops helpers.
+    #[serde(rename = "helper", default, skip_serializing_if = "Option::is_none")]
+    pub helper: Option<String>,
 }
 
 /// Flavor describes whether we're dealing with a native executables, a Java archive, a love2d bundle, etc.
@@ -2318,6 +2326,9 @@ pub enum Flavor {
     /// Console ROM or disc image, system in Engine.Details["system"]
     #[serde(rename = "rom")]
     ROM,
+    /// Playdate game bundle: the folder holding pdxinfo
+    #[serde(rename = "playdate-pdx")]
+    PlaydatePdx,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -2445,8 +2456,22 @@ pub struct LinuxInfo {
     /// imports (deep probe only). Such builds still get the linux flavor.
     #[serde(rename = "os", default, skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
-    /// True when the executable has no dynamic section (no interpreter, no
-    /// DT_NEEDED). Only meaningful when ConfigureParams.DeepProbe is set.
+    /// Calling convention for 32-bit ARM, from the ELF header flags:
+    /// "eabihf" (hard-float, what Raspberry Pi and armhf distributions
+    /// build) or "eabi" (soft-float). Empty for other architectures.
+    #[serde(rename = "abi", default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<String>,
+    /// Program interpreter (PT_INTERP), such as /lib/ld-linux-armhf.so.3
+    /// or /lib/ld-musl-aarch64.so.1. Names the C library and ABI the
+    /// executable was linked against. Only filled when DeepProbe is set.
+    #[serde(
+        rename = "interpreter",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub interpreter: Option<String>,
+    /// True when the executable has no program interpreter and no DT_NEEDED
+    /// libraries. Only meaningful when ConfigureParams.DeepProbe is set.
     #[serde(rename = "static", default, skip_serializing_if = "Option::is_none")]
     pub r#static: Option<bool>,
     /// Highest GLIBC_x.y symbol version the executable references.
@@ -2560,6 +2585,8 @@ pub enum Engine {
     TIC80,
     #[serde(rename = "openbor")]
     OpenBOR,
+    #[serde(rename = "playdate")]
+    Playdate,
     /// ROM images: the console lives in Details["system"]
     #[serde(rename = "rom")]
     ROM,
@@ -3772,12 +3799,14 @@ pub struct ProfileLoginWithOAuthCodeParams {
     /// The OAuth client ID used in the authorization request
     #[serde(rename = "clientId", default, deserialize_with = "null_default")]
     pub client_id: String,
-    /// Optional JSON describing the device and platform, for itch.io's
-    /// device statistics; empty sends nothing.
-    // Hand-added ahead of butler shipping the field; re-run `make
-    // sync-butler` once it does, so the generated name and shape win.
-    #[serde(rename = "deviceInfo", default, deserialize_with = "null_default")]
-    pub device_info: String,
+    /// Device information string
+    ///
+    #[serde(
+        rename = "deviceInfo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub device_info: Option<String>,
 }
 
 impl Request for ProfileLoginWithOAuthCodeParams {
@@ -5419,7 +5448,16 @@ impl Request for LaunchParams {
 
 /// Payload for LaunchRunning
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct LaunchRunningNotification {}
+pub struct LaunchRunningNotification {
+    /// The process butler started, when it runs the game itself: the
+    /// game's, or the wrapper's around it (a sandbox, or `open` for a
+    /// macOS bundle). Absent for a launch butler does not run (html, url,
+    /// shell, runtime). A client that must name the game to something
+    /// outside butler, such as a firmware's kill hotkey, names this.
+    ///
+    #[serde(rename = "pid", default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
+}
 
 /// Payload for LaunchExited
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

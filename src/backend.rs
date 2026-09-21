@@ -699,6 +699,7 @@ fn session(
                             emit,
                         );
                         launches.forget(&cave_id);
+                        crate::muos::foreground_back();
                         // Play time and last-played change with every run.
                         refresh_caves(client, emit);
                         // Ending the connection is how the user quits; the
@@ -1260,9 +1261,14 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
     client.call_streaming(params, |incoming| match incoming {
         Incoming::Notification { method, params } => {
             match AnyNotification::decode(&method, params) {
-                Ok(AnyNotification::LaunchRunning(_)) => emit.send(Event::LaunchRunning {
-                    cave_id: cave_id.to_string(),
-                }),
+                Ok(AnyNotification::LaunchRunning(n)) => {
+                    if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
+                        crate::muos::foreground(pid);
+                    }
+                    emit.send(Event::LaunchRunning {
+                        cave_id: cave_id.to_string(),
+                    });
+                }
                 Ok(AnyNotification::LaunchExited(_)) => log::info!("game exited"),
                 Ok(AnyNotification::PrereqsStarted(n)) => {
                     emit.status(format!("Installing {} prerequisites", n.tasks.len()))
@@ -2027,11 +2033,7 @@ fn await_login(
                 }
                 Ok(Poll::Approved { code }) => {
                     emit.status("Signing in");
-                    let device_info = if share_device_info {
-                        crate::device_info::gather()
-                    } else {
-                        String::new()
-                    };
+                    let device_info = share_device_info.then(crate::device_info::gather);
                     let result = client.call(ProfileLoginWithOAuthCodeParams {
                         code,
                         code_verifier: login.verifier.clone(),

@@ -635,10 +635,23 @@ pub fn launch(
         Content::Love { path } => launch_love(path, args, env),
     };
     *RUNNING.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    // RetroArch's launcher script names itself here and never puts the
-    // app back.
-    set_foreground("zitch");
     result
+}
+
+/// Names the game's process to the panic combo: butler's, for a Linux
+/// build it runs itself.
+pub fn foreground(pid: u32) {
+    if available() {
+        set_foreground(&pid.to_string());
+    }
+}
+
+/// Names zitch again once a launch is over. RetroArch's launcher script
+/// names itself and never puts the app back.
+pub fn foreground_back() {
+    if available() {
+        set_foreground("zitch");
+    }
 }
 
 /// Ends whatever [`launch`] is running, or is about to.
