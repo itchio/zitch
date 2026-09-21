@@ -1250,8 +1250,14 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
                 )),
                 Ok(AnyNotification::Log(log)) => {
                     log::debug!("butler: {}", log.message);
-                    if log.level == LogLevel::Error {
-                        on_error_line(log.message);
+                    match log.level {
+                        LogLevel::Error => on_error_line(log.message),
+                        // butler's run lock: another launch of this
+                        // install has to finish first.
+                        LogLevel::Info if log.message.starts_with("Waiting for") => {
+                            emit.status(log.message)
+                        }
+                        _ => {}
                     }
                 }
                 Ok(other) => log::debug!("{other:?}"),
