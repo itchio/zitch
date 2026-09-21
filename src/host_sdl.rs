@@ -247,6 +247,13 @@ pub fn run(
                         if hidden && !*minimized {
                             scrub = true;
                             wait = Duration::ZERO;
+                            // Input queued up to now was for the game, such
+                            // as the press that quit it; the queue is only
+                            // read once a second while hidden.
+                            let stale = event_pump.poll_iter().count();
+                            if stale > 0 {
+                                log::debug!("dropped {stale} events queued while hidden");
+                            }
                         }
                         hidden = *minimized;
                     }

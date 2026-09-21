@@ -120,6 +120,7 @@ fn main() -> anyhow::Result<()> {
             "zitch=info"
         }),
     )
+    .format_timestamp_millis()
     .init();
 
     let base_dirs = directories::BaseDirs::new().expect("a home directory");
