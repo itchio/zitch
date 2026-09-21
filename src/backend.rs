@@ -709,6 +709,12 @@ fn session(
                         } else {
                             result
                         };
+                        if let Err(failure) = &result {
+                            log::warn!("launch failed: {}", failure.message);
+                            for line in &failure.log {
+                                log::warn!("  {line}");
+                            }
+                        }
                         emit.send(Event::LaunchFinished { cave_id, result });
                         Ok(())
                     },
