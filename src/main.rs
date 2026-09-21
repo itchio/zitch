@@ -188,6 +188,7 @@ fn main() -> anyhow::Result<()> {
         emulate: cli.emulate,
         low_spec: cli.low_spec,
         minimize_while_playing: cli.minimize_while_playing,
+        handoff: false,
         gamepad: None,
     };
     #[cfg(feature = "sdl-host")]

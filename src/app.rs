@@ -26,6 +26,9 @@ pub struct Options {
     pub emulate: Option<(f32, f32)>,
     pub low_spec: Option<bool>,
     pub minimize_while_playing: bool,
+    /// Nothing of zitch is reachable from Play until the game exits, for
+    /// a device that runs one program at a time.
+    pub handoff: bool,
     /// A controller the host reads itself; otherwise gilrs is used.
     pub gamepad: Option<Gamepad>,
 }
@@ -133,6 +136,7 @@ pub struct App {
     /// A library refresh the user asked for is still running.
     refreshing: bool,
     minimize_while_playing: bool,
+    handoff: bool,
     /// For window commands raised from events, outside a frame.
     ctx: egui::Context,
 }
@@ -247,6 +251,7 @@ impl App {
             emulate,
             low_spec,
             minimize_while_playing,
+            handoff,
             gamepad,
         } = options;
         ui::install_fonts(ctx);
@@ -307,6 +312,7 @@ impl App {
             up_to_date_at: None,
             refreshing: false,
             minimize_while_playing,
+            handoff,
             ctx: ctx.clone(),
         }
     }
@@ -390,6 +396,21 @@ impl App {
 
     fn game(&self, id: i64) -> Option<&Game> {
         self.catalog.get(&id)
+    }
+
+    /// The cave and title under the launch curtain.
+    fn handed_off(&self) -> Option<(&str, &str)> {
+        if !self.handoff {
+            return None;
+        }
+        let cave_id = self.running.keys().next()?;
+        let title = self
+            .caves
+            .iter()
+            .find(|cave| &cave.id == cave_id)
+            .and_then(|cave| cave.game.as_ref())
+            .map_or("game", |game| game.title.as_str());
+        Some((cave_id, title))
     }
 
     /// Owned games first, so their fresher records win over the copy each
@@ -631,6 +652,15 @@ impl App {
                 }
                 Action::Menu => self.raise_window(),
                 _ => {}
+            }
+            return;
+        }
+        // QuitGame cancels a launch butler is still setting up as well.
+        if let Some((cave_id, _)) = self.handed_off() {
+            if matches!(action, Action::Back) {
+                self.backend.send(Command::QuitGame {
+                    cave_id: cave_id.to_string(),
+                });
             }
             return;
         }
@@ -1092,10 +1122,15 @@ impl App {
             .find_map(|cave| self.updates.get(&cave.id))
     }
 
+    /// Whether the game's page shows it running. Under a handoff it never
+    /// does: the page sits behind the curtain, as the user will find it
+    /// when the game exits.
     fn is_running(&self, game_id: i64) -> bool {
-        self.caves
-            .iter()
-            .any(|cave| cave.game_id() == Some(game_id) && self.running.contains_key(&cave.id))
+        !self.handoff
+            && self
+                .caves
+                .iter()
+                .any(|cave| cave.game_id() == Some(game_id) && self.running.contains_key(&cave.id))
     }
 
     /// Lays the home screen out as carousels, the way the itch app's
@@ -2111,6 +2146,9 @@ impl App {
             hints.push((vec![Glyph::Back], "Dismiss".to_string()));
             return hints;
         }
+        if self.handed_off().is_some() {
+            return vec![(vec![Glyph::Back], "Cancel".to_string())];
+        }
         if let Some(login) = &self.login {
             let mut hints = Vec::new();
             if login.has_checkbox() {
@@ -2593,8 +2631,11 @@ impl App {
             self.butler_version.as_deref(),
             &mut self.actions,
         );
+        if let Some((_, title)) = self.handed_off() {
+            ui::curtain(ui.ctx(), &m, ui.max_rect(), &format!("Launching {title}\u{2026}"));
+        }
         if let Some(frames) = self.quitting {
-            ui::quitting(ui.ctx(), &m, ui.max_rect());
+            ui::curtain(ui.ctx(), &m, ui.max_rect(), "Quitting\u{2026}");
             if frames == 0 {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             } else {

@@ -131,6 +131,8 @@ pub fn run(
 
     let (gamepad, pad_tx) = Gamepad::external();
     options.gamepad = Some(gamepad);
+    // One screen, one program: a game takes it whole.
+    options.handoff = true;
     let mut app = App::new(backend, covers, &ctx, options, shot);
 
     let mut pads = Pads::new();

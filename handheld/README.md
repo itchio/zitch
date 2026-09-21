@@ -92,8 +92,11 @@ butler's `Launch` as the target. A payload comes back in a
 `RuntimeLaunch` request, which zitch answers by running it
 (`src/muos.rs`) and replying when it exits; a Linux build butler
 launches itself, through the SDL shim. butler tracks the run either
-way, so play time and the itch.io session are recorded. Quitting from
-zitch ends the process group the payload runs in. A Linux build's
+way, so play time and the itch.io session are recorded. From Play to
+the game's exit the screen is the game's: a "Launching" curtain covers
+the interface while butler sets the run up (B cancels), then the window
+hides and takes no input until the game is gone. Quitting is the game's
+or the firmware's job. A Linux build's
 deep-probe record is checked before it is offered
 (`muos::native_blocker`): a 32-bit ARM or x86 build, a bundled SDL2
 without the dynamic API, SDL3, a GLFW or X11 build, or a glibc newer

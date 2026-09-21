@@ -2285,10 +2285,10 @@ pub fn drawer(
         });
 }
 
-/// Covers everything while the app shuts down, so the frame that stays on
-/// screen during the backend's exit says what is happening.
-pub fn quitting(ctx: &egui::Context, m: &Metrics, screen: Rect) {
-    egui::Area::new(egui::Id::new("quitting"))
+/// Covers everything with one line while the app hands the screen to a
+/// game or shuts down, so the last frame drawn says what is happening.
+pub fn curtain(ctx: &egui::Context, m: &Metrics, screen: Rect, text: &str) {
+    egui::Area::new(egui::Id::new("curtain"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .interactable(true)
@@ -2299,7 +2299,7 @@ pub fn quitting(ctx: &egui::Context, m: &Metrics, screen: Rect) {
             ui.painter().text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
-                "Quitting\u{2026}",
+                text,
                 bold(m.dialog),
                 TEXT,
             );
