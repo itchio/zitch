@@ -195,6 +195,7 @@ handheld-stage: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
 		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
 		$(HANDHELD_LOVE)/love $(STAGE)/
 	cp $(HANDHELD_LOVE)/libs/* $(STAGE)/libs/
+	cp LICENSE $(STAGE)/licenses/zitch.LICENSE
 	cp handheld/licenses/butler.LICENSE $(STAGE)/licenses/
 	cp $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(STAGE)/licenses/
 	cp assets/prompts/LICENSE-kenney.txt $(STAGE)/licenses/kenney.LICENSE

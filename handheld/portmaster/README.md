@@ -32,5 +32,5 @@ the cross toolchain.
 
 ## Licenses
 
-Bundled: butler (MIT), LÖVE (zlib), LuaJIT (MIT), Kenney
+zitch is MIT. Bundled: butler (MIT), LÖVE (zlib), LuaJIT (MIT), Kenney
 Input Prompts (CC0). Copies are in `zitch/licenses/`.

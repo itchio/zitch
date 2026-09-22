@@ -96,7 +96,7 @@ jobs:
           dir=zitch-$ZITCH_VERSION-${{ matrix.name }}
           mkdir -p dist/$dir
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} README.md dist/$dir/
-          cp assets/prompts/LICENSE-kenney.txt dist/$dir/
+          cp LICENSE assets/prompts/LICENSE-kenney.txt dist/$dir/
           cd dist
           if [[ "$RUNNER_OS" == Windows ]]; then 7z a -bd $dir.zip $dir; else tar czf $dir.tar.gz $dir; fi
           rm -rf $dir

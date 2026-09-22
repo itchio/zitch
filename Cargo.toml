@@ -3,6 +3,7 @@ name = "zitch"
 version = "0.2.0"
 edition = "2024"
 description = "A controller-friendly big picture itch.io client"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
