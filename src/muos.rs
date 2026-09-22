@@ -38,7 +38,10 @@ const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
 /// The same on Andromeda: `assign.json` maps ids to a system name, and
 /// `libretro.json` and `external.json` hold each system's cores under
 /// that name, with `default` naming one. The user copy wins, as it does
-/// in the launch script.
+/// in the launch script. The launcher the script wants is the core's key
+/// with a prefix for its runtime: `mu-` sends a libretro core to Pickles,
+/// `ext-` an external one to its own launcher, and no prefix means
+/// RetroArch, which the menu never picks.
 const MANIFEST_DIR: &str = "/opt/muos/share/info/manifest";
 const USER_MANIFEST_DIR: &str = "/run/muos/storage/info/manifest";
 const CORE_DIR: &str = "/opt/muos/share/core";
@@ -420,10 +423,13 @@ fn systems() -> &'static HashMap<String, System> {
             let aliases = read("assign.json")
                 .map(|json| parse_assign(&json))
                 .unwrap_or_default();
-            let manifests: Vec<Manifest> = ["libretro.json", "external.json"]
-                .iter()
-                .filter_map(|name| parse_manifest(name, &read(name)?))
-                .collect();
+            let manifests: Vec<(&str, Manifest)> =
+                [("mu-", "libretro.json"), ("ext-", "external.json")]
+                    .iter()
+                    .filter_map(|(prefix, name)| {
+                        Some((*prefix, parse_manifest(name, &read(name)?)?))
+                    })
+                    .collect();
             ids.filter_map(|id| Some((id.to_string(), resolve_manifest(id, &aliases, &manifests)?)))
                 .collect()
         } else {
@@ -463,14 +469,17 @@ fn parse_manifest(name: &str, json: &str) -> Option<Manifest> {
 }
 
 /// Resolves a dash id through `assign.json` and the first manifest that
-/// lists the system, the way the launch script looks a core up.
+/// lists the system, the way the launch script looks a core up. Each
+/// manifest comes with its runtime prefix.
 fn resolve_manifest(
     id: &str,
     aliases: &HashMap<String, String>,
-    manifests: &[Manifest],
+    manifests: &[(&str, Manifest)],
 ) -> Option<System> {
     let assign = aliases.get(assign_key(id))?;
-    let system = manifests.iter().find_map(|m| m.get(assign))?;
+    let (prefix, system) = manifests
+        .iter()
+        .find_map(|(prefix, m)| Some((prefix, m.get(assign)?)))?;
     let Some(core) = system.cores.get(&system.default) else {
         log::warn!("{assign}: default core {} is not listed", system.default);
         return None;
@@ -478,7 +487,7 @@ fn resolve_manifest(
     Some(System {
         id: id.to_string(),
         assign: assign.to_string(),
-        launcher: system.default.clone(),
+        launcher: format!("{prefix}{}", system.default),
         core: core.core.clone(),
         label: assign.to_string(),
     })
@@ -1013,15 +1022,21 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
     fn ids_resolve_through_the_manifests() {
         let aliases = parse_assign(ASSIGN_JSON);
         let manifests = vec![
-            parse_manifest("libretro.json", LIBRETRO_JSON).unwrap(),
-            parse_manifest("external.json", EXTERNAL_JSON).unwrap(),
+            (
+                "mu-",
+                parse_manifest("libretro.json", LIBRETRO_JSON).unwrap(),
+            ),
+            (
+                "ext-",
+                parse_manifest("external.json", EXTERNAL_JSON).unwrap(),
+            ),
         ];
         assert_eq!(
             resolve_manifest("gba", &aliases, &manifests),
             Some(System {
                 id: "gba".into(),
                 assign: "Nintendo Game Boy Advance".into(),
-                launcher: "mgba".into(),
+                launcher: "mu-mgba".into(),
                 core: "mgba_libretro.so".into(),
                 label: "Nintendo Game Boy Advance".into(),
             })
@@ -1029,6 +1044,7 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         // Only in the second manifest.
         let n64 = resolve_manifest("n64", &aliases, &manifests).unwrap();
         assert_eq!(n64.core, "ext-mupen64plus-gliden64");
+        assert_eq!(n64.launcher, "ext-mupen64plus - standalone - glide");
         // Not in assign.json at all.
         assert_eq!(resolve_manifest("nds", &aliases, &manifests), None);
         // In assign.json, in no manifest.
