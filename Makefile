@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-muxapp handheld-sdl-procs run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -30,6 +30,8 @@ help:
 	@echo "make handheld-love    fetch the LÖVE runtime the device builds ship, into target/handheld-love"
 	@echo "make handheld-glyph   render handheld/glyph.svg as the muOS list icon, target/zitch-glyph.{png,svg}"
 	@echo "make handheld-muxapp  package it with butler and LÖVE as target/zitch.muxapp for the muOS Archive Manager"
+	@echo "make handheld-port    package the same as target/zitch.zip, a PortMaster port"
+	@echo "make handheld-port-install  install the port on the device through harbourmaster over ssh"
 	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
@@ -184,19 +186,55 @@ $(HANDHELD_BUTLER)/butler:
 	cd $(HANDHELD_BUTLER) && unzip -oq butler.zip && rm butler.zip
 	chmod +x $(HANDHELD_BUTLER)/butler
 
+# The files both packages carry: the binary, the SDL shim, butler and LÖVE.
+STAGE = target/handheld-stage
+handheld-stage: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
+	rm -rf $(STAGE)
+	mkdir -p $(STAGE)/libs $(STAGE)/licenses
+	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) \
+		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
+		$(HANDHELD_LOVE)/love $(STAGE)/
+	cp $(HANDHELD_LOVE)/libs/* $(STAGE)/libs/
+	cp handheld/licenses/butler.LICENSE $(STAGE)/licenses/
+	cp $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(STAGE)/licenses/
+	cp assets/prompts/LICENSE-kenney.txt $(STAGE)/licenses/kenney.LICENSE
+	chmod +x $(STAGE)/zitch $(STAGE)/butler $(STAGE)/love
+
 # A muOS application archive: a zip holding the app folder, which the
 # Archive Manager unpacks into the Applications menu (see handheld/README.md).
 MUXAPP = target/zitch.muxapp
-handheld-muxapp: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
+handheld-muxapp: handheld-stage
 	rm -rf target/muxapp $(MUXAPP)
-	mkdir -p target/muxapp/zitch/libs
-	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
-		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
-		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE target/muxapp/zitch/
-	cp $(HANDHELD_LOVE)/libs/* target/muxapp/zitch/libs/
-	chmod +x target/muxapp/zitch/zitch target/muxapp/zitch/mux_launch.sh target/muxapp/zitch/butler target/muxapp/zitch/love
+	mkdir -p target/muxapp
+	cp -r $(STAGE) target/muxapp/zitch
+	cp handheld/mux_launch.sh target/muxapp/zitch/
+	chmod +x target/muxapp/zitch/mux_launch.sh
 	cd target/muxapp && zip -rq ../zitch.muxapp zitch
 	@ls -lh $(MUXAPP) | awk '{print "$(MUXAPP): " $$5}'
+
+# A PortMaster port: the launch script beside a folder of the same name.
+# PortMaster expects the binary named for its architecture.
+PORT = target/zitch.zip
+PORT_SCRIPT = itch.io.sh
+PORT_DIR = handheld/portmaster
+handheld-port: handheld-stage
+	rm -rf target/port $(PORT)
+	mkdir -p target/port
+	cp -r $(STAGE) target/port/zitch
+	mv target/port/zitch/zitch target/port/zitch/zitch.aarch64
+	cp $(PORT_DIR)/$(PORT_SCRIPT) target/port/
+	cp $(PORT_DIR)/port.json $(PORT_DIR)/README.md $(PORT_DIR)/gameinfo.xml target/port/
+	cp $(PORT_DIR)/screenshot.png target/port/zitch/
+	chmod +x target/port/$(PORT_SCRIPT)
+	cd target/port && zip -rq ../zitch.zip .
+	@ls -lh $(PORT) | awk '{print "$(PORT): " $$5}'
+
+# harbourmaster is PortMaster's installer, so the port lands where a
+# catalog install would.
+PORTMASTER_DIR = /mnt/mmc/MUOS/PortMaster
+handheld-port-install: handheld-port
+	scp -q $(PORT) $(HANDHELD):/tmp/zitch.zip
+	ssh $(HANDHELD) 'cd $(PORTMASTER_DIR) && PATH=/opt/python/bin:$$PATH LD_LIBRARY_PATH=/opt/python/lib ./harbourmaster --quiet --no-check install /tmp/zitch.zip; status=$$?; rm -f /tmp/zitch.zip; exit $$status'
 
 # SDL2's jump table order on Linux, which the shim checks a game's stubs
 # against and uses to name the slots that have none.

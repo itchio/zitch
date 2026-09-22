@@ -129,8 +129,8 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
           echo "ZITCH_VERSION=$version" >> "$GITHUB_ENV"
-      # bundles butler
-      - run: make handheld-muxapp
+      # both bundle butler and LÖVE
+      - run: make handheld-muxapp handheld-port
       # check the binary will still load on muOS's glibc 2.38
       - name: glibc check
         run: |
@@ -141,6 +141,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/zitch.muxapp dist/zitch-$ZITCH_VERSION-muos.muxapp
+          cp target/zitch.zip dist/zitch-$ZITCH_VERSION-portmaster.zip
       - uses: actions/upload-artifact@v4
         with:
           name: zitch-muos

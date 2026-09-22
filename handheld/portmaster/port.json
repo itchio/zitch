@@ -1,0 +1,33 @@
+{
+  "version": 4,
+  "name": "zitch.zip",
+  "items": [
+    "itch.io.sh",
+    "zitch"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "itch.io",
+    "porter": [
+      "leafo"
+    ],
+    "desc": "itch.io client. Sign in, browse your library, install and play your games. On muOS, ROMs launch through the firmware's libretro cores; support for other firmwares is in progress.",
+    "desc_md": null,
+    "inst": "Open it from Ports and scan the sign-in code with your phone.",
+    "inst_md": null,
+    "genres": [
+      "utility"
+    ],
+    "image": null,
+    "rtr": true,
+    "exp": false,
+    "runtime": [],
+    "store": [],
+    "availability": "full",
+    "reqs": [],
+    "arch": [
+      "aarch64"
+    ],
+    "min_glibc": "2.38"
+  }
+}

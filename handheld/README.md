@@ -31,9 +31,46 @@ make handheld-deploy   # copy binary + mux_launch.sh + LÖVE into the muOS Appli
 make handheld-shot     # deploy, launch on the device, fetch /tmp/zitch-handheld.png
 make handheld-shot ARGS="--screenshot-script wait:10000,capture"
 make handheld-muxapp   # package with butler and LÖVE as target/zitch.muxapp
+make handheld-port     # the same as a PortMaster port, target/zitch.zip
+make handheld-port-install  # install the port on the device through PortMaster
 ```
 
 ## Packaging
+
+Two packages carry the same files (`make handheld-stage` gathers them:
+the binary, the SDL shim, butler, LÖVE and the bundled licenses).
+
+### PortMaster port
+
+`make handheld-port` writes `target/zitch.zip`, a PortMaster port: the
+launch script `itch.io.sh` beside a `zitch/` folder holding the stage,
+with the binary named `zitch.aarch64` as PortMaster ports name theirs.
+`handheld/portmaster/` holds the script and the catalog files
+(`port.json`, `README.md`, `gameinfo.xml`, `screenshot.png`).
+
+PortMaster installs it: `make handheld-port-install` runs its
+`harbourmaster install` over ssh, and a zip dropped into
+`MUOS/PortMaster/autoinstall` on the card installs the next time
+PortMaster opens. On muOS the folder lands in `/mnt/mmc/ports/zitch` and
+the script in `/mnt/mmc/ROMS/Ports`, where Explore lists it under Ports.
+The same zip installs on the other firmwares PortMaster runs on (Knulli,
+ROCKNIX, ArkOS, NextUI); there zitch is a library and installer, since
+the launch paths below are muOS's.
+
+Config and installs live under `home/` in the port folder, so
+PortMaster's uninstall removes them too. Log: `log.txt` in the port
+folder. The script reads extra flags from an `args` file like
+`mux_launch.sh` does.
+
+To run it over ssh the way Explore does, write the content handoff and
+let the frontend's loader pick it up:
+
+    printf "itch.io\nexternal\nExternal - Ports\n\n\nexternal\n/mnt/mmc/ROMS/Ports\n\nitch.io.sh\n" > /run/muos/content
+    kill -9 $(pidof muxfrontend); touch /run/muos/safe_quit
+
+(Jacaranda: `/tmp/rom_go` and `/tmp/safe_quit`.)
+
+### muOS application archive
 
 A `.muxapp` is what muOS's Archive Manager installs: a plain zip whose
 top level is the app folder, unpacked with `unzip -o` into the
@@ -46,15 +83,19 @@ Applications > Archive Manager; the result is the same folder
 
 ## Updating
 
-"Check for zitch update" in the menu drawer downloads the latest GitHub
-release's `.muxapp` into `/mnt/mmc/ARCHIVE`. Installing it is still done
-by hand in the Archive Manager, after quitting.
+For a muOS application install, "Check for zitch update" in the menu drawer
+downloads the latest GitHub release's `.muxapp` into `/mnt/mmc/ARCHIVE`.
+Install it by hand in Archive Manager after quitting zitch.
+
+PortMaster installs do not check for or download updates inside zitch.
+Install a newer port ZIP through PortMaster using the same steps as the
+initial installation above.
 
 To try it off the device:
 
     ZITCH_SELF_UPDATE_DIR=/tmp/archive ZITCH_SELF_UPDATE_VERSION=0.0.1 make run
 
-CI builds one on an arm64 runner (`muos` job in `.github/workflows/build.yml`)
+CI builds both on an arm64 runner (`muos` job in `.github/workflows/build.yml`)
 without the device sysroot, so the binary links against the runner's
 glibc; a check there fails the job if it needs a symbol version newer than
 the device's 2.38. The firmware's SDL2 is still what it loads at run time.

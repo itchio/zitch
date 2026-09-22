@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./itch.io.sh</path>
+    <name>itch.io</name>
+    <desc>Browse, install and play your itch.io library on the handheld.</desc>
+    <developer>itch.io</developer>
+    <publisher>itch.io</publisher>
+    <genre>Utility</genre>
+    <image>./zitch/screenshot.png</image>
+  </game>
+</gameList>

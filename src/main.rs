@@ -89,6 +89,11 @@ struct Cli {
     #[arg(long, env = "ZITCH_MINIMIZE_WHILE_PLAYING")]
     minimize_while_playing: bool,
 
+    /// Leave out the update check. For a package another tool updates,
+    /// such as a PortMaster port.
+    #[arg(long)]
+    no_self_update: bool,
+
     /// Log JSON-RPC traffic.
     #[arg(short, long)]
     verbose: bool,
@@ -188,6 +193,7 @@ fn main() -> anyhow::Result<()> {
         emulate: cli.emulate,
         low_spec: cli.low_spec,
         minimize_while_playing: cli.minimize_while_playing,
+        self_update: !cli.no_self_update,
         handoff: false,
         gamepad: None,
     };

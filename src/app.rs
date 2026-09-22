@@ -26,6 +26,8 @@ pub struct Options {
     pub emulate: Option<(f32, f32)>,
     pub low_spec: Option<bool>,
     pub minimize_while_playing: bool,
+    /// Off for a package another tool updates.
+    pub self_update: bool,
     /// Nothing of zitch is reachable from Play until the game exits, for
     /// a device that runs one program at a time.
     pub handoff: bool,
@@ -251,6 +253,7 @@ impl App {
             emulate,
             low_spec,
             minimize_while_playing,
+            self_update,
             handoff,
             gamepad,
         } = options;
@@ -307,7 +310,7 @@ impl App {
             low_spec,
             handheld: false,
             checking_updates: false,
-            self_update: SelfUpdate::supported().then(|| SelfUpdate::new(ctx)),
+            self_update: (self_update && SelfUpdate::supported()).then(|| SelfUpdate::new(ctx)),
             battery: Battery::new(),
             up_to_date_at: None,
             refreshing: false,
@@ -2632,7 +2635,12 @@ impl App {
             &mut self.actions,
         );
         if let Some((_, title)) = self.handed_off() {
-            ui::curtain(ui.ctx(), &m, ui.max_rect(), &format!("Launching {title}\u{2026}"));
+            ui::curtain(
+                ui.ctx(),
+                &m,
+                ui.max_rect(),
+                &format!("Launching {title}\u{2026}"),
+            );
         }
         if let Some(frames) = self.quitting {
             ui::curtain(ui.ctx(), &m, ui.max_rect(), "Quitting\u{2026}");

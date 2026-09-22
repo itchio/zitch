@@ -647,10 +647,15 @@ pub fn foreground(pid: u32) {
 }
 
 /// Names zitch again once a launch is over. RetroArch's launcher script
-/// names itself and never puts the app back.
+/// names itself and never puts the app back. The name is the binary's,
+/// which the port build spells `zitch.aarch64`.
 pub fn foreground_back() {
     if available() {
-        set_foreground("zitch");
+        let name = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.file_name()?.to_str().map(str::to_string))
+            .unwrap_or_else(|| "zitch".to_string());
+        set_foreground(&name);
     }
 }
 
