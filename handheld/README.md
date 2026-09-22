@@ -165,8 +165,9 @@ ROM, so it is asked for by that name and mapped to the same launch path.
 Launched the way the muOS menu launches one: write `/tmp/rom_go`,
 `/tmp/gov_go` and `/tmp/flt_go`, run `/opt/muos/script/mux/launch.sh`,
 wait for RetroArch to exit. The core per system is the firmware's
-`default=` from `/opt/muos/share/info/assign/<system>/global.ini`. The
-script always exits 1 (its last line is a Discord check), so its status
+default: on Jacaranda from `/opt/muos/share/info/assign/<system>/global.ini`,
+on Andromeda from `libretro.json` and `external.json` in
+`/opt/muos/share/info/manifest`. The script always exits 1 (its last line is a Discord check), so its status
 is ignored. Quit with Menu held + Start.
 
 ### LÖVE

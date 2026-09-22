@@ -30,11 +30,18 @@ const RUN_DIR: &str = "/run/muos";
 const BOARD_NAME: &str = "/opt/muos/device/config/board/name";
 /// The governor the firmware goes back to after content.
 const DEFAULT_GOVERNOR: &str = "/opt/muos/device/config/cpu/default";
-/// The firmware's systems: `assign.json` maps ids to a folder per system,
-/// each with a `global.ini` naming its default launcher and an ini per
-/// launcher naming the core. The launch script reads the launcher named
-/// in rom_go from here.
+/// The firmware's systems on Jacaranda: `assign.json` maps ids to a
+/// folder per system, each with a `global.ini` naming its default
+/// launcher and an ini per launcher naming the core. The launch script
+/// reads the launcher named in rom_go from here.
 const ASSIGN_DIR: &str = "/opt/muos/share/info/assign";
+/// The same on Andromeda: `assign.json` maps ids to a system name, and
+/// `libretro.json` and `external.json` hold each system's cores under
+/// that name, with `default` naming one. The user copy wins, as it does
+/// in the launch script.
+const MANIFEST_DIR: &str = "/opt/muos/share/info/manifest";
+const USER_MANIFEST_DIR: &str = "/run/muos/storage/info/manifest";
+const CORE_DIR: &str = "/opt/muos/share/core";
 /// What the firmware's R2+Select+B panic combo kills (`proc_die.sh`).
 /// The app launcher set it to zitch; while a game has the screen it must
 /// name the game, or the combo kills zitch under it and orphans the game.
@@ -371,13 +378,15 @@ fn assign_key(id: &str) -> &str {
 pub struct System {
     /// dash's id, e.g. `gba`.
     pub id: String,
-    /// The folder under [`ASSIGN_DIR`].
+    /// The firmware's name for the system: the folder under
+    /// [`ASSIGN_DIR`], or the key in the manifests.
     assign: String,
-    /// `global.ini` `default=`: the launcher ini's stem.
+    /// The default launcher: the launcher ini's stem, or the core's key
+    /// in the manifest.
     launcher: String,
-    /// The launcher ini's `core=`.
+    /// The core file the launcher loads.
     core: String,
-    /// `global.ini` `name=`.
+    /// The system's display name.
     label: String,
 }
 
@@ -393,20 +402,85 @@ impl System {
     }
 }
 
+fn manifests_here() -> bool {
+    Path::new(MANIFEST_DIR).join("libretro.json").is_file()
+}
+
 /// Every system that resolves here, by dash id. Read once.
 fn systems() -> &'static HashMap<String, System> {
     static SYSTEMS: OnceLock<HashMap<String, System>> = OnceLock::new();
     SYSTEMS.get_or_init(|| {
-        let dir = Path::new(ASSIGN_DIR);
-        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok();
-        let aliases = read("assign.json")
-            .map(|json| parse_assign(&json))
-            .unwrap_or_default();
-        ROM_IDS
-            .iter()
-            .chain(&[PICO8, TIC80])
-            .filter_map(|id| Some((id.to_string(), resolve(id, &aliases, read)?)))
-            .collect()
+        let ids = ROM_IDS.iter().chain(&[PICO8, TIC80]);
+        if manifests_here() {
+            let read = |name: &str| {
+                [USER_MANIFEST_DIR, MANIFEST_DIR]
+                    .iter()
+                    .find_map(|dir| std::fs::read_to_string(Path::new(dir).join(name)).ok())
+            };
+            let aliases = read("assign.json")
+                .map(|json| parse_assign(&json))
+                .unwrap_or_default();
+            let manifests: Vec<Manifest> = ["libretro.json", "external.json"]
+                .iter()
+                .filter_map(|name| parse_manifest(name, &read(name)?))
+                .collect();
+            ids.filter_map(|id| Some((id.to_string(), resolve_manifest(id, &aliases, &manifests)?)))
+                .collect()
+        } else {
+            let dir = Path::new(ASSIGN_DIR);
+            let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok();
+            let aliases = read("assign.json")
+                .map(|json| parse_assign(&json))
+                .unwrap_or_default();
+            ids.filter_map(|id| Some((id.to_string(), resolve(id, &aliases, read)?)))
+                .collect()
+        }
+    })
+}
+
+/// Systems by name, each with its cores.
+type Manifest = HashMap<String, ManifestSystem>;
+
+#[derive(serde::Deserialize)]
+struct ManifestSystem {
+    default: String,
+    cores: HashMap<String, ManifestCore>,
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestCore {
+    core: String,
+}
+
+fn parse_manifest(name: &str, json: &str) -> Option<Manifest> {
+    match serde_json::from_str(json) {
+        Ok(manifest) => Some(manifest),
+        Err(error) => {
+            log::warn!("{name}: {error}");
+            None
+        }
+    }
+}
+
+/// Resolves a dash id through `assign.json` and the first manifest that
+/// lists the system, the way the launch script looks a core up.
+fn resolve_manifest(
+    id: &str,
+    aliases: &HashMap<String, String>,
+    manifests: &[Manifest],
+) -> Option<System> {
+    let assign = aliases.get(assign_key(id))?;
+    let system = manifests.iter().find_map(|m| m.get(assign))?;
+    let Some(core) = system.cores.get(&system.default) else {
+        log::warn!("{assign}: default core {} is not listed", system.default);
+        return None;
+    };
+    Some(System {
+        id: id.to_string(),
+        assign: assign.to_string(),
+        launcher: system.default.clone(),
+        core: core.core.clone(),
+        label: assign.to_string(),
     })
 }
 
@@ -749,17 +823,27 @@ fn launch_rom(
         core,
         ..
     } = system;
-    // Without the ini the launch script exits at once with the reason
-    // only in the log.
-    let ini = Path::new(ASSIGN_DIR)
-        .join(assign)
-        .join(format!("{launcher}.ini"));
-    if !ini.is_file() {
-        bail!(
-            "This muOS has no {launcher} emulator for {assign}: it needs {core} in \
-             /opt/muos/share/core and {}",
-            ini.display()
-        );
+    // Without the core or the ini the launch script exits at once with
+    // the reason only in the log.
+    if manifests_here() {
+        let so = Path::new(CORE_DIR).join(core);
+        if core.ends_with(".so") && !so.is_file() {
+            bail!(
+                "This muOS has no {launcher} emulator for {assign}: {} is missing",
+                so.display()
+            );
+        }
+    } else {
+        let ini = Path::new(ASSIGN_DIR)
+            .join(assign)
+            .join(format!("{launcher}.ini"));
+        if !ini.is_file() {
+            bail!(
+                "This muOS has no {launcher} emulator for {assign}: it needs {core} in \
+                 {CORE_DIR} and {}",
+                ini.display()
+            );
+        }
     }
     let dir = rom
         .parent()
@@ -815,7 +899,7 @@ mod tests {
     use crate::butlerd::types::EngineInfo;
 
     const ASSIGN_JSON: &str = r#"{ "nes": "Nintendo NES - Famicom", "gba": "Nintendo Game Boy Advance",
-  "md": "Sega Mega Drive - Genesis", "a2600": "Atari 2600", "pico8": "PICO-8" }"#;
+  "md": "Sega Mega Drive - Genesis", "a2600": "Atari 2600", "pico8": "PICO-8", "n64": "Nintendo N64" }"#;
 
     const NES_GLOBAL: &str = "[global]\nname=Nintendo NES - Famicom\ndefault=mu-fceumm\n\
 catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom\nNES\nFamicom\n";
@@ -900,6 +984,58 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         assert_eq!(lookup("md"), None);
         // A folder whose default launcher ini is missing.
         assert_eq!(lookup("gba"), None);
+    }
+
+    const LIBRETRO_JSON: &str = r#"{
+      "Nintendo Game Boy Advance": {
+        "name": "Nintendo Game Boy Advance",
+        "default": "mgba",
+        "friendly": ["gba"],
+        "bios": [{"file": "gba_bios.bin"}],
+        "cores": {
+          "gpsp": {"name": "gpSP", "core": "gpsp_libretro.so"},
+          "mgba": {"name": "mGBA", "core": "mgba_libretro.so", "governor": "performance"}
+        }
+      },
+      "Nintendo NES - Famicom": {"default": "nestopia", "cores": {}}
+    }"#;
+
+    const EXTERNAL_JSON: &str = r#"{
+      "Nintendo N64": {
+        "default": "mupen64plus - standalone - glide",
+        "cores": {
+          "mupen64plus - standalone - glide": {"core": "ext-mupen64plus-gliden64", "launcher": "mupen64plus.sh"}
+        }
+      }
+    }"#;
+
+    #[test]
+    fn ids_resolve_through_the_manifests() {
+        let aliases = parse_assign(ASSIGN_JSON);
+        let manifests = vec![
+            parse_manifest("libretro.json", LIBRETRO_JSON).unwrap(),
+            parse_manifest("external.json", EXTERNAL_JSON).unwrap(),
+        ];
+        assert_eq!(
+            resolve_manifest("gba", &aliases, &manifests),
+            Some(System {
+                id: "gba".into(),
+                assign: "Nintendo Game Boy Advance".into(),
+                launcher: "mgba".into(),
+                core: "mgba_libretro.so".into(),
+                label: "Nintendo Game Boy Advance".into(),
+            })
+        );
+        // Only in the second manifest.
+        let n64 = resolve_manifest("n64", &aliases, &manifests).unwrap();
+        assert_eq!(n64.core, "ext-mupen64plus-gliden64");
+        // Not in assign.json at all.
+        assert_eq!(resolve_manifest("nds", &aliases, &manifests), None);
+        // In assign.json, in no manifest.
+        assert_eq!(resolve_manifest("md", &aliases, &manifests), None);
+        // Listed, but its default core is not.
+        assert_eq!(resolve_manifest("nes", &aliases, &manifests), None);
+        assert!(parse_manifest("x.json", "not json").is_none());
     }
 
     #[test]
