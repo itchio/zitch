@@ -12,7 +12,7 @@ use crate::login::QrCode;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
     Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
-    UploadExt, UserExt, human_size, playable_here,
+    UploadExt, UserExt, human_size, known_playable_here,
 };
 use crate::self_update::{self, SelfUpdate};
 use crate::ui;
@@ -1210,7 +1210,7 @@ impl App {
 
     /// Whether the game clears the page-wide filter.
     fn passes(&self, game: &Game) -> bool {
-        !self.playable_only || playable_here(game)
+        !self.playable_only || known_playable_here(game)
     }
 
     /// A row after the page-wide filter: none when it was empty anyway, a

@@ -151,6 +151,32 @@ pub fn playable_here(game: &Game) -> bool {
     crate::muos::available() || runs_here(&game.platforms)
 }
 
+/// Whether itch.io's scan of the game's uploads found something this
+/// device runs, for the "Playable here" filter. Not every upload gets
+/// scanned, so a miss here is a reason to hide, not to refuse an install.
+pub fn known_playable_here(game: &Game) -> bool {
+    if crate::muos::available() {
+        game.scanned_platforms
+            .as_deref()
+            .is_some_and(|scanned| any_runs_here(scanned, &device_platforms()))
+    } else {
+        runs_here(&game.platforms)
+    }
+}
+
+/// What this device runs, in the words of a game's scanned platforms.
+/// The handheld profile is itch.io's check for an arm64 Linux build the
+/// SDL shim can put on screen.
+fn device_platforms() -> Vec<String> {
+    let mut platforms = crate::muos::runtimes();
+    platforms.push("linux-arm64-handheld".to_string());
+    platforms
+}
+
+fn any_runs_here(scanned: &[String], device: &[String]) -> bool {
+    scanned.iter().any(|p| device.contains(p))
+}
+
 /// Whether an upload is built for this device: on muOS a ROM for one of
 /// the firmware's emulators or a `.love`, elsewhere an upload tagged for
 /// the OS.
@@ -392,4 +418,29 @@ pub enum Action {
     Uninstall {
         cave_id: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn scanned_platforms_match_device() {
+        let device = strings(&["love", "rom:gba", "linux-arm64-handheld"]);
+        assert!(any_runs_here(
+            &strings(&["windows-amd64", "rom:gba"]),
+            &device
+        ));
+        assert!(any_runs_here(
+            &strings(&["linux-arm64", "linux-arm64-handheld"]),
+            &device
+        ));
+        assert!(!any_runs_here(&strings(&["linux-arm64"]), &device));
+        assert!(!any_runs_here(&strings(&["rom:snes"]), &device));
+        assert!(!any_runs_here(&[], &device));
+    }
 }

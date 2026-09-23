@@ -117,7 +117,10 @@ no quotes). `handheld-shot` writes and removes it.
 ## Running games
 
 The device runs ROMs and engine files, and Linux builds through the SDL
-shim below. On muOS zitch
+shim below. The "Playable here" filter keeps the games whose uploads
+itch.io has scanned and found something for this device; not every
+upload gets scanned, so the filter only hides and Install is offered for
+every game. On muOS zitch
 judges an upload by its file name instead of itch's platform tags, and
 takes an archive with no platform tags too, since that is how most
 uploads arrive; butler unpacks it, and Play asks butler's

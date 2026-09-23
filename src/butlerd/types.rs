@@ -312,6 +312,16 @@ pub struct GameRecordsFilters {
     /// ("windows", "linux", "osx"), or web-playable games ("web").
     #[serde(rename = "platform", default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Only include games whose scanned platforms (see Game.ScannedPlatforms)
+    /// contain at least one of these entries (OR), e.g. "linux-arm64",
+    /// "rom:gba". Games that haven't been scanned yet never match. An empty
+    /// list applies no filter.
+    #[serde(
+        rename = "scannedPlatforms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scanned_platforms: Option<Vec<String>>,
 }
 
 /// Result for Fetch.GameRecords
@@ -420,6 +430,16 @@ pub struct CollectionGamesFilters {
     /// ("windows", "linux", "osx"), or web-playable games ("web").
     #[serde(rename = "platform", default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Only include games whose scanned platforms (see Game.ScannedPlatforms)
+    /// contain at least one of these entries (OR), e.g. "linux-arm64",
+    /// "rom:gba". Games that haven't been scanned yet never match. An empty
+    /// list applies no filter.
+    #[serde(
+        rename = "scannedPlatforms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scanned_platforms: Option<Vec<String>>,
 }
 
 /// Result for Fetch.Collection.Games
@@ -522,6 +542,16 @@ pub struct ProfileOwnedKeysFilters {
     /// ("windows", "linux", "osx"), or web-playable games ("web").
     #[serde(rename = "platform", default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Only include games whose scanned platforms (see Game.ScannedPlatforms)
+    /// contain at least one of these entries (OR), e.g. "linux-arm64",
+    /// "rom:gba". Games that haven't been scanned yet never match. An empty
+    /// list applies no filter.
+    #[serde(
+        rename = "scannedPlatforms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scanned_platforms: Option<Vec<String>>,
 }
 
 /// Result for Fetch.ProfileOwnedKeys
@@ -574,6 +604,16 @@ pub struct BundleGamesFilters {
     /// ("windows", "linux", "osx"), or web-playable games ("web").
     #[serde(rename = "platform", default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Only include games whose scanned platforms (see Game.ScannedPlatforms)
+    /// contain at least one of these entries (OR), e.g. "linux-arm64",
+    /// "rom:gba". Games that haven't been scanned yet never match. An empty
+    /// list applies no filter.
+    #[serde(
+        rename = "scannedPlatforms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scanned_platforms: Option<Vec<String>>,
 }
 
 /// Result for Fetch.BundleGames
@@ -2733,6 +2773,17 @@ pub struct Game {
     /// Platforms this game is available for
     #[serde(rename = "platforms", default, deserialize_with = "null_default")]
     pub platforms: Platforms,
+    /// Exact platforms found by scanning the game's uploads, such as
+    /// `linux-amd64`, `windows-386`, `rom:gba`, or a device profile id.
+    /// Independent of Platforms, which comes from uploader-set tags.
+    /// nil when the uploads haven't been scanned, empty when a scan
+    /// found nothing.
+    #[serde(
+        rename = "scannedPlatforms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scanned_platforms: Option<Vec<String>>,
     /// The user account this game is associated to
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<User>,
@@ -2937,12 +2988,53 @@ pub struct Upload {
     /// Platforms this upload is compatible with
     #[serde(rename = "platforms", default, deserialize_with = "null_default")]
     pub platforms: Platforms,
+    /// Launch targets found by scanning the upload's contents, as a
+    /// marshaled []dash.LaunchTarget kept raw so this package doesn't
+    /// depend on dash. nil when the upload hasn't been scanned, `[]`
+    /// when a scan found nothing. For wharf uploads this describes the
+    /// current build.
+    #[serde(
+        rename = "launchTargets",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_targets: Option<Value>,
+    /// Where LaunchTargets came from: "server" for a wharfd scan,
+    /// "client" for an unverified report from the pushing butler.
+    #[serde(
+        rename = "launchTargetsSource",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_targets_source: Option<LaunchTargetsSource>,
+    /// Identifies the client that produced a client report, e.g. "butler/15.26.0"
+    #[serde(
+        rename = "launchTargetsScannerVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_targets_scanner_version: Option<String>,
     /// Date this upload was created at
     #[serde(rename = "createdAt", default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<RFCDate>,
     /// Date this upload was last updated at (order changed, display name set, etc.)
     #[serde(rename = "updatedAt", default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<RFCDate>,
+}
+
+/// LaunchTargetsSource describes who produced an upload's launch targets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LaunchTargetsSource {
+    /// LaunchTargetsSourceServer is a wharfd scan of the upload
+    #[serde(rename = "server")]
+    Server,
+    /// LaunchTargetsSourceClient is the report butler sent when pushing the build
+    #[serde(rename = "client")]
+    Client,
+    /// Any value not listed above.
+    #[default]
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// UploadStorage describes where an upload file is stored.
