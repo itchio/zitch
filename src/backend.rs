@@ -1703,10 +1703,9 @@ enum Queued {
     Skipped,
 }
 
-/// Puts a game on the download queue; the driver takes it from there.
-/// Queues an install, asking which upload when the game has more than one
-/// for this device. `skipped` is checked again just before queueing, since
-/// the user may cancel during the fetch or the picker.
+/// Puts a game on the download queue once the user picks an upload; the
+/// driver takes it from there. `skipped` is checked again just before
+/// queueing, since the user may cancel during the fetch or the picker.
 fn queue_install(
     client: &Client,
     config: &Config,
@@ -1740,14 +1739,12 @@ fn queue_install(
     if uploads.is_empty() {
         bail!("{} has no download for this device", game.title);
     }
-    let index = if uploads.len() == 1 && likely == 1 {
-        0
-    } else {
-        match pick_upload(prompts, emit, &game, &uploads, likely) {
-            Some(index) => index,
-            None if skipped() => return Ok(Queued::Skipped),
-            None => return Ok(Queued::Declined),
-        }
+    // Always asked, even for one upload, so the user sees what is about
+    // to download and can reach the rest.
+    let index = match pick_upload(prompts, emit, &game, &uploads, likely) {
+        Some(index) => index,
+        None if skipped() => return Ok(Queued::Skipped),
+        None => return Ok(Queued::Declined),
     };
     if skipped() {
         return Ok(Queued::Skipped);
@@ -1806,6 +1803,14 @@ fn upload_label(upload: &Upload) -> String {
 /// The upload picker's title; the Downloads tab recognises it by this.
 pub const UPLOAD_PICKER: &str = "Which download?";
 
+fn downloads_here(title: &str, count: usize) -> String {
+    if count == 1 {
+        format!("{title} has one download for this device.")
+    } else {
+        format!("{title} has {count} downloads for this device.")
+    }
+}
+
 /// Asks which upload to install. `None` when the user backs out.
 /// `uploads` lists the `likely` ones for this device first; the rest are
 /// offered behind a choice to show everything.
@@ -1824,11 +1829,7 @@ fn pick_upload(
         let mut choices: Vec<&str> = labels[..likely].iter().map(String::as_str).collect();
         choices.push(&show_all);
         choices.push("Cancel");
-        let body = if likely == 1 {
-            format!("{title} has one download for this device.")
-        } else {
-            format!("{title} has more than one download for this device.")
-        };
+        let body = downloads_here(title, likely);
         let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
         if picked != likely {
             return (picked < likely).then_some(picked);
@@ -1839,7 +1840,7 @@ fn pick_upload(
     let body = if likely == 0 {
         format!("{title} has no download recognised for this device. Install one anyway?")
     } else if others == 0 {
-        format!("{title} has more than one download for this device.")
+        downloads_here(title, likely)
     } else if others == 1 {
         format!("{title}: the last download was not recognised for this device.")
     } else {

@@ -592,7 +592,7 @@ impl App {
                 Some(count) => Prompt {
                     id: 0,
                     title: "Which download?".into(),
-                    body: "Sample has more than one download for this device.".into(),
+                    body: format!("Sample has {count} downloads for this device."),
                     choices: (1..=*count)
                         .map(|i| format!("Sample - Linux - build {i} (135.9 MB)"))
                         .collect(),

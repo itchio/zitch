@@ -306,7 +306,8 @@ fn blocker(info: &LinuxInfo, glibc: (u32, u32)) -> Option<String> {
     }
 }
 
-/// A target from itch.io's scan of an upload, as dash lays it out.
+/// A target from itch.io's scan of an upload. dash names the info fields
+/// differently there than in a Candidate, so it gets its own type.
 #[derive(Debug, Default, Deserialize)]
 pub struct ScannedTarget {
     #[serde(default)]
