@@ -177,11 +177,15 @@ fn any_runs_here(scanned: &[String], device: &[String]) -> bool {
     scanned.iter().any(|p| device.contains(p))
 }
 
-/// Whether an upload is built for this device: on muOS a ROM for one of
-/// the firmware's emulators or a `.love`, elsewhere an upload tagged for
+/// Whether an upload is built for this device: on muOS something the
+/// firmware or the SDL shim can run, going by itch.io's scan of its files
+/// when it has one and its name otherwise; elsewhere an upload tagged for
 /// the OS.
 pub fn upload_runs_here(upload: &Upload) -> bool {
     if crate::muos::available() {
+        if let Some(runs) = scan_runs_here(upload) {
+            return runs;
+        }
         let path = std::path::Path::new(&upload.filename);
         // An archive can hold anything; what it holds is only known once
         // butler has unpacked it. One tagged for another OS is not worth
@@ -193,6 +197,15 @@ pub fn upload_runs_here(upload: &Upload) -> bool {
     } else {
         runs_here(&upload.platforms)
     }
+}
+
+/// What itch.io's scan of the upload's files says about this device, or
+/// `None` when it was not scanned.
+fn scan_runs_here(upload: &Upload) -> Option<bool> {
+    let targets = upload.launch_targets.as_ref()?.as_array()?;
+    Some(targets.iter().any(|t| {
+        serde::Deserialize::deserialize(t).is_ok_and(|t| crate::muos::scanned_target_runs_here(&t))
+    }))
 }
 
 /// The archive types butler unpacks on install.

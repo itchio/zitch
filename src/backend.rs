@@ -1717,25 +1717,33 @@ fn queue_install(
 ) -> Result<Queued> {
     let location = install_location(client, config)?;
     // butler's compatibility filter goes by platform tags, which a ROM
-    // does not carry; on muOS every upload is fetched and judged by name.
+    // does not carry; on muOS every upload is fetched and judged here.
     let muos = crate::muos::available();
-    let mut uploads = client
+    let uploads = client
         .call(FetchGameUploadsParams {
             game_id: game.id,
             compatible: !muos,
             fresh: Some(true),
         })?
         .uploads;
-    if muos {
-        uploads.retain(upload_runs_here);
-    }
+    // The scan and the filename rules can both be wrong, so on muOS the
+    // uploads they turn down stay one choice away rather than dropped.
+    let (mut uploads, likely) = if muos {
+        let (mut likely, rest): (Vec<_>, Vec<_>) = uploads.into_iter().partition(upload_runs_here);
+        let count = likely.len();
+        likely.extend(rest);
+        (likely, count)
+    } else {
+        let count = uploads.len();
+        (uploads, count)
+    };
     if uploads.is_empty() {
         bail!("{} has no download for this device", game.title);
     }
-    let index = if uploads.len() == 1 {
+    let index = if uploads.len() == 1 && likely == 1 {
         0
     } else {
-        match pick_upload(prompts, emit, &game, &uploads) {
+        match pick_upload(prompts, emit, &game, &uploads, likely) {
             Some(index) => index,
             None if skipped() => return Ok(Queued::Skipped),
             None => return Ok(Queued::Declined),
@@ -1799,16 +1807,44 @@ fn upload_label(upload: &Upload) -> String {
 pub const UPLOAD_PICKER: &str = "Which download?";
 
 /// Asks which upload to install. `None` when the user backs out.
+/// `uploads` lists the `likely` ones for this device first; the rest are
+/// offered behind a choice to show everything.
 fn pick_upload(
     prompts: &Prompts,
     emit: &Emitter,
     game: &Game,
     uploads: &[Upload],
+    likely: usize,
 ) -> Option<usize> {
     let labels: Vec<String> = uploads.iter().map(upload_label).collect();
+    let others = uploads.len() - likely;
+    let title = &game.title;
+    if likely > 0 && others > 0 {
+        let show_all = format!("Show all {} downloads", uploads.len());
+        let mut choices: Vec<&str> = labels[..likely].iter().map(String::as_str).collect();
+        choices.push(&show_all);
+        choices.push("Cancel");
+        let body = if likely == 1 {
+            format!("{title} has one download for this device.")
+        } else {
+            format!("{title} has more than one download for this device.")
+        };
+        let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
+        if picked != likely {
+            return (picked < likely).then_some(picked);
+        }
+    }
     let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
     choices.push("Cancel");
-    let body = format!("{} has more than one download for this device.", game.title);
+    let body = if likely == 0 {
+        format!("{title} has no download recognised for this device. Install one anyway?")
+    } else if others == 0 {
+        format!("{title} has more than one download for this device.")
+    } else if others == 1 {
+        format!("{title}: the last download was not recognised for this device.")
+    } else {
+        format!("{title}: the last {others} downloads were not recognised for this device.")
+    };
     let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
     (picked < labels.len()).then_some(picked)
 }

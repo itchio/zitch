@@ -20,8 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
-use crate::butlerd::types::{Arch, Candidate, Engine, Flavor, LinuxInfo};
+use crate::butlerd::types::{Arch, Candidate, Engine, EngineInfo, Flavor, LinuxInfo};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// Where Andromeda keeps the launch handoff files; Jacaranda uses /tmp.
@@ -301,6 +302,48 @@ fn blocker(info: &LinuxInfo, glibc: (u32, u32)) -> Option<String> {
                     display.join(", ")
                 ))
             }
+        }
+    }
+}
+
+/// A target from itch.io's scan of an upload, as dash lays it out.
+#[derive(Debug, Default, Deserialize)]
+pub struct ScannedTarget {
+    #[serde(default)]
+    pub flavor: Flavor,
+    #[serde(default)]
+    pub arch: Option<Arch>,
+    #[serde(default)]
+    pub engine: Option<EngineInfo>,
+    #[serde(default)]
+    pub linux_info: Option<LinuxInfo>,
+}
+
+/// Whether a scanned target would run once installed, by the checks
+/// launching it makes.
+pub fn scanned_target_runs_here(target: &ScannedTarget) -> bool {
+    scanned_target_fits(target, glibc_version())
+}
+
+fn scanned_target_fits(target: &ScannedTarget, glibc: (u32, u32)) -> bool {
+    match target.flavor {
+        Flavor::NativeLinux => {
+            let info = target.linux_info.as_ref();
+            // At launch butler has already dropped builds for other
+            // architectures, so native_blocker lets a missing arch through.
+            let arch = info.and_then(|i| i.arch).or(target.arch);
+            arch == Some(Arch::Arm64)
+                && info.is_none_or(|i| {
+                    i.os.as_deref().unwrap_or("").is_empty() && blocker(i, glibc).is_none()
+                })
+        }
+        flavor => {
+            let candidate = Candidate {
+                flavor,
+                engine: target.engine.clone(),
+                ..Default::default()
+            };
+            content_for(&candidate, PathBuf::new()).is_ok()
         }
     }
 }
@@ -1152,6 +1195,49 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         );
         let native = payload(Flavor::NativeLinux, None);
         assert!(content_for(&native, PathBuf::from("/g/bin")).is_err());
+    }
+
+    #[test]
+    fn scanned_native_builds_must_be_arm64_linux() {
+        let fits = |json: serde_json::Value| {
+            let target: ScannedTarget = serde_json::from_value(json).unwrap();
+            scanned_target_fits(&target, (2, 38))
+        };
+        // the site's layout: snake_case outside, butler's camelCase inside
+        assert!(fits(serde_json::json!({
+            "path": "bin/game", "depth": 2, "flavor": "linux", "arch": "arm64",
+            "linux_info": { "arch": "arm64", "glibcVersion": "2.31", "sdl": "2", "imports": ["libSDL2-2.0.so.0"] }
+        })));
+        assert!(fits(
+            serde_json::json!({ "path": "game", "flavor": "linux", "arch": "arm64" })
+        ));
+        assert!(!fits(
+            serde_json::json!({ "path": "game", "flavor": "linux" })
+        ));
+        assert!(!fits(
+            serde_json::json!({ "path": "game", "flavor": "linux", "arch": "amd64" })
+        ));
+        assert!(!fits(
+            serde_json::json!({ "path": "game", "flavor": "linux", "arch": "arm" })
+        ));
+        assert!(!fits(serde_json::json!({
+            "path": "game", "flavor": "linux", "arch": "arm64",
+            "linux_info": { "arch": "arm64", "glibcVersion": "2.39" }
+        })));
+        assert!(!fits(serde_json::json!({
+            "path": "game", "flavor": "linux", "arch": "arm64",
+            "linux_info": { "arch": "arm64", "os": "freebsd" }
+        })));
+        assert!(!fits(
+            serde_json::json!({ "path": "game.exe", "flavor": "windows", "arch": "arm64" })
+        ));
+        // no runtimes off-device
+        assert!(!fits(
+            serde_json::json!({ "path": "game.love", "flavor": "love" })
+        ));
+        assert!(!fits(
+            serde_json::json!({ "path": "x.bin", "flavor": "some-new-flavor" })
+        ));
     }
 
     #[test]
