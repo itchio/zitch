@@ -33,7 +33,6 @@ libc = "0.2"
 # The sign-in QR code and the PKCE secrets behind its URL.
 qrcodegen = "1.8"
 sha2 = "0.10"
-getrandom = "0.3"
 
 [features]
 default = ["eframe-host", "gilrs"]

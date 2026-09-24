@@ -19,19 +19,19 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::butlerd::types::{
     AcceptLicenseResult, AllowSandboxSetupResult, AnyNotification, AnyServerRequest,
-    CheckUpdateParams, CollectionGamesFilters, DownloadReason, DownloadsClearFinishedParams,
+    CheckUpdateParams, Code, CollectionGamesFilters, DownloadReason, DownloadsClearFinishedParams,
     DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
     DownloadsRetryParams, FetchCaveParams, FetchCavesParams, FetchCollectionGamesParams,
     FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
     HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
     LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
     PrereqsFailedResult, ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
-    ProfileLoginWithOAuthCodeParams, ProfileUseSavedLoginParams, RuntimeLaunchResult,
-    ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, UploadType,
-    VersionGetParams, VersionGetResult,
+    ProfileLoginWithDeviceCancelParams, ProfileLoginWithDeviceParams,
+    ProfileLoginWithDeviceRequestDeviceInfoResult, ProfileLoginWithDeviceResult,
+    ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
+    UninstallPerformParams, Upload, UploadType, VersionGetParams, VersionGetResult,
 };
-use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline};
-use crate::login::{CLIENT_ID, DeviceLogin, Poll, REDIRECT_URI};
+use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
     Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
@@ -44,7 +44,7 @@ pub struct Config {
     pub api_key: Option<String>,
     /// A saved profile to use instead of the most recent one.
     pub profile_id: Option<i64>,
-    /// Where the device sign-in talks to.
+    /// The itch.io API butler talks to.
     pub api_url: String,
     /// Where games go when the database has no install location yet.
     pub install_dir: PathBuf,
@@ -333,6 +333,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     let link: Link = Arc::new(Mutex::new(Arc::new(Daemon::spawn(
         &config.butler,
         &config.dbpath,
+        &config.api_url,
         &config.game_env,
         config.low_power,
     )?)));
@@ -353,7 +354,7 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     loop {
         let profile = match saved.then(|| sign_in(&client, &config, emit)).transpose()? {
             Some(Some(profile)) => profile,
-            _ => match await_login(&client, &config, emit, &commands) {
+            _ => match await_login(&link, &client, emit, &commands) {
                 Some(profile) => profile,
                 None => return Ok(()),
             },
@@ -427,6 +428,7 @@ fn session(
             match Daemon::spawn(
                 &config.butler,
                 &config.dbpath,
+                &config.api_url,
                 &config.game_env,
                 config.low_power,
             ) {
@@ -2015,12 +2017,16 @@ fn sign_in(client: &Client, config: &Config, emit: &Emitter) -> Result<Option<Pr
         .ok_or_else(|| anyhow!("login returned no profile"))
 }
 
+/// The OAuth client registered for the device sign-in.
+const LOGIN_CLIENT_ID: &str = "d59031fc193811bb3e6af0f8eeeb2c18";
+
 /// The device sign-in, until a profile is signed in or the app shuts
-/// down, which returns `None`. A failure is shown and waits for a retry;
-/// an expired request starts over on its own.
+/// down, which returns `None`. butler runs the request on a connection
+/// of its own; this thread keeps `client` free to cancel it. A failure is
+/// shown and waits for a retry.
 fn await_login(
+    link: &Link,
     client: &Client,
-    config: &Config,
     emit: &Emitter,
     commands: &mpsc::Receiver<Command>,
 ) -> Option<Profile> {
@@ -2029,78 +2035,140 @@ fn await_login(
         emit.send(Event::LoginFailed(message));
         wait_for_retry(commands)
     };
-    'request: loop {
+    // The page's checkbox; butler asks for its state at the exchange.
+    let share_device_info = Arc::new(AtomicBool::new(true));
+    for attempt in 1.. {
         emit.status("Requesting a sign-in code");
-        let login = match DeviceLogin::start(&config.api_url) {
-            Ok(login) => login,
-            Err(error) => {
-                if !fail(format!("{error:#}")) {
+        let id = format!("login-{attempt}");
+        let (result_tx, result_rx) = mpsc::channel();
+        let started = spawn_login(
+            link,
+            id.clone(),
+            emit.clone(),
+            &share_device_info,
+            result_tx,
+        );
+        if let Err(error) = started {
+            if !fail(format!("{error:#}")) {
+                return None;
+            }
+            continue;
+        }
+        emit.status("Waiting for the sign-in to be approved");
+
+        // Asked again each tick until butler knows the call: a cancel
+        // right after the start can get there before the call does.
+        let mut cancelling = false;
+        let result = loop {
+            match commands.recv_timeout(LOGIN_TICK) {
+                Ok(Command::RetryLogin) => cancelling = true,
+                Ok(Command::SetShareDeviceInfo(flag)) => {
+                    share_device_info.store(flag, Ordering::Relaxed);
+                }
+                Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = client.call(ProfileLoginWithDeviceCancelParams { id: id.clone() });
                     return None;
                 }
-                continue;
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if cancelling {
+                match client.call(ProfileLoginWithDeviceCancelParams { id: id.clone() }) {
+                    Ok(result) => cancelling = !result.did_cancel,
+                    Err(error) => log::warn!("cancelling sign-in: {error:#}"),
+                }
+            }
+            match result_rx.try_recv() {
+                Ok(result) => break result,
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Err(anyhow!("the sign-in thread went away"));
+                }
             }
         };
-        emit.status("Waiting for the sign-in to be approved");
-        emit.send(Event::LoginRequired {
-            url: login.verification_url.clone(),
-            user_code: login.user_code.clone(),
-        });
-        let started = Instant::now();
-        let mut interval = login.interval;
-        // The page's checkbox; on with each new code, as the page is.
-        let mut share_device_info = true;
-        loop {
-            let deadline = Instant::now() + interval;
-            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-                match commands.recv_timeout(left) {
-                    Ok(Command::RetryLogin) => continue 'request,
-                    Ok(Command::SetShareDeviceInfo(flag)) => share_device_info = flag,
-                    Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return None;
-                    }
-                    Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+
+        let message = match result {
+            Ok(result) => match result.profile {
+                Some(profile) => return Some(profile),
+                None => "Signing in returned no profile".to_string(),
+            },
+            Err(error) => match rpc_code(&error) {
+                Some(code) if code == Code::OPERATION_CANCELLED.0 => continue,
+                Some(code) if code == Code::PROFILE_LOGIN_WITH_DEVICE_DENIED.0 => {
+                    "The sign-in was cancelled on the phone".to_string()
                 }
-            }
-            if started.elapsed() >= login.expires_in {
-                continue 'request;
-            }
-            match login.poll(&config.api_url) {
-                Ok(Poll::Pending { interval: next }) => interval = next,
-                Ok(Poll::SlowDown) => interval *= 2,
-                Ok(Poll::Expired) => continue 'request,
-                Ok(Poll::Denied) => {
-                    if !fail("The sign-in was cancelled on the phone".into()) {
-                        return None;
-                    }
-                    continue 'request;
-                }
-                Ok(Poll::Approved { code }) => {
-                    emit.status("Signing in");
-                    let device_info = share_device_info.then(crate::device_info::gather);
-                    let result = client.call(ProfileLoginWithOAuthCodeParams {
-                        code,
-                        code_verifier: login.verifier.clone(),
-                        redirect_uri: REDIRECT_URI.into(),
-                        client_id: CLIENT_ID.into(),
-                        device_info,
-                    });
-                    let message = match result {
-                        Ok(result) => match result.profile {
-                            Some(profile) => return Some(profile),
-                            None => "Signing in returned no profile".to_string(),
-                        },
-                        Err(error) => format!("Signing in: {error:#}"),
-                    };
-                    if !fail(message) {
-                        return None;
-                    }
-                    continue 'request;
-                }
-                // A network blip; the request expires on its own if not.
-                Err(error) => log::warn!("{error:#}"),
-            }
+                _ => format!("Signing in: {error:#}"),
+            },
+        };
+        if !fail(message) {
+            return None;
         }
     }
+    None
+}
+
+/// How often the sign-in loop checks whether butler has answered.
+const LOGIN_TICK: Duration = Duration::from_millis(200);
+
+/// One `Profile.LoginWithDevice` call for [`await_login`], on its own
+/// connection and thread.
+fn spawn_login(
+    link: &Link,
+    id: String,
+    emit: Emitter,
+    share_device_info: &Arc<AtomicBool>,
+    result: mpsc::Sender<Result<ProfileLoginWithDeviceResult>>,
+) -> Result<()> {
+    let login = connect(link)?;
+    let share_device_info = Arc::clone(share_device_info);
+    std::thread::Builder::new()
+        .name("zitch-login".into())
+        .spawn(move || {
+            let params = ProfileLoginWithDeviceParams {
+                id,
+                client_id: LOGIN_CLIENT_ID.into(),
+            };
+            let outcome = login.call_streaming(params, |incoming| match incoming {
+                Incoming::Notification { method, params } => {
+                    match AnyNotification::decode(&method, params) {
+                        Ok(AnyNotification::ProfileLoginWithDeviceChallenge(n)) => {
+                            // On with each new code, as the page's checkbox is
+                            share_device_info.store(true, Ordering::Relaxed);
+                            emit.send(Event::LoginRequired {
+                                url: n.url,
+                                user_code: n.user_code,
+                            });
+                        }
+                        Ok(other) => log::debug!("{other:?}"),
+                        Err(error) => log::warn!("bad {method} notification: {error}"),
+                    }
+                }
+                Incoming::Request { id, method, params } => {
+                    match AnyServerRequest::decode(&method, params) {
+                        Ok(AnyServerRequest::ProfileLoginWithDeviceRequestDeviceInfo(_)) => {
+                            let device_info = share_device_info
+                                .load(Ordering::Relaxed)
+                                .then(crate::device_info::gather)
+                                .unwrap_or_default();
+                            let _ = login.reply(
+                                &id,
+                                ProfileLoginWithDeviceRequestDeviceInfoResult { device_info },
+                            );
+                        }
+                        Ok(request) => {
+                            log::warn!("sign-in asked {request:?}; not supported");
+                            let _ = login.reply_error(&id, -32601, "not supported by this client");
+                        }
+                        Err(error) => {
+                            log::warn!("bad {method} request: {error}");
+                            let _ = login.reply_error(&id, -32602, &error.to_string());
+                        }
+                    }
+                }
+            });
+            let _ = result.send(outcome);
+        })
+        .context("spawning the sign-in thread")?;
+    Ok(())
 }
 
 /// Whether the user asked for another go rather than quitting.

@@ -7,12 +7,12 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
-use crate::login::QrCode;
 pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, Prompt, Tab,
     UploadExt, platform_names, playable_here,
 };
+use crate::qr::QrCode;
 
 // The itch app's palette (renderer/styles.ts): codGray, itemBackground,
 // ivory, carnation, gossip, amber.

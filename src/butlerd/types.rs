@@ -164,6 +164,32 @@ pub struct ProfileLoginWithOAuthCodeResult {
     pub cookie: HashMap<String, String>,
 }
 
+/// Result for Profile.LoginWithDevice
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceResult {
+    /// Information for the new profile, now remembered
+    #[serde(rename = "profile", default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
+    /// Profile cookie for website
+    #[serde(rename = "cookie", default, deserialize_with = "null_default")]
+    pub cookie: HashMap<String, String>,
+}
+
+/// Result for Profile.LoginWithDevice.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceCancelResult {
+    #[serde(rename = "didCancel", default, deserialize_with = "null_default")]
+    pub did_cancel: bool,
+}
+
+/// Result for Profile.LoginWithDevice.RequestDeviceInfo
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceRequestDeviceInfoResult {
+    /// Device information string, as in @@ProfileLoginWithOAuthCodeParams
+    #[serde(rename = "deviceInfo", default, deserialize_with = "null_default")]
+    pub device_info: String,
+}
+
 /// Result for Profile.RequestCaptcha
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProfileRequestCaptchaResult {
@@ -1747,6 +1773,10 @@ impl Code {
     pub const PUBLISH_STEAM_SYNC_LOGIN_DENIED: Code = Code(21003);
     /// Another @@PublishSteamSyncLoginParams call is still waiting for approval.
     pub const PUBLISH_STEAM_SYNC_LOGIN_IN_PROGRESS: Code = Code(21004);
+    /// The user pressed deny on the consent page.
+    pub const PROFILE_LOGIN_WITH_DEVICE_DENIED: Code = Code(22000);
+    /// Another @@ProfileLoginWithDeviceParams call is still waiting for approval.
+    pub const PROFILE_LOGIN_WITH_DEVICE_IN_PROGRESS: Code = Code(22001);
 }
 
 /// Result for Publish.Push
@@ -3014,6 +3044,13 @@ pub struct Upload {
         skip_serializing_if = "Option::is_none"
     )]
     pub launch_targets_scanner_version: Option<String>,
+    /// Size in bytes of the extracted files the launch targets were found in
+    #[serde(
+        rename = "launchTargetsExtractedSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_targets_extracted_size: Option<i64>,
     /// Date this upload was created at
     #[serde(rename = "createdAt", default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<RFCDate>,
@@ -3904,6 +3941,65 @@ pub struct ProfileLoginWithOAuthCodeParams {
 impl Request for ProfileLoginWithOAuthCodeParams {
     const METHOD: &'static str = "Profile.LoginWithOAuthCode";
     type Result = ProfileLoginWithOAuthCodeResult;
+}
+
+/// Params for Profile.LoginWithDevice
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceParams {
+    /// ID that can be later used in @@ProfileLoginWithDeviceCancelParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+    /// The OAuth client ID registered for the device grant
+    #[serde(rename = "clientId", default, deserialize_with = "null_default")]
+    pub client_id: String,
+}
+
+impl Request for ProfileLoginWithDeviceParams {
+    const METHOD: &'static str = "Profile.LoginWithDevice";
+    type Result = ProfileLoginWithDeviceResult;
+}
+
+/// Params for Profile.LoginWithDevice.Cancel
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceCancelParams {
+    /// The ID passed to @@ProfileLoginWithDeviceParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+}
+
+impl Request for ProfileLoginWithDeviceCancelParams {
+    const METHOD: &'static str = "Profile.LoginWithDevice.Cancel";
+    type Result = ProfileLoginWithDeviceCancelResult;
+}
+
+/// Payload for Profile.LoginWithDevice.Challenge
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceChallengeNotification {
+    /// The ID passed to @@ProfileLoginWithDeviceParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+    /// Consent page URL, to be rendered as a QR code
+    #[serde(rename = "url", default, deserialize_with = "null_default")]
+    pub url: String,
+    /// Short code to show under it; the consent page shows the same one
+    #[serde(rename = "userCode", default, deserialize_with = "null_default")]
+    pub user_code: String,
+    /// Seconds until this code expires and a new one is sent
+    #[serde(rename = "expiresIn", default, deserialize_with = "null_default")]
+    pub expires_in: i64,
+}
+
+/// Params for Profile.LoginWithDevice.RequestDeviceInfo
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLoginWithDeviceRequestDeviceInfoParams {
+    /// The ID passed to @@ProfileLoginWithDeviceParams
+    #[serde(rename = "id", default, deserialize_with = "null_default")]
+    pub id: String,
+}
+
+impl Request for ProfileLoginWithDeviceRequestDeviceInfoParams {
+    const METHOD: &'static str = "Profile.LoginWithDevice.RequestDeviceInfo";
+    type Result = ProfileLoginWithDeviceRequestDeviceInfoResult;
 }
 
 /// Params for Profile.RequestCaptcha
@@ -6340,6 +6436,9 @@ pub enum AnyNotification {
     Log(LogNotification),
     /// The first notification sent when @@MetaFlowParams is called.
     MetaFlowEstablished(MetaFlowEstablishedNotification),
+    /// Sent during @@ProfileLoginWithDeviceParams with what to put on screen.
+    /// Show the URL as a link too, for people whose phone is this device.
+    ProfileLoginWithDeviceChallenge(ProfileLoginWithDeviceChallengeNotification),
     /// Sent periodically during @@InstallPerformParams to inform on the current state of an install
     Progress(ProgressNotification),
     /// Each operation is made up of one or more tasks. This notification
@@ -6441,6 +6540,9 @@ impl AnyNotification {
             }
             "Log" => Self::Log(serde_json::from_value(params)?),
             "MetaFlowEstablished" => Self::MetaFlowEstablished(serde_json::from_value(params)?),
+            "Profile.LoginWithDevice.Challenge" => {
+                Self::ProfileLoginWithDeviceChallenge(serde_json::from_value(params)?)
+            }
             "Progress" => Self::Progress(serde_json::from_value(params)?),
             "TaskStarted" => Self::TaskStarted(serde_json::from_value(params)?),
             "TaskSucceeded" => Self::TaskSucceeded(serde_json::from_value(params)?),
@@ -6522,6 +6624,10 @@ impl Notification for LogNotification {
 
 impl Notification for MetaFlowEstablishedNotification {
     const METHOD: &'static str = "MetaFlowEstablished";
+}
+
+impl Notification for ProfileLoginWithDeviceChallengeNotification {
+    const METHOD: &'static str = "Profile.LoginWithDevice.Challenge";
 }
 
 impl Notification for ProgressNotification {
@@ -6613,6 +6719,10 @@ impl Notification for PublishSteamSyncPushProgressNotification {
 /// Result type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnyServerRequest {
+    /// Sent during @@ProfileLoginWithDeviceParams once the user has approved,
+    /// just before the token exchange. Answer with an empty string, or refuse
+    /// the request, to share nothing.
+    ProfileLoginWithDeviceRequestDeviceInfo(ProfileLoginWithDeviceRequestDeviceInfoParams),
     /// Ask the user to solve a captcha challenge
     /// Sent during @@ProfileLoginWithPasswordParams if certain
     /// conditions are met.
@@ -6680,6 +6790,9 @@ pub enum AnyServerRequest {
 impl AnyServerRequest {
     pub fn decode(method: &str, params: Value) -> Result<Self, serde_json::Error> {
         Ok(match method {
+            "Profile.LoginWithDevice.RequestDeviceInfo" => {
+                Self::ProfileLoginWithDeviceRequestDeviceInfo(serde_json::from_value(params)?)
+            }
             "Profile.RequestCaptcha" => {
                 Self::ProfileRequestCaptcha(serde_json::from_value(params)?)
             }
@@ -6707,6 +6820,8 @@ impl AnyServerRequest {
         })
     }
 }
+
+impl ServerRequest for ProfileLoginWithDeviceRequestDeviceInfoParams {}
 
 impl ServerRequest for ProfileRequestCaptchaParams {}
 

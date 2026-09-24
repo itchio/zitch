@@ -8,12 +8,12 @@ use crate::battery::Battery;
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
-use crate::login::QrCode;
 use crate::model::{
     Action, Cave, CaveExt, CollectionGames, Direction, Download, DownloadProgress, DownloadReason,
     Game, GameUpdate, InstallState, Kind, LaunchFailure, Loadable, Page, Profile, Prompt, Tab,
     UploadExt, UserExt, human_size, known_playable_here,
 };
+use crate::qr::QrCode;
 use crate::self_update::{self, SelfUpdate};
 use crate::ui;
 use crate::ui::LoginView;

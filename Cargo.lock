@@ -3791,7 +3791,6 @@ dependencies = [
  "egui",
  "egui_glow",
  "env_logger",
- "getrandom 0.3.4",
  "gilrs",
  "image",
  "libc",

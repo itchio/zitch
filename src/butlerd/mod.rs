@@ -50,11 +50,15 @@ pub const CODE_NETWORK_DISCONNECTED: i64 = 9000;
 
 /// Whether a call failed because butler could not reach itch.io.
 pub fn is_offline(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<RpcError>()
-            .is_some_and(|rpc| rpc.code == CODE_NETWORK_DISCONNECTED)
-    })
+    rpc_code(error) == Some(CODE_NETWORK_DISCONNECTED)
+}
+
+/// butlerd's error code behind a failed call, if that is what failed.
+pub fn rpc_code(error: &anyhow::Error) -> Option<i64> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RpcError>())
+        .map(|rpc| rpc.code)
 }
 
 #[derive(Deserialize)]
@@ -76,6 +80,7 @@ impl Daemon {
     pub fn spawn(
         butler: &Path,
         dbpath: &Path,
+        api_url: &str,
         env: &[(String, OsString)],
         low_power: bool,
     ) -> Result<Self> {
@@ -94,6 +99,8 @@ impl Daemon {
             .arg(dbpath)
             .arg("--destiny-pid")
             .arg(std::process::id().to_string())
+            .arg("--address")
+            .arg(api_url)
             .arg("--user-agent")
             .arg(concat!("zitch/", env!("ZITCH_VERSION")));
         if low_power {
