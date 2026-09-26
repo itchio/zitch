@@ -2,8 +2,8 @@
 //! the generated butlerd bindings; these are the app's own.
 
 pub use crate::butlerd::types::{
-    Cave, Collection, Download, DownloadProgress, DownloadReason, Game, GameClassification,
-    GameUpdate, Platforms, Profile, Upload, User,
+    Cave, Collection, CollectionGamesFilters, Download, DownloadProgress, DownloadReason, Game,
+    GameClassification, GameUpdate, Platforms, Profile, Upload, User,
 };
 
 pub trait UserExt {
@@ -164,6 +164,37 @@ pub fn known_playable_here(game: &Game) -> bool {
     }
 }
 
+/// The page-wide filters as a collection query, so butler returns only
+/// the games that pass instead of every page being fetched to find them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectionFilter {
+    pub installed: bool,
+    pub playable: bool,
+}
+
+impl CollectionFilter {
+    pub fn any(&self) -> bool {
+        self.installed || self.playable
+    }
+
+    /// butler's filter matching [`known_playable_here`] and the installed
+    /// toggle.
+    pub fn to_butler(self) -> CollectionGamesFilters {
+        let mut filters = CollectionGamesFilters {
+            installed: self.installed,
+            ..Default::default()
+        };
+        if self.playable {
+            if crate::muos::available() {
+                filters.scanned_platforms = Some(device_platforms());
+            } else {
+                filters.platform = Some(os_platform().to_string());
+            }
+        }
+        filters
+    }
+}
+
 /// What this device runs, in the words of a game's scanned platforms.
 /// The handheld profile is itch.io's check for an arm64 Linux build the
 /// SDL shim can put on screen.
@@ -219,12 +250,21 @@ fn is_archive(path: &std::path::Path) -> bool {
 }
 
 fn runs_here(p: &Platforms) -> bool {
+    match os_platform() {
+        "linux" => p.linux.is_some(),
+        "osx" => p.osx.is_some(),
+        _ => p.windows.is_some(),
+    }
+}
+
+/// This OS in itch.io's platform words.
+fn os_platform() -> &'static str {
     if cfg!(target_os = "linux") {
-        p.linux.is_some()
+        "linux"
     } else if cfg!(target_os = "macos") {
-        p.osx.is_some()
+        "osx"
     } else {
-        p.windows.is_some()
+        "windows"
     }
 }
 

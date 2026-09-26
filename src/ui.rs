@@ -451,6 +451,8 @@ pub struct Rows {
     /// Each row's top and height as last laid out, relative to the list's
     /// top, so follow-scrolling uses real measurements.
     row_spans: Vec<(f32, f32)>,
+    /// The list's visible height, as last laid out.
+    view_height: f32,
     last_pointer: Option<egui::Pos2>,
     /// A touch drag in progress, once it has picked an axis.
     swipe: Option<Swipe>,
@@ -488,6 +490,16 @@ impl Rows {
         {
             self.focus_game(id);
         }
+    }
+
+    /// The rows at least partly in view, as last laid out.
+    pub fn visible(&self) -> impl Iterator<Item = usize> + '_ {
+        let (top, bottom) = (self.vscroll, self.vscroll + self.view_height);
+        self.row_spans
+            .iter()
+            .enumerate()
+            .filter(move |(_, (t, h))| *t < bottom && t + h > top)
+            .map(|(row, _)| row)
     }
 
     pub fn col(&self) -> usize {
@@ -610,6 +622,7 @@ pub fn library(
     rows.laid_out = Some(*m);
 
     let viewport_height = ui.available_height();
+    rows.view_height = viewport_height;
     let list_rect = ui.available_rect_before_wrap();
     let no_drag = if CUSTOM_SWIPE {
         egui::scroll_area::ScrollSource {

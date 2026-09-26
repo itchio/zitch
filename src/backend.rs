@@ -33,8 +33,9 @@ use crate::butlerd::types::{
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
-    Cave, Collection, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure,
-    Profile, Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
+    Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
+    GameUpdate, LaunchFailure, Profile, Prompt, UploadExt, UserExt, human_size,
+    upload_platform_names, upload_runs_here,
 };
 
 pub struct Config {
@@ -71,11 +72,15 @@ pub enum Command {
         collection_id: i64,
         cursor: String,
     },
-    /// Every installed game in each collection, from butler's own filter,
-    /// so the answer covers pages not fetched yet.
-    CollectionsInstalled {
+    /// Every game in each collection that passes `filter`, from butler's
+    /// own query, so the answer covers pages not fetched yet.
+    CollectionsFiltered {
+        filter: CollectionFilter,
         collection_ids: Vec<i64>,
     },
+    /// The collections on screen, refetched first while a sync is
+    /// refreshing collections.
+    CollectionsWanted(Vec<i64>),
     /// Discard a queued, running, or failed download. With `confirm`, the
     /// game's title, the user is asked first and [`Event::Discarding`] says
     /// they agreed.
@@ -162,7 +167,10 @@ pub enum Event {
         collection_id: i64,
         error: String,
     },
-    CollectionsInstalled(Vec<(i64, Vec<Game>)>),
+    CollectionsFiltered {
+        filter: CollectionFilter,
+        lists: Vec<(i64, Vec<Game>)>,
+    },
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
     /// The whole download queue, after anything changed it.
@@ -429,6 +437,7 @@ fn session(
         collections_held: Arc::new(AtomicBool::new(false)),
         collections_stale: Arc::new(AtomicBool::new(false)),
         collections_forced: Arc::new(AtomicBool::new(false)),
+        collections_wanted: Arc::default(),
         retry: Arc::new(AtomicBool::new(false)),
     };
     sync.spawn(link, emit);
@@ -530,18 +539,18 @@ fn session(
                     },
                 );
             }
-            Ok(Command::CollectionsInstalled { collection_ids }) => {
+            Ok(Command::CollectionsFiltered {
+                filter,
+                collection_ids,
+            }) => {
                 let profile_id = profile.id;
                 spawn_op(
-                    "collections-installed".into(),
+                    "collections-filtered".into(),
                     Arc::clone(link),
                     emit.clone(),
                     |error| Event::Error(format!("{error:#}")),
                     move |client, emit| {
-                        let filter = CollectionGamesFilters {
-                            installed: true,
-                            ..Default::default()
-                        };
+                        let query = filter.to_butler();
                         let mut lists = Vec::with_capacity(collection_ids.len());
                         for id in collection_ids {
                             let mut games = Vec::new();
@@ -552,7 +561,7 @@ fn session(
                                     profile_id,
                                     id,
                                     cursor.take(),
-                                    Some(filter.clone()),
+                                    Some(query.clone()),
                                 )?;
                                 games.extend(page);
                                 match next {
@@ -562,7 +571,7 @@ fn session(
                             }
                             lists.push((id, games));
                         }
-                        emit.send(Event::CollectionsInstalled(lists));
+                        emit.send(Event::CollectionsFiltered { filter, lists });
                         Ok(())
                     },
                 );
@@ -741,6 +750,12 @@ fn session(
                 launches.quit(&cave_id);
                 // A payload the firmware runs is our own child, not butler's.
                 crate::muos::stop();
+            }
+            Ok(Command::CollectionsWanted(ids)) => {
+                *sync
+                    .collections_wanted
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = ids;
             }
             Ok(Command::RefreshLibrary) => {
                 sync.collections_forced.store(true, Ordering::Relaxed);
@@ -1444,6 +1459,8 @@ struct Sync {
     collections_stale: Arc<AtomicBool>,
     /// The user asked for a refresh, so every collection is refetched.
     collections_forced: Arc<AtomicBool>,
+    /// Collections on screen, refetched ahead of the rest.
+    collections_wanted: Arc<Mutex<Vec<i64>>>,
     /// The last run failed for a reason other than being offline, so the
     /// main loop should run it again at the next probe.
     retry: Arc<AtomicBool>,
@@ -1505,9 +1522,14 @@ impl Sync {
         check_updates(client, emit)?;
         let forced = self.collections_forced.swap(false, Ordering::Relaxed);
         if forced || self.collections_stale.load(Ordering::Relaxed) {
-            refresh_collections(client, self.profile_id, emit, forced, || {
-                self.collections_held.store(false, Ordering::Relaxed)
-            })?;
+            refresh_collections(
+                client,
+                self.profile_id,
+                emit,
+                forced,
+                &self.collections_wanted,
+                || self.collections_held.store(false, Ordering::Relaxed),
+            )?;
             self.collections_stale.store(false, Ordering::Relaxed);
         }
         Ok(())
@@ -2296,14 +2318,16 @@ fn cached_collections(client: &Client, profile_id: i64) -> Result<(Vec<Collectio
 }
 
 /// Fetches the collection list, sends it with the games already cached,
-/// then refetches the games one collection at a time, in display order,
-/// so each row fills in as it arrives. Only stale collections are
-/// refetched unless `all`. `sent` runs once the list is out.
+/// then refetches the games one collection at a time so each row fills in
+/// as it arrives: the `wanted` ones on screen first, then display order.
+/// Only stale collections are refetched unless `all`. `sent` runs once the
+/// list is out.
 fn refresh_collections(
     client: &Client,
     profile_id: i64,
     emit: &Emitter,
     all: bool,
+    wanted: &Mutex<Vec<i64>>,
     sent: impl FnOnce(),
 ) -> Result<()> {
     let (list, _) = collection_list(client, profile_id, true)?;
@@ -2313,14 +2337,21 @@ fn refresh_collections(
         shelf.refreshing = all || stale;
         shelves.push(shelf);
     }
-    let due: Vec<Collection> = shelves
+    let mut due: Vec<Collection> = shelves
         .iter()
         .filter(|s| s.refreshing)
         .map(|s| s.collection.clone())
         .collect();
     emit.send(Event::Collections(shelves));
     sent();
-    for collection in due {
+    while !due.is_empty() {
+        let next = wanted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find_map(|id| due.iter().position(|c| c.id == *id))
+            .unwrap_or(0);
+        let collection = due.remove(next);
         let (shelf, _) = collection_shelf(client, profile_id, collection, true)?;
         emit.send(Event::CollectionRefreshed(shelf));
     }
