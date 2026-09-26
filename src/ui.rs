@@ -566,7 +566,7 @@ impl Rows {
 
 /// Everything the home screen reads while drawing.
 pub struct LibraryView<'a> {
-    pub games: &'a std::collections::HashMap<i64, Game>,
+    pub games: &'a std::collections::HashMap<i64, std::sync::Arc<Game>>,
     pub installed: &'a std::collections::HashSet<i64>,
     pub installs: &'a std::collections::HashMap<i64, InstallState>,
     pub updatable: &'a std::collections::HashSet<i64>,
@@ -679,7 +679,7 @@ pub fn library(
     let focused_game = rows.focused_game();
     let wanted = focused_game
         .and_then(|id| games.get(&id))
-        .and_then(Game::animated_cover);
+        .and_then(|g| g.animated_cover());
     if rows.playing.as_ref().map(|p| p.url.as_str()) != wanted {
         rows.playing = None;
     }
@@ -801,7 +801,8 @@ pub fn library(
                     );
                     if !ui.is_rect_visible(rect)
                         && near.intersects(rect)
-                        && let Some(url) = games.get(&section.games[col]).and_then(tile_cover)
+                        && let Some(url) =
+                            games.get(&section.games[col]).and_then(|g| tile_cover(g))
                     {
                         covers.prefetch(ui.ctx(), url);
                     }

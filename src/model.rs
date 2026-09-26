@@ -307,7 +307,7 @@ pub enum Page {
 pub struct CollectionGames {
     pub collection: Collection,
     /// The games fetched so far, in collection order.
-    pub games: Vec<Game>,
+    pub games: Vec<std::sync::Arc<Game>>,
     /// Where the next page starts, while there is one.
     pub next_cursor: Option<String>,
     /// A fresh copy of the games is on its way.

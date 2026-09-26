@@ -1,6 +1,7 @@
 //! Application state and the window that draws it.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Command, Event};
@@ -59,7 +60,7 @@ pub struct App {
     notice: Option<(String, Instant)>,
     profile: Option<Profile>,
     /// Games the profile has a key for, in butler's order (newest first).
-    owned: Loadable<Vec<Game>>,
+    owned: Loadable<Vec<Arc<Game>>>,
     caves: Vec<Cave>,
     collections: Loadable<Vec<CollectionGames>>,
     /// Show only installed games on the Collections tab.
@@ -67,15 +68,19 @@ pub struct App {
     /// Per collection, every game that passes the page-wide filters, from
     /// butler's query; missing while unknown. Keyed by the filter asked
     /// with, so an answer to an old one is dropped.
-    collection_filtered: Option<(CollectionFilter, std::collections::HashMap<i64, Vec<Game>>)>,
+    collection_filtered: Option<(CollectionFilter, FilteredGames)>,
     /// The collections on screen, as last sent to the backend.
     collections_wanted: Vec<i64>,
     /// Collections with a page request in flight.
     collection_loading: std::collections::HashSet<i64>,
     /// The Collections tab's carousels, one per collection.
     pub collection_rows: ui::Rows,
-    /// Every game the screen can show, owned or installed, by id.
-    catalog: std::collections::HashMap<i64, Game>,
+    /// Every game the screen can show, owned or installed, by id. Added to
+    /// as lists arrive rather than rebuilt, since a big account has
+    /// thousands; cleared at sign-out.
+    catalog: std::collections::HashMap<i64, Arc<Game>>,
+    /// Which list each catalog entry came from, so a better one wins.
+    catalog_sources: std::collections::HashMap<i64, Source>,
     installed: std::collections::HashSet<i64>,
     /// butler's download queue and the latest progress per download.
     downloads: Vec<Download>,
@@ -279,6 +284,7 @@ impl App {
             owned: Loadable::Loading,
             caves: Vec::new(),
             catalog: Default::default(),
+            catalog_sources: Default::default(),
             installed: Default::default(),
             downloads: Vec::new(),
             progress: Default::default(),
@@ -405,7 +411,7 @@ impl App {
     }
 
     fn game(&self, id: i64) -> Option<&Game> {
-        self.catalog.get(&id)
+        self.catalog.get(&id).map(|g| &**g)
     }
 
     /// The cave and title under the launch curtain.
@@ -563,29 +569,20 @@ impl App {
         }
     }
 
-    fn rebuild_catalog(&mut self) {
-        let mut catalog = std::collections::HashMap::new();
-        for game in self.owned.get().into_iter().flatten() {
-            catalog.insert(game.id, game.clone());
+    /// Puts `games` in the catalog, replacing what came from the same or a
+    /// lesser list.
+    fn catalog_add<'a>(&mut self, source: Source, games: impl IntoIterator<Item = &'a Arc<Game>>) {
+        for game in games {
+            if self
+                .catalog_sources
+                .get(&game.id)
+                .is_some_and(|known| *known > source)
+            {
+                continue;
+            }
+            self.catalog.insert(game.id, Arc::clone(game));
+            self.catalog_sources.insert(game.id, source);
         }
-        for game in self.caves.iter().filter_map(|cave| cave.game.as_ref()) {
-            catalog.entry(game.id).or_insert_with(|| game.clone());
-        }
-        let collection_games = self
-            .collections
-            .get()
-            .into_iter()
-            .flatten()
-            .flat_map(|c| &c.games);
-        let installed_games = self
-            .collection_filtered
-            .iter()
-            .flat_map(|(_, m)| m.values())
-            .flatten();
-        for game in collection_games.chain(installed_games) {
-            catalog.entry(game.id).or_insert_with(|| game.clone());
-        }
-        self.catalog = catalog;
     }
 
     fn apply(&mut self, action: Action) {
@@ -1573,19 +1570,26 @@ impl App {
                 }
                 Event::SignedOut => self.sign_out(),
                 Event::OwnedGames(games) => {
-                    self.owned = Loadable::Loaded(games);
-                    self.rebuild_catalog();
+                    self.catalog_add(Source::Owned, &games);
+                    drop_later(std::mem::replace(&mut self.owned, Loadable::Loaded(games)));
                     self.rebuild_sections();
                 }
                 Event::Collections(collections) => {
-                    self.collections = Loadable::Loaded(collections);
+                    self.catalog_add(
+                        Source::Collection,
+                        collections.iter().flat_map(|c| &c.games),
+                    );
+                    drop_later(std::mem::replace(
+                        &mut self.collections,
+                        Loadable::Loaded(collections),
+                    ));
                     self.collection_loading.clear();
                     self.collection_filtered = None;
                     self.request_collection_filtered(None);
-                    self.rebuild_catalog();
                     self.rebuild_collection_sections();
                 }
                 Event::CollectionRefreshed(shelf) => {
+                    self.catalog_add(Source::Collection, &shelf.games);
                     let id = shelf.collection.id;
                     self.collection_loading.remove(&id);
                     if let Some(c) = self
@@ -1598,7 +1602,6 @@ impl App {
                         *c = shelf;
                     }
                     self.request_collection_filtered(Some(vec![id]));
-                    self.rebuild_catalog();
                     self.rebuild_collection_sections();
                 }
                 Event::Syncing(syncing) => {
@@ -1613,6 +1616,7 @@ impl App {
                     games,
                     next_cursor,
                 } => {
+                    self.catalog_add(Source::Collection, &games);
                     self.collection_loading.remove(&collection_id);
                     if let Some(c) = self
                         .collections
@@ -1627,7 +1631,6 @@ impl App {
                             .extend(games.into_iter().filter(|g| !known.contains(&g.id)));
                         c.next_cursor = next_cursor;
                     }
-                    self.rebuild_catalog();
                     self.rebuild_collection_sections();
                 }
                 Event::CollectionPageFailed {
@@ -1651,22 +1654,30 @@ impl App {
                 }
                 Event::CollectionsFiltered { filter, lists } => {
                     // An answer to a filter since changed is dropped.
-                    if let Some((current, known)) = &mut self.collection_filtered
-                        && *current == filter
+                    if self
+                        .collection_filtered
+                        .as_ref()
+                        .is_some_and(|(current, _)| *current == filter)
                     {
-                        known.extend(lists);
-                        self.rebuild_catalog();
+                        self.catalog_add(Source::Collection, lists.iter().flat_map(|(_, g)| g));
+                        if let Some((_, known)) = &mut self.collection_filtered {
+                            known.extend(lists);
+                        }
                         self.rebuild_collection_sections();
                     }
                 }
                 Event::Caves(caves) => {
+                    let games: Vec<Arc<Game>> = caves
+                        .iter()
+                        .filter_map(|c| c.game.clone().map(Arc::new))
+                        .collect();
+                    self.catalog_add(Source::Install, &games);
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
                     if self.collections_installed_only {
                         self.collection_filtered = None;
                         self.request_collection_filtered(None);
                     }
-                    self.rebuild_catalog();
                     self.rebuild_sections();
                     self.rebuild_collection_sections();
                 }
@@ -2196,7 +2207,8 @@ impl App {
         self.query.clear();
         self.rows = ui::Rows::default();
         self.collection_rows = ui::Rows::default();
-        self.rebuild_catalog();
+        self.catalog.clear();
+        self.catalog_sources.clear();
         self.rebuild_sections();
         self.rebuild_collection_sections();
     }
@@ -2940,4 +2952,25 @@ mod tests {
         assert_eq!(step((1, 0), Direction::Up), (0, 0));
         assert_eq!(step((1, 0), Direction::Home), (0, 0));
     }
+}
+
+/// Frees a replaced list on another thread; thousands of games take a few
+/// frames to free on a handheld.
+fn drop_later<T: Send + 'static>(value: T) {
+    let _ = std::thread::Builder::new()
+        .name("drop".into())
+        .spawn(move || drop(value));
+}
+
+/// Each collection's games that pass a filter, by collection id.
+type FilteredGames = std::collections::HashMap<i64, Vec<Arc<Game>>>;
+
+/// Where a catalog entry came from. A later variant's copy of a game
+/// replaces an earlier one's, never the reverse: the owned list's is the
+/// profile's own view of the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Collection,
+    Install,
+    Owned,
 }

@@ -146,7 +146,7 @@ pub enum Event {
     SignedIn(Profile),
     /// The profile is gone; a new sign-in follows.
     SignedOut,
-    OwnedGames(Vec<Game>),
+    OwnedGames(Vec<Arc<Game>>),
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
     CollectionsFailed(String),
@@ -160,7 +160,7 @@ pub enum Event {
     SyncFailed(String),
     CollectionPage {
         collection_id: i64,
-        games: Vec<Game>,
+        games: Vec<Arc<Game>>,
         next_cursor: Option<String>,
     },
     CollectionPageFailed {
@@ -169,7 +169,7 @@ pub enum Event {
     },
     CollectionsFiltered {
         filter: CollectionFilter,
-        lists: Vec<(i64, Vec<Game>)>,
+        lists: Vec<(i64, Vec<Arc<Game>>)>,
     },
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
@@ -1537,7 +1537,7 @@ impl Sync {
 
     /// The fresh owned list. While the library shows as loading, the
     /// pages butler has saved so far are shown as they land.
-    fn fetch_owned(&self, client: &Client, emit: &Emitter) -> Result<Vec<Game>> {
+    fn fetch_owned(&self, client: &Client, emit: &Emitter) -> Result<Vec<Arc<Game>>> {
         if !self.owned_held.load(Ordering::Relaxed) {
             return Ok(owned_games(client, self.profile_id, true)?.0);
         }
@@ -2253,7 +2253,7 @@ fn wait_for_retry(commands: &mpsc::Receiver<Command>) -> bool {
 }
 
 /// The games the profile owns and whether butler's cache of them is stale.
-fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Game>, bool)> {
+fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Arc<Game>>, bool)> {
     let mut games = Vec::new();
     let mut stale = false;
     let mut cursor = None;
@@ -2268,7 +2268,11 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
             ..Default::default()
         })?;
         stale |= page.stale == Some(true);
-        games.extend(page.items.into_iter().filter_map(|key| key.game));
+        games.extend(
+            page.items
+                .into_iter()
+                .filter_map(|key| key.game.map(Arc::new)),
+        );
         match page.next_cursor {
             Some(next) if !next.is_empty() => cursor = Some(next),
             _ => break,
@@ -2407,7 +2411,7 @@ fn collection_shelf(
         games: page
             .items
             .into_iter()
-            .filter_map(|item| item.game)
+            .filter_map(|item| item.game.map(Arc::new))
             .collect(),
         next_cursor: page.next_cursor.filter(|c| !c.is_empty()),
         refreshing: false,
@@ -2423,7 +2427,7 @@ fn collection_page(
     collection_id: i64,
     cursor: Option<String>,
     filters: Option<CollectionGamesFilters>,
-) -> Result<(Vec<Game>, Option<String>)> {
+) -> Result<(Vec<Arc<Game>>, Option<String>)> {
     let page = client.call(FetchCollectionGamesParams {
         profile_id,
         collection_id,
@@ -2436,7 +2440,7 @@ fn collection_page(
     Ok((
         page.items
             .into_iter()
-            .filter_map(|item| item.game)
+            .filter_map(|item| item.game.map(Arc::new))
             .collect(),
         page.next_cursor.filter(|c| !c.is_empty()),
     ))
