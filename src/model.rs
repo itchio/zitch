@@ -270,6 +270,8 @@ pub struct CollectionGames {
     pub games: Vec<Game>,
     /// Where the next page starts, while there is one.
     pub next_cursor: Option<String>,
+    /// A fresh copy of the games is on its way.
+    pub refreshing: bool,
 }
 
 /// The top-level screens, switched with the bumpers.

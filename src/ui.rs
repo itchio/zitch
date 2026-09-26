@@ -1171,6 +1171,11 @@ pub fn offline(ui: &mut Ui, m: &Metrics) {
     );
 }
 
+/// The header's sign that the library is being fetched.
+pub fn syncing(ui: &mut Ui, m: &Metrics) {
+    ui.add(egui::Spinner::new().size(m.body).color(DIM));
+}
+
 /// The page while the library loads: a spinner over the backend's
 /// progress line.
 pub fn loading(ui: &mut Ui, m: &Metrics, status: &str) {

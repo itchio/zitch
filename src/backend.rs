@@ -33,8 +33,8 @@ use crate::butlerd::types::{
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
-    Cave, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure, Profile,
-    Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
+    Cave, Collection, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure,
+    Profile, Prompt, UploadExt, UserExt, human_size, upload_platform_names, upload_runs_here,
 };
 
 pub struct Config {
@@ -145,6 +145,11 @@ pub enum Event {
     /// The profile's collections with their games, in butler's order.
     Collections(Vec<CollectionGames>),
     CollectionsFailed(String),
+    /// A fresh copy of one collection's first page, after
+    /// [`Event::Collections`] marked it refreshing.
+    CollectionRefreshed(CollectionGames),
+    /// A background sync started or ended.
+    Syncing(bool),
     /// A background refresh failed for a reason other than being offline.
     /// What is on screen came from the cache and stays; the loop retries.
     SyncFailed(String),
@@ -391,10 +396,17 @@ fn session(
     emit.send(Event::SignedIn(profile.clone()));
 
     emit.status("Loading library");
-    // butler answers from its cache, so this works offline too.
+    // butler answers from its cache, so this works offline too. A profile
+    // this database has never fetched has nothing cached, so the library
+    // shows as loading until the sync brings it.
     let (games, stale) = owned_games(client, profile.id, false)?;
-    emit.send(Event::OwnedGames(games));
-    emit.status("Library loaded");
+    let owned_held = games.is_empty() && stale;
+    if owned_held {
+        emit.status("Fetching your library");
+    } else {
+        emit.send(Event::OwnedGames(games));
+        emit.status("Library loaded");
+    }
     refresh_caves(client, emit);
     refresh_downloads(client, emit);
 
@@ -410,10 +422,13 @@ fn session(
     );
     let sync = Sync {
         profile_id: profile.id,
+        link: Arc::clone(link),
         online: Arc::new(AtomicBool::new(true)),
-        stale: Arc::new(AtomicBool::new(stale)),
+        owned_held: Arc::new(AtomicBool::new(owned_held)),
         collections_loaded: Arc::new(AtomicBool::new(false)),
+        collections_held: Arc::new(AtomicBool::new(false)),
         collections_stale: Arc::new(AtomicBool::new(false)),
+        collections_forced: Arc::new(AtomicBool::new(false)),
         retry: Arc::new(AtomicBool::new(false)),
     };
     sync.spawn(link, emit);
@@ -728,8 +743,7 @@ fn session(
                 crate::muos::stop();
             }
             Ok(Command::RefreshLibrary) => {
-                sync.stale.store(true, Ordering::Relaxed);
-                sync.collections_stale.store(true, Ordering::Relaxed);
+                sync.collections_forced.store(true, Ordering::Relaxed);
                 next_update_check = Instant::now() + UPDATE_EVERY;
                 emit.status("Refreshing library");
                 sync.spawn(link, emit);
@@ -1407,24 +1421,29 @@ fn answer_launch_request(
 
 /// Runs a butlerd call on its own connection and thread, so the main loop
 /// keeps turning while it works.
-/// The background work: collections, a fresh owned list when butler's
-/// cache is stale, and the update check. Runs at startup and again
-/// whenever the network comes back, and is what decides whether we are
-/// online. Everything here runs on one thread, one step after another:
-/// butlerd handles requests concurrently and two large writes at once
-/// can fail on a stale sqlite snapshot, which is what happened when the
-/// owned list and the collections refetched side by side.
+/// The background work: a fresh owned list, the update check, and the
+/// collections. Runs at startup and again whenever the network comes
+/// back, and is what decides whether we are online. The butler calls run
+/// one after another: butlerd handles requests concurrently and two large
+/// writes at once can fail on a stale sqlite snapshot, which is what
+/// happened when the owned list and the collections refetched side by
+/// side. The only thing alongside is [`poll_owned`], which reads.
 #[derive(Clone)]
 struct Sync {
     profile_id: i64,
+    link: Link,
     online: Arc<AtomicBool>,
-    /// Whether butler flagged the cached owned list stale, so a fresh
-    /// fetch is still owed.
-    stale: Arc<AtomicBool>,
-    /// The cached collections have been sent once.
+    /// The cached owned list was empty and stale, so it was held back and
+    /// the library shows as loading until the fresh one arrives.
+    owned_held: Arc<AtomicBool>,
+    /// The cached collections have been read once.
     collections_loaded: Arc<AtomicBool>,
+    /// Same as `owned_held`, for the collections.
+    collections_held: Arc<AtomicBool>,
     /// Butler flagged the cached collections stale.
     collections_stale: Arc<AtomicBool>,
+    /// The user asked for a refresh, so every collection is refetched.
+    collections_forced: Arc<AtomicBool>,
     /// The last run failed for a reason other than being offline, so the
     /// main loop should run it again at the next probe.
     retry: Arc<AtomicBool>,
@@ -1434,20 +1453,28 @@ impl Sync {
     fn spawn(&self, link: &Link, emit: &Emitter) {
         let sync = self.clone();
         self.retry.store(false, Ordering::Relaxed);
+        emit.send(Event::Syncing(true));
         spawn_op(
             "sync".into(),
             Arc::clone(link),
             emit.clone(),
             |error| Event::SyncFailed(format!("{error:#}")),
-            move |client, emit| match sync.run(client, emit) {
-                Ok(()) => Ok(()),
-                Err(error) if is_offline(&error) => {
-                    sync.set_online(emit, false);
-                    Ok(())
+            move |client, emit| {
+                let result = sync.run(client, emit);
+                if result.is_err() {
+                    sync.release_held(emit);
                 }
-                Err(error) => {
-                    sync.retry.store(true, Ordering::Relaxed);
-                    Err(error)
+                emit.send(Event::Syncing(false));
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) if is_offline(&error) => {
+                        sync.set_online(emit, false);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        sync.retry.store(true, Ordering::Relaxed);
+                        Err(error)
+                    }
                 }
             },
         );
@@ -1456,40 +1483,61 @@ impl Sync {
     fn run(&self, client: &Client, emit: &Emitter) -> Result<()> {
         if !self.collections_loaded.load(Ordering::Relaxed) {
             // Local reads only; the rows show before the network is probed.
-            match collections(client, self.profile_id, false) {
+            match cached_collections(client, self.profile_id) {
                 Ok((cached, stale)) => {
-                    emit.send(Event::Collections(cached));
+                    if cached.is_empty() && stale {
+                        self.collections_held.store(true, Ordering::Relaxed);
+                    } else {
+                        emit.send(Event::Collections(cached));
+                    }
                     self.collections_loaded.store(true, Ordering::Relaxed);
                     self.collections_stale.store(stale, Ordering::Relaxed);
                 }
                 Err(error) => emit.send(Event::CollectionsFailed(format!("{error:#}"))),
             }
         }
-        // A one-item fresh fetch is the cheapest call that must reach the
-        // API, so it doubles as the network probe.
-        client.call(FetchProfileOwnedKeysParams {
-            profile_id: self.profile_id,
-            limit: Some(1),
-            fresh: Some(true),
-            ..Default::default()
-        })?;
+        // Reaches the API, so it doubles as the network probe.
+        let games = self.fetch_owned(client, emit)?;
         self.set_online(emit, true);
-        // Before the slow refetches below, so updates show within seconds
-        // of the library.
+        emit.send(Event::OwnedGames(games));
+        self.owned_held.store(false, Ordering::Relaxed);
+        // Before the collections, which take a while for a big account.
         check_updates(client, emit)?;
-        if self.stale.load(Ordering::Relaxed) {
-            // The cached list is shown already; the itch app also refetches
-            // when butler flags it stale, so new purchases appear.
-            let (games, _) = owned_games(client, self.profile_id, true)?;
-            emit.send(Event::OwnedGames(games));
-            self.stale.store(false, Ordering::Relaxed);
-        }
-        if self.collections_stale.load(Ordering::Relaxed) {
-            let (fresh, _) = collections(client, self.profile_id, true)?;
-            emit.send(Event::Collections(fresh));
+        let forced = self.collections_forced.swap(false, Ordering::Relaxed);
+        if forced || self.collections_stale.load(Ordering::Relaxed) {
+            refresh_collections(client, self.profile_id, emit, forced, || {
+                self.collections_held.store(false, Ordering::Relaxed)
+            })?;
             self.collections_stale.store(false, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// The fresh owned list. While the library shows as loading, the
+    /// pages butler has saved so far are shown as they land.
+    fn fetch_owned(&self, client: &Client, emit: &Emitter) -> Result<Vec<Game>> {
+        if !self.owned_held.load(Ordering::Relaxed) {
+            return Ok(owned_games(client, self.profile_id, true)?.0);
+        }
+        let done = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| poll_owned(&self.link, emit.clone(), self.profile_id, &done));
+            let result = owned_games(client, self.profile_id, true);
+            done.store(true, Ordering::Relaxed);
+            result
+        });
+        Ok(result?.0)
+    }
+
+    /// Shows what was held back, empty, so a failed sync ends on an empty
+    /// library rather than a spinner.
+    fn release_held(&self, emit: &Emitter) {
+        if self.owned_held.swap(false, Ordering::Relaxed) {
+            emit.send(Event::OwnedGames(Vec::new()));
+        }
+        if self.collections_held.swap(false, Ordering::Relaxed) {
+            emit.send(Event::Collections(Vec::new()));
+        }
     }
 
     fn set_online(&self, emit: &Emitter, online: bool) {
@@ -2191,8 +2239,10 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
         let page = client.call(FetchProfileOwnedKeysParams {
             profile_id,
             limit: Some(100),
+            // The first page's fresh fetch saves the whole list; the
+            // rest read it back.
+            fresh: Some(fresh && cursor.is_none()),
             cursor: cursor.take(),
-            fresh: Some(fresh),
             ..Default::default()
         })?;
         stale |= page.stale == Some(true);
@@ -2205,13 +2255,83 @@ fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Gam
     Ok((games, stale && !fresh))
 }
 
+/// Sends the owned list as butler saves it, page by page, until `done`.
+/// Reads on its own connection while the fresh fetch writes.
+fn poll_owned(link: &Link, emit: Emitter, profile_id: i64, done: &AtomicBool) {
+    let Ok(client) = connect(link) else {
+        return;
+    };
+    let mut shown = 0;
+    loop {
+        for _ in 0..5 {
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        match owned_games(&client, profile_id, false) {
+            Ok((games, _)) if games.len() > shown => {
+                shown = games.len();
+                emit.send(Event::OwnedGames(games));
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("reading owned games: {error:#}"),
+        }
+    }
+}
+
 const COLLECTION_PAGE: i64 = 100;
 
-fn collections(
+/// The cached collections, each with its first page of games, and
+/// whether any of it is stale.
+fn cached_collections(client: &Client, profile_id: i64) -> Result<(Vec<CollectionGames>, bool)> {
+    let (list, mut stale) = collection_list(client, profile_id, false)?;
+    let mut shelves = Vec::with_capacity(list.len());
+    for collection in list {
+        let (shelf, shelf_stale) = collection_shelf(client, profile_id, collection, false)?;
+        stale |= shelf_stale;
+        shelves.push(shelf);
+    }
+    Ok((shelves, stale))
+}
+
+/// Fetches the collection list, sends it with the games already cached,
+/// then refetches the games one collection at a time, in display order,
+/// so each row fills in as it arrives. Only stale collections are
+/// refetched unless `all`. `sent` runs once the list is out.
+fn refresh_collections(
+    client: &Client,
+    profile_id: i64,
+    emit: &Emitter,
+    all: bool,
+    sent: impl FnOnce(),
+) -> Result<()> {
+    let (list, _) = collection_list(client, profile_id, true)?;
+    let mut shelves = Vec::with_capacity(list.len());
+    for collection in list {
+        let (mut shelf, stale) = collection_shelf(client, profile_id, collection, false)?;
+        shelf.refreshing = all || stale;
+        shelves.push(shelf);
+    }
+    let due: Vec<Collection> = shelves
+        .iter()
+        .filter(|s| s.refreshing)
+        .map(|s| s.collection.clone())
+        .collect();
+    emit.send(Event::Collections(shelves));
+    sent();
+    for collection in due {
+        let (shelf, _) = collection_shelf(client, profile_id, collection, true)?;
+        emit.send(Event::CollectionRefreshed(shelf));
+    }
+    Ok(())
+}
+
+fn collection_list(
     client: &Client,
     profile_id: i64,
     fresh: bool,
-) -> Result<(Vec<CollectionGames>, bool)> {
+) -> Result<(Vec<Collection>, bool)> {
     let mut collections = Vec::new();
     let mut stale = false;
     let mut cursor = None;
@@ -2219,8 +2339,10 @@ fn collections(
         let page = client.call(FetchProfileCollectionsParams {
             profile_id,
             limit: Some(100),
+            // The first page's fresh fetch saves the whole list; the
+            // rest read it back.
+            fresh: Some(fresh && cursor.is_none()),
             cursor: cursor.take(),
-            fresh: Some(fresh),
             ..Default::default()
         })?;
         stale |= page.stale == Some(true);
@@ -2230,30 +2352,36 @@ fn collections(
             _ => break,
         }
     }
-    let mut shelves = Vec::with_capacity(collections.len());
-    for collection in collections {
-        // One page each; rows fetch the rest as they are scrolled. With
-        // `fresh`, butler pulls the whole collection into its database on
-        // this call, so later pages are local.
-        let page = client.call(FetchCollectionGamesParams {
-            profile_id,
-            collection_id: collection.id,
-            limit: Some(COLLECTION_PAGE),
-            fresh: Some(fresh),
-            ..Default::default()
-        })?;
-        stale |= page.stale == Some(true);
-        shelves.push(CollectionGames {
-            collection,
-            games: page
-                .items
-                .into_iter()
-                .filter_map(|item| item.game)
-                .collect(),
-            next_cursor: page.next_cursor.filter(|c| !c.is_empty()),
-        });
-    }
-    Ok((shelves, stale && !fresh))
+    Ok((collections, stale))
+}
+
+/// A collection's first page of games; rows fetch the rest as they are
+/// scrolled. With `fresh`, butler pulls the whole collection into its
+/// database on this call, so later pages are local.
+fn collection_shelf(
+    client: &Client,
+    profile_id: i64,
+    collection: Collection,
+    fresh: bool,
+) -> Result<(CollectionGames, bool)> {
+    let page = client.call(FetchCollectionGamesParams {
+        profile_id,
+        collection_id: collection.id,
+        limit: Some(COLLECTION_PAGE),
+        fresh: Some(fresh),
+        ..Default::default()
+    })?;
+    let shelf = CollectionGames {
+        collection,
+        games: page
+            .items
+            .into_iter()
+            .filter_map(|item| item.game)
+            .collect(),
+        next_cursor: page.next_cursor.filter(|c| !c.is_empty()),
+        refreshing: false,
+    };
+    Ok((shelf, page.stale == Some(true)))
 }
 
 /// One page of a collection's games from butler's database, and the cursor

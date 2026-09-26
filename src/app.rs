@@ -137,6 +137,8 @@ pub struct App {
     up_to_date_at: Option<Instant>,
     /// A library refresh the user asked for is still running.
     refreshing: bool,
+    /// A background sync is running; the header shows a spinner.
+    syncing: bool,
     minimize_while_playing: bool,
     handoff: bool,
     /// For window commands raised from events, outside a frame.
@@ -314,6 +316,7 @@ impl App {
             battery: Battery::new(),
             up_to_date_at: None,
             refreshing: false,
+            syncing: false,
             minimize_while_playing,
             handoff,
             ctx: ctx.clone(),
@@ -1279,12 +1282,14 @@ impl App {
             return;
         };
         let installed_only = self.collections_installed_only;
+        let refreshing = collections.iter().any(|c| c.refreshing);
         let mut sections: Vec<ui::Section> = collections
             .iter()
             .map(|c| {
                 // Butler's answer covers the whole collection; until it
-                // arrives, the pages fetched so far stand in.
-                let exact = installed_only
+                // arrives, the pages fetched so far stand in. It is asked
+                // again once a refresh ends.
+                let exact = (installed_only && !c.refreshing)
                     .then(|| self.collection_installed.as_ref()?.get(&c.collection.id))
                     .flatten();
                 let listed = exact.unwrap_or(&c.games);
@@ -1297,6 +1302,7 @@ impl App {
                 let more = exact.is_none() && c.next_cursor.is_some();
                 let note = match (games.is_empty(), installed_only) {
                     _ if more => None,
+                    _ if c.refreshing => Some("Loading…".to_string()),
                     _ if c.games.is_empty() => Some("Empty collection".to_string()),
                     (true, true) => Some("Nothing installed from this collection".to_string()),
                     (true, false) => Some("Nothing here runs on this device".to_string()),
@@ -1311,8 +1317,34 @@ impl App {
                 }
             })
             .collect();
-        sections.sort_by_key(|s| s.games.is_empty() && !s.more);
+        // Rows stay put while a refresh fills them in, then empty ones
+        // sink all at once.
+        if !refreshing {
+            sections.sort_by_key(|s| s.games.is_empty() && !s.more);
+        }
         self.collection_rows.set_sections(sections);
+    }
+
+    /// Clears what a sync left refreshing, when it stopped early, and asks
+    /// again which collection games are installed.
+    fn finish_collection_refresh(&mut self) {
+        let Some(collections) = self.collections.get_mut() else {
+            return;
+        };
+        let mut stopped = false;
+        for c in collections.iter_mut() {
+            stopped |= std::mem::take(&mut c.refreshing);
+        }
+        let incomplete = self.collection_installed.as_ref().is_some_and(|installed| {
+            collections
+                .iter()
+                .any(|c| !installed.contains_key(&c.collection.id))
+        });
+        if stopped || incomplete {
+            self.collection_installed = None;
+            self.request_collection_installed();
+        }
+        self.rebuild_collection_sections();
     }
 
     /// Asks butler which games in each collection are installed, when the
@@ -1489,7 +1521,6 @@ impl App {
                 }
                 Event::SignedOut => self.sign_out(),
                 Event::OwnedGames(games) => {
-                    self.refreshing = false;
                     self.owned = Loadable::Loaded(games);
                     self.rebuild_catalog();
                     self.rebuild_sections();
@@ -1501,6 +1532,32 @@ impl App {
                     self.request_collection_installed();
                     self.rebuild_catalog();
                     self.rebuild_collection_sections();
+                }
+                Event::CollectionRefreshed(shelf) => {
+                    let id = shelf.collection.id;
+                    self.collection_loading.remove(&id);
+                    if let Some(c) = self
+                        .collections
+                        .get_mut()
+                        .into_iter()
+                        .flatten()
+                        .find(|c| c.collection.id == id)
+                    {
+                        *c = shelf;
+                    }
+                    // Asked again when the sync ends.
+                    if let Some(installed) = &mut self.collection_installed {
+                        installed.remove(&id);
+                    }
+                    self.rebuild_catalog();
+                    self.rebuild_collection_sections();
+                }
+                Event::Syncing(syncing) => {
+                    self.syncing = syncing;
+                    if !syncing {
+                        self.refreshing = false;
+                        self.finish_collection_refresh();
+                    }
                 }
                 Event::CollectionPage {
                     collection_id,
@@ -2423,6 +2480,8 @@ impl App {
                         }
                         if !self.online {
                             ui::offline(ui, &m);
+                        } else if self.syncing {
+                            ui::syncing(ui, &m);
                         }
                     });
                 });
