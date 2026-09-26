@@ -6,12 +6,16 @@
 //! policy uses, so later runs decode a small file instead of the original.
 //! Textures live in a byte-budgeted LRU and the disk cache is pruned by
 //! age, both sized by the [`Policy`] in force.
+//!
+//! Work is asked for every frame by whatever is drawn. The workers take
+//! the most important request first, and a request nothing has asked for
+//! in the last couple of frames is dropped before it starts, so covers
+//! scrolled away or filtered out stop costing anything.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use egui::{ColorImage, TextureHandle};
@@ -86,6 +90,17 @@ pub enum Variant {
     Detail,
 }
 
+/// How soon a cover is needed; the workers take the highest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Priority {
+    /// Just past the edge of the screen.
+    Soon,
+    /// On screen.
+    Shown,
+    /// The page's one large cover.
+    Detail,
+}
+
 /// Frames of an animated cover, with how long each stays up.
 pub struct Animation {
     pub frames: Vec<Arc<ColorImage>>,
@@ -126,23 +141,69 @@ struct Slot {
 #[derive(Default)]
 struct Textures {
     ready: HashMap<Key, Slot>,
-    pending: HashSet<Key>,
     failed: HashMap<Key, Instant>,
     used: usize,
-    frame: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Job {
-    Texture {
-        key: Key,
-        policy: Policy,
-        ctx: egui::Context,
-    },
-    Animation {
-        url: String,
-        policy: Policy,
-        ctx: egui::Context,
-    },
+    Texture(Key),
+    Animation(String),
+}
+
+struct Request {
+    priority: Priority,
+    /// The last frame that asked.
+    frame: u64,
+    /// Order of first asking, so equal priorities go in drawing order.
+    seq: u64,
+    ctx: egui::Context,
+}
+
+#[derive(Default)]
+struct Queue {
+    waiting: HashMap<Job, Request>,
+    /// Taken by a worker and not finished.
+    running: HashSet<Job>,
+    seq: u64,
+}
+
+impl Queue {
+    /// Asks for `job`, raising its priority if it is already waiting.
+    /// False when it is running, so nothing new was queued.
+    fn ask(&mut self, job: Job, priority: Priority, frame: u64, ctx: &egui::Context) -> bool {
+        if self.running.contains(&job) {
+            return false;
+        }
+        if let Some(request) = self.waiting.get_mut(&job) {
+            request.priority = request.priority.max(priority);
+            request.frame = frame;
+            return false;
+        }
+        self.seq += 1;
+        self.waiting.insert(
+            job,
+            Request {
+                priority,
+                frame,
+                seq: self.seq,
+                ctx: ctx.clone(),
+            },
+        );
+        true
+    }
+
+    /// The most important waiting job, moved to running.
+    fn take(&mut self) -> Option<(Job, egui::Context)> {
+        let job = self
+            .waiting
+            .iter()
+            .max_by_key(|(_, r)| (r.priority, r.frame, std::cmp::Reverse(r.seq)))
+            .map(|(job, _)| job.clone())?;
+        let request = self.waiting.remove(&job)?;
+        self.running.insert(job.clone());
+        Some((job, request.ctx))
+    }
 }
 
 struct Inner {
@@ -150,7 +211,11 @@ struct Inner {
     /// Only the focused tile animates, so this holds one finished
     /// animation at a time plus whatever is being decoded.
     animations: Mutex<HashMap<String, Entry<Animation>>>,
-    queue: Mutex<mpsc::Sender<Job>>,
+    queue: Mutex<Queue>,
+    /// Wakes a worker when a job is queued.
+    queued: Condvar,
+    /// Frames drawn so far, for recency.
+    frame: AtomicU64,
     policy: Mutex<Policy>,
     cache_dir: PathBuf,
     /// Bytes on disk, from a scan at startup plus every write since.
@@ -170,13 +235,13 @@ impl CoverLoader {
         if let Err(error) = std::fs::create_dir_all(&cache_dir) {
             log::warn!("no cover cache at {}: {error}", cache_dir.display());
         }
-        let (tx, rx) = mpsc::channel::<Job>();
-        let rx = Arc::new(Mutex::new(rx));
         let loader = Self {
             inner: Arc::new(Inner {
                 textures: Mutex::default(),
                 animations: Mutex::default(),
-                queue: Mutex::new(tx),
+                queue: Mutex::default(),
+                queued: Condvar::new(),
+                frame: AtomicU64::new(0),
                 policy: Mutex::new(policy),
                 cache_dir,
                 disk_used: AtomicU64::new(0),
@@ -184,17 +249,10 @@ impl CoverLoader {
             }),
         };
         for n in 0..WORKERS {
-            let rx = Arc::clone(&rx);
             let inner = Arc::clone(&loader.inner);
             std::thread::Builder::new()
                 .name(format!("cover-{n}"))
-                .spawn(move || {
-                    loop {
-                        let job = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
-                        let Ok(job) = job else { break };
-                        inner.complete(job);
-                    }
-                })
+                .spawn(move || inner.work())
                 .expect("spawning cover worker");
         }
         let inner = Arc::clone(&loader.inner);
@@ -219,12 +277,32 @@ impl CoverLoader {
         }
     }
 
-    /// The cover scaled for `variant`, once loaded. Asking starts the work.
+    /// The cover scaled for `variant`, once loaded. Asking starts the work,
+    /// and asking again each frame keeps it wanted.
     pub fn texture(
         &self,
         ctx: &egui::Context,
         url: &str,
         variant: Variant,
+    ) -> Option<TextureHandle> {
+        let priority = match variant {
+            Variant::Thumb => Priority::Shown,
+            Variant::Detail => Priority::Detail,
+        };
+        self.request(ctx, url, variant, priority)
+    }
+
+    /// Loads a thumb about to scroll into view, behind everything shown.
+    pub fn prefetch(&self, ctx: &egui::Context, url: &str) {
+        self.request(ctx, url, Variant::Thumb, Priority::Soon);
+    }
+
+    fn request(
+        &self,
+        ctx: &egui::Context,
+        url: &str,
+        variant: Variant,
+        priority: Priority,
     ) -> Option<TextureHandle> {
         let policy = self.policy();
         let width = match variant {
@@ -232,49 +310,41 @@ impl CoverLoader {
             Variant::Detail => policy.detail_width,
         };
         let key = (url.to_string(), width);
+        let frame = self.inner.frame.load(Ordering::Relaxed);
         let mut textures = self
             .inner
             .textures
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let frame = textures.frame;
         if let Some(slot) = textures.ready.get_mut(&key) {
             slot.last_used = frame;
             return Some(slot.handle.clone());
         }
-        if textures.pending.contains(&key) {
-            return None;
+        if let Some(failed_at) = textures.failed.get(&key) {
+            if failed_at.elapsed() < RETRY_AFTER {
+                return None;
+            }
+            textures.failed.remove(&key);
         }
-        if let Some(failed_at) = textures.failed.get(&key)
-            && failed_at.elapsed() < RETRY_AFTER
-        {
-            return None;
-        }
-        textures.failed.remove(&key);
-        textures.pending.insert(key.clone());
         drop(textures);
-        self.enqueue(Job::Texture {
-            key,
-            policy,
-            ctx: ctx.clone(),
-        });
+        self.enqueue(Job::Texture(key), priority, frame, ctx);
         None
     }
 
     /// Drops the least recently drawn textures until the budget holds. Call
     /// once per frame after drawing.
     pub fn end_frame(&self) {
+        let frame = self.inner.frame.fetch_add(1, Ordering::Relaxed) + 1;
+        self.drop_unwanted(frame);
         let budget = self.policy().texture_budget;
         let mut textures = self
             .inner
             .textures
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        textures.frame += 1;
         if textures.used <= budget {
             return;
         }
-        let frame = textures.frame;
         let mut by_age: Vec<(u64, Key)> = textures
             .ready
             .iter()
@@ -319,32 +389,93 @@ impl CoverLoader {
         }
         animations.insert(url.to_string(), Entry::Pending);
         drop(animations);
-        self.enqueue(Job::Animation {
-            url: url.to_string(),
-            policy,
-            ctx: ctx.clone(),
-        });
+        let frame = self.inner.frame.load(Ordering::Relaxed);
+        self.enqueue(Job::Animation(url.to_string()), Priority::Shown, frame, ctx);
         None
     }
 
-    fn enqueue(&self, job: Job) {
-        let _ = self
-            .inner
-            .queue
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .send(job);
+    fn enqueue(&self, job: Job, priority: Priority, frame: u64, ctx: &egui::Context) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|p| p.into_inner());
+        if queue.ask(job, priority, frame, ctx) {
+            self.inner.queued.notify_one();
+        }
+    }
+
+    /// Forgets requests nothing asked for this frame or the last.
+    fn drop_unwanted(&self, frame: u64) {
+        let mut dropped = Vec::new();
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let before = queue.waiting.len();
+        queue.waiting.retain(|job, request| {
+            let keep = request.frame + 2 >= frame;
+            if !keep && let Job::Animation(url) = job {
+                dropped.push(url.clone());
+            }
+            keep
+        });
+        if queue.waiting.len() < before {
+            log::debug!(
+                "covers: dropped {} no longer shown, {} waiting",
+                before - queue.waiting.len(),
+                queue.waiting.len()
+            );
+        }
+        drop(queue);
+        // A dropped animation is asked for afresh when focus comes back.
+        if !dropped.is_empty() {
+            let mut animations = self
+                .inner
+                .animations
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for url in dropped {
+                if matches!(animations.get(&url), Some(Entry::Pending)) {
+                    animations.remove(&url);
+                }
+            }
+        }
     }
 }
 
 impl Inner {
-    fn complete(&self, job: Job) {
+    fn work(&self) {
+        loop {
+            let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            let (job, ctx) = loop {
+                if let Some(next) = queue.take() {
+                    break next;
+                }
+                queue = self.queued.wait(queue).unwrap_or_else(|p| p.into_inner());
+            };
+            drop(queue);
+            self.complete(job.clone(), ctx);
+            // After the result is stored, so an asker sees one or the other.
+            self.queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .running
+                .remove(&job);
+        }
+    }
+
+    fn complete(&self, job: Job, ctx: egui::Context) {
+        let policy = *self.policy.lock().unwrap_or_else(|p| p.into_inner());
         match job {
-            Job::Texture { key, policy, ctx } => {
+            Job::Texture(key) => {
                 let (url, width) = &key;
+                // Asked for again between finishing and leaving the running
+                // set; it is here already.
+                if self
+                    .textures
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .ready
+                    .contains_key(&key)
+                {
+                    return;
+                }
                 let outcome = self.variant(url, *width, &policy);
                 let mut textures = self.textures.lock().unwrap_or_else(|p| p.into_inner());
-                textures.pending.remove(&key);
                 match outcome {
                     Ok(image) => {
                         let bytes = image.pixels.len() * 4;
@@ -354,7 +485,7 @@ impl Inner {
                             egui::TextureOptions::LINEAR,
                         );
                         textures.used += bytes;
-                        let frame = textures.frame;
+                        let frame = self.frame.load(Ordering::Relaxed);
                         textures.ready.insert(
                             key,
                             Slot {
@@ -372,7 +503,7 @@ impl Inner {
                 drop(textures);
                 ctx.request_repaint();
             }
-            Job::Animation { url, policy, ctx } => {
+            Job::Animation(url) => {
                 let started = Instant::now();
                 let outcome = self
                     .fetch(&url, &policy)
@@ -681,4 +812,49 @@ fn cache_name(url: &str) -> String {
         .filter(|ext| ext.len() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()))
         .unwrap_or("img");
     format!("{}.{ext}", hash(url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thumb(url: &str) -> Job {
+        Job::Texture((url.to_string(), 200))
+    }
+
+    #[test]
+    fn queue_takes_detail_before_shown_before_soon() {
+        let ctx = egui::Context::default();
+        let mut queue = Queue::default();
+        queue.ask(thumb("soon"), Priority::Soon, 1, &ctx);
+        queue.ask(thumb("a"), Priority::Shown, 1, &ctx);
+        queue.ask(thumb("b"), Priority::Shown, 1, &ctx);
+        queue.ask(thumb("detail"), Priority::Detail, 1, &ctx);
+        let order: Vec<Job> = std::iter::from_fn(|| queue.take().map(|(job, _)| job)).collect();
+        assert_eq!(
+            order,
+            vec![thumb("detail"), thumb("a"), thumb("b"), thumb("soon")]
+        );
+    }
+
+    #[test]
+    fn queue_prefers_what_was_asked_for_last() {
+        let ctx = egui::Context::default();
+        let mut queue = Queue::default();
+        queue.ask(thumb("old"), Priority::Shown, 1, &ctx);
+        queue.ask(thumb("new"), Priority::Shown, 5, &ctx);
+        assert_eq!(queue.take().map(|(job, _)| job), Some(thumb("new")));
+    }
+
+    #[test]
+    fn queue_raises_priority_and_skips_running_jobs() {
+        let ctx = egui::Context::default();
+        let mut queue = Queue::default();
+        assert!(queue.ask(thumb("a"), Priority::Soon, 1, &ctx));
+        assert!(!queue.ask(thumb("a"), Priority::Shown, 1, &ctx));
+        assert_eq!(queue.waiting[&thumb("a")].priority, Priority::Shown);
+        queue.take();
+        assert!(!queue.ask(thumb("a"), Priority::Shown, 2, &ctx));
+        assert!(queue.waiting.is_empty());
+    }
 }

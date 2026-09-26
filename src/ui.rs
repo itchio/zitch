@@ -349,6 +349,8 @@ impl Metrics {
 /// How many tiles before a row's end the next page is asked for, so a
 /// steady scroll never reaches the spinner.
 const MORE_LOOKAHEAD: usize = 12;
+/// Tiles past each end of a row's view whose covers load ahead.
+const PREFETCH_TILES: usize = 2;
 
 /// One finger on the home screen. egui's own drag-to-scroll would give the
 /// gesture to whichever row it started on and drop the vertical part, so
@@ -786,6 +788,28 @@ pub fn library(
                 // the whole library.
                 let first = ((viewport.min.x - ring) / stride).floor().max(0.0) as usize;
                 let last = (((viewport.max.x - ring) / stride).ceil() as usize).min(slots);
+                // Covers a move or two away load behind the ones shown: the
+                // next tiles along, and rows just above and below.
+                let near = ui
+                    .clip_rect()
+                    .expand2(vec2(0.0, tile_height + m.header_height));
+                for col in first.saturating_sub(PREFETCH_TILES)..(last + PREFETCH_TILES).min(count)
+                {
+                    let rect = Rect::from_min_size(
+                        strip_rect.min + vec2(ring + col as f32 * stride, ring),
+                        vec2(tile_width, cover_height),
+                    );
+                    if !ui.is_rect_visible(rect)
+                        && near.intersects(rect)
+                        && let Some(url) = games.get(&section.games[col]).and_then(tile_cover)
+                    {
+                        covers.prefetch(ui.ctx(), url);
+                    }
+                }
+                // Rows off screen draw nothing.
+                if !ui.is_rect_visible(strip_rect) {
+                    return;
+                }
                 if section.more && (last > count || focused_col + MORE_LOOKAHEAD >= count) {
                     actions.push(Action::MoreGames { row });
                 }
@@ -985,15 +1009,8 @@ fn draw_tile(
             paint_frame(ui, playing, cover, radius);
             true
         }
-        None => {
-            // stillCoverUrl is the static frame of an animated cover; those
-            // gifs run to megabytes and only play while focused.
-            let url = game
-                .still_cover_url
-                .as_deref()
-                .or(game.cover_url.as_deref());
-            url.is_some_and(|url| paint_cover(ui, covers, url, Variant::Thumb, cover, radius))
-        }
+        None => tile_cover(game)
+            .is_some_and(|url| paint_cover(ui, covers, url, Variant::Thumb, cover, radius)),
     };
     if !painted {
         let fill = if focused { TILE_HOVER } else { TILE_BG };
@@ -1075,8 +1092,16 @@ fn paint_frame(ui: &Ui, playing: &mut Playing, rect: Rect, radius: CornerRadius)
     }
 }
 
+/// The still cover a tile draws. stillCoverUrl is the static frame of an
+/// animated cover; those gifs run to megabytes and only play while focused.
+fn tile_cover(game: &Game) -> Option<&str> {
+    game.still_cover_url
+        .as_deref()
+        .or(game.cover_url.as_deref())
+}
+
 /// Paints the cover cropped to fill `rect`, or returns false while it is
-/// still loading or has failed.
+/// still loading or has failed. Covers off screen are not asked for.
 fn paint_cover(
     ui: &Ui,
     covers: &CoverLoader,
@@ -1085,6 +1110,9 @@ fn paint_cover(
     rect: Rect,
     radius: CornerRadius,
 ) -> bool {
+    if !ui.is_rect_visible(rect) {
+        return false;
+    }
     let Some(texture) = covers.texture(ui.ctx(), url, variant) else {
         return false;
     };
@@ -2868,11 +2896,7 @@ pub fn downloads(
                     rect.left_top() + vec2(pad, pad),
                     vec2(thumb_width, thumb_height),
                 );
-                let url = row.game.and_then(|game| {
-                    game.still_cover_url
-                        .as_deref()
-                        .or(game.cover_url.as_deref())
-                });
+                let url = row.game.and_then(tile_cover);
                 if !url.is_some_and(|url| {
                     paint_cover(ui, view.covers, url, Variant::Thumb, thumb, radius)
                 }) {
