@@ -1412,6 +1412,14 @@ impl App {
         });
     }
 
+    /// Whether `ask` is the latest question about this collection under
+    /// this filter; answers to older ones are dropped.
+    fn is_latest_ask(&self, filter: CollectionFilter, ask: u64, collection_id: i64) -> bool {
+        self.collection_filtered
+            .as_ref()
+            .is_some_and(|f| f.filter == filter && f.asked.get(&collection_id) == Some(&ask))
+    }
+
     /// Tells the backend which collections are on screen, so a refresh
     /// fetches those first.
     fn want_visible_collections(&mut self) {
@@ -1680,25 +1688,27 @@ impl App {
                     collection_id,
                     games,
                 } => {
-                    // Only the latest question for this filter and
-                    // collection is answered.
-                    let latest = self.collection_filtered.as_ref().is_some_and(|f| {
-                        f.filter == filter && f.asked.get(&collection_id) == Some(&ask)
-                    });
-                    if latest {
-                        if let Ok(games) = &games {
-                            self.catalog_add(Source::Collection, games);
-                        }
+                    if self.is_latest_ask(filter, ask, collection_id) {
+                        self.catalog_add(Source::Collection, &games);
                         if let Some(filtered) = &mut self.collection_filtered {
-                            match games {
-                                Ok(games) => {
-                                    filtered.games.insert(collection_id, games);
-                                }
-                                Err(_) => {
-                                    filtered.failed.insert(collection_id);
-                                }
-                            }
+                            filtered.games.insert(collection_id, games);
                         }
+                        self.rebuild_collection_sections();
+                    }
+                }
+                Event::CollectionsFilterFailed {
+                    filter,
+                    ask,
+                    collection_ids,
+                } => {
+                    let failed: Vec<i64> = collection_ids
+                        .into_iter()
+                        .filter(|id| self.is_latest_ask(filter, ask, *id))
+                        .collect();
+                    if let Some(filtered) = &mut self.collection_filtered
+                        && !failed.is_empty()
+                    {
+                        filtered.failed.extend(failed);
                         self.rebuild_collection_sections();
                     }
                 }

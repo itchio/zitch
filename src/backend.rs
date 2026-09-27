@@ -173,7 +173,13 @@ pub enum Event {
         filter: CollectionFilter,
         ask: u64,
         collection_id: i64,
-        games: Result<Vec<Arc<Game>>, String>,
+        games: Vec<Arc<Game>>,
+    },
+    /// Filtered queries that failed, so those rows stop waiting on them.
+    CollectionsFilterFailed {
+        filter: CollectionFilter,
+        ask: u64,
+        collection_ids: Vec<i64>,
     },
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
@@ -549,25 +555,39 @@ fn session(
                 collection_ids,
             }) => {
                 let profile_id = profile.id;
+                // Not reaching butler at all fails every collection asked.
+                let all = collection_ids.clone();
                 spawn_op(
                     "collections-filtered".into(),
                     Arc::clone(link),
                     emit.clone(),
-                    |error| Event::Error(format!("{error:#}")),
+                    move |error| {
+                        log::warn!("filtering collections: {error:#}");
+                        Event::CollectionsFilterFailed {
+                            filter,
+                            ask,
+                            collection_ids: all.clone(),
+                        }
+                    },
                     move |client, emit| {
                         let query = filter.to_butler();
                         for collection_id in collection_ids {
-                            let games = filtered_games(client, profile_id, collection_id, &query)
-                                .map_err(|error| format!("{error:#}"));
-                            if let Err(error) = &games {
-                                log::warn!("filtering collection {collection_id}: {error}");
+                            match filtered_games(client, profile_id, collection_id, &query) {
+                                Ok(games) => emit.send(Event::CollectionFiltered {
+                                    filter,
+                                    ask,
+                                    collection_id,
+                                    games,
+                                }),
+                                Err(error) => {
+                                    log::warn!("filtering collection {collection_id}: {error:#}");
+                                    emit.send(Event::CollectionsFilterFailed {
+                                        filter,
+                                        ask,
+                                        collection_ids: vec![collection_id],
+                                    });
+                                }
                             }
-                            emit.send(Event::CollectionFiltered {
-                                filter,
-                                ask,
-                                collection_id,
-                                games,
-                            });
                         }
                         Ok(())
                     },
