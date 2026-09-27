@@ -240,7 +240,16 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
             .filter(|e| e.engine == Engine::ROM)
             .and_then(|e| e.details.as_ref()?.get("system")?.as_str())
             .unwrap_or(""),
-        Flavor::Pico8Cart => PICO8,
+        Flavor::Pico8Cart => {
+            // A web export's carts are packed into its JavaScript.
+            let format = engine
+                .and_then(|e| e.details.as_ref()?.get("format")?.as_str())
+                .unwrap_or("");
+            if format == "js" {
+                return Err("PICO-8 web exports are not supported yet".to_string());
+            }
+            PICO8
+        }
         Flavor::TIC80Cart => TIC80,
         other => return Err(format!("no runtime for {other:?} on this device")),
     };
@@ -1196,6 +1205,25 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         );
         let native = payload(Flavor::NativeLinux, None);
         assert!(content_for(&native, PathBuf::from("/g/bin")).is_err());
+    }
+
+    #[test]
+    fn pico8_web_exports_are_turned_away() {
+        let export = payload(
+            Flavor::Pico8Cart,
+            Some(EngineInfo {
+                engine: Engine::Pico8,
+                version: Some("0.2.2".into()),
+                details: Some(HashMap::from([(
+                    "format".to_string(),
+                    serde_json::Value::String("js".into()),
+                )])),
+            }),
+        );
+        assert_eq!(
+            content_for(&export, PathBuf::from("/g/game.js")),
+            Err("PICO-8 web exports are not supported yet".to_string())
+        );
     }
 
     #[test]

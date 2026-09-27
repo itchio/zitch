@@ -2512,6 +2512,7 @@ fn filter_group(
     let pad = vec2(m.label, m.label * 0.5);
     let group = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
+        let mut ring = None;
         for (index, &(label, active)) in options.iter().enumerate() {
             let galley =
                 ui.painter()
@@ -2565,7 +2566,7 @@ fn filter_group(
             );
             ui.painter().galley(text_pos, galley, TEXT);
             if focused == Some(index) {
-                focus_ring(ui, rect, radii, m);
+                ring = Some((rect, radii));
             }
             if response.hovered() && pointer_moved && focused != Some(index) {
                 out.hovered = Some(index);
@@ -2574,6 +2575,10 @@ fn filter_group(
                 out.clicked = Some(index);
             }
             response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+        // After every option, so the next one does not cover the ring.
+        if let Some((rect, radii)) = ring {
+            focus_ring(ui, rect, radii, m);
         }
     });
     out.rect = group.response.rect;
