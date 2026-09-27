@@ -10,7 +10,7 @@ use crate::images::{Animation, CoverLoader, Variant};
 pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, Prompt, Tab,
-    UploadExt, platform_names, playable_here,
+    UploadExt, platform_names, playable_here, scanned_platform_words,
 };
 use crate::qr::QrCode;
 
@@ -1529,6 +1529,25 @@ pub fn game_buttons(
     }
 }
 
+/// The game's scanned platforms, the ones this device runs in green.
+fn platform_line(ui: &mut Ui, m: &Metrics, words: &[(String, bool)]) {
+    let font = FontId::proportional(m.caption);
+    let format = |color| egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    for (i, (word, here)) in words.iter().enumerate() {
+        if i > 0 {
+            job.append(", ", 0.0, format(DIM));
+        }
+        job.append(word, 0.0, format(if *here { GREEN } else { DIM }));
+    }
+    job.wrap.max_width = ui.available_width();
+    ui.label(job);
+}
+
 /// Everything the detail page reads while drawing.
 pub struct GameView<'a> {
     pub game: &'a Game,
@@ -1591,6 +1610,10 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                         .font(FontId::proportional(m.body))
                         .color(DIM),
                 );
+            }
+            if let Some(words) = scanned_platform_words(game).filter(|w| !w.is_empty()) {
+                ui.add_space(m.space(6.0));
+                platform_line(ui, m, &words);
             }
             ui.add_space(m.space(12.0));
             match (install, caves.first()) {

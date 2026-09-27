@@ -306,6 +306,109 @@ fn platform_words(p: &Platforms) -> Vec<&'static str> {
     names
 }
 
+/// The game's scanned platforms as words, each with whether this device
+/// runs it, for the detail page. `None` when the game was not scanned.
+pub fn scanned_platform_words(game: &Game) -> Option<Vec<(String, bool)>> {
+    let scanned = game.scanned_platforms.as_deref()?;
+    Some(platform_words_here(scanned, |p| {
+        if crate::muos::available() {
+            device_platforms().iter().any(|d| d == p)
+        } else {
+            desktop_runs(p)
+        }
+    }))
+}
+
+fn platform_words_here(scanned: &[String], runs: impl Fn(&str) -> bool) -> Vec<(String, bool)> {
+    let mut words: Vec<(String, bool)> = Vec::new();
+    for platform in scanned {
+        let Some(word) = scanned_platform_word(platform) else {
+            continue;
+        };
+        let here = runs(platform);
+        match words.iter_mut().find(|(w, _)| *w == word) {
+            Some((_, runs)) => *runs |= here,
+            None => words.push((word, here)),
+        }
+    }
+    words
+}
+
+/// A scanned platform on a desktop: a build for this OS and architecture.
+fn desktop_runs(platform: &str) -> bool {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "x86" => "386",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let os = os_platform();
+    platform == format!("{os}-{arch}") || (arch == "amd64" && platform == format!("{os}-386"))
+}
+
+/// A scanned platform in words, or `None` for one that is not a way to
+/// play the game.
+fn scanned_platform_word(platform: &str) -> Option<String> {
+    if let Some(system) = platform.strip_prefix("rom:") {
+        return Some(rom_system_name(system));
+    }
+    let word = match platform {
+        "linux-arm" | "linux-arm64" | "linux-arm64-handheld" => "Linux ARM",
+        p if p.starts_with("windows-") => "Windows",
+        p if p.starts_with("osx-") => "macOS",
+        p if p.starts_with("linux-") => "Linux",
+        "html" => "Web",
+        "love" => "LÖVE",
+        "godot-pck" => "Godot",
+        "gamemaker-data" => "GameMaker",
+        "renpy" => "Ren'Py",
+        p if p.starts_with("rpgmaker-") => "RPG Maker",
+        "pico8-cart" => "PICO-8",
+        "tic80-cart" => "TIC-80",
+        "swf" => "Flash",
+        "jar" => "Java",
+        "dos" => "DOS",
+        "ags" => "AGS",
+        "doom-wad" => "Doom WAD",
+        "playdate" => "Playdate",
+        "solarus-quest" => "Solarus",
+        _ => return None,
+    };
+    Some(word.to_string())
+}
+
+fn rom_system_name(system: &str) -> String {
+    let name = match system {
+        "nes" => "NES",
+        "snes" => "SNES",
+        "gb" => "Game Boy",
+        "gbc" => "Game Boy Color",
+        "gba" => "Game Boy Advance",
+        "nds" => "Nintendo DS",
+        "3ds" => "Nintendo 3DS",
+        "n64" => "Nintendo 64",
+        "md" => "Mega Drive",
+        "32x" => "32X",
+        "sms" => "Master System",
+        "gg" => "Game Gear",
+        "segacd" => "Sega CD",
+        "saturn" => "Saturn",
+        "dreamcast" => "Dreamcast",
+        "pce" => "PC Engine",
+        "lynx" => "Lynx",
+        "ngp" => "Neo Geo Pocket",
+        "a26" => "Atari 2600",
+        "c64" => "C64",
+        "amiga" => "Amiga",
+        "psx" => "PlayStation",
+        "ps2" => "PlayStation 2",
+        "psp" => "PSP",
+        "pocket" => "Analogue Pocket",
+        other => return format!("{} ROM", other.to_uppercase()),
+    };
+    name.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Library,
@@ -519,5 +622,37 @@ mod tests {
         assert!(!any_runs_here(&strings(&["linux-arm64"]), &device));
         assert!(!any_runs_here(&strings(&["rom:snes"]), &device));
         assert!(!any_runs_here(&[], &device));
+    }
+
+    #[test]
+    fn scanned_platforms_in_words() {
+        let device = strings(&["pico8-cart", "linux-arm64-handheld"]);
+        let words = platform_words_here(
+            &strings(&[
+                "linux-amd64",
+                "linux-arm64",
+                "linux-arm64-handheld",
+                "osx-amd64",
+                "osx-arm64",
+                "pico8-cart",
+                "script",
+                "rom:pocket",
+            ]),
+            |p| device.iter().any(|d| d == p),
+        );
+        let expect = [
+            ("Linux", false),
+            ("Linux ARM", true),
+            ("macOS", false),
+            ("PICO-8", true),
+            ("Analogue Pocket", false),
+        ];
+        assert_eq!(
+            words,
+            expect
+                .iter()
+                .map(|(w, h)| (w.to_string(), *h))
+                .collect::<Vec<_>>()
+        );
     }
 }
