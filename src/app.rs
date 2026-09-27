@@ -16,6 +16,7 @@ use crate::model::{
 };
 use crate::qr::QrCode;
 use crate::self_update::{self, SelfUpdate};
+use crate::settings::Settings;
 use crate::ui;
 use crate::ui::LoginView;
 
@@ -34,6 +35,8 @@ pub struct Options {
     pub handoff: bool,
     /// A controller the host reads itself; otherwise gilrs is used.
     pub gamepad: Option<Gamepad>,
+    /// Where remembered choices are kept.
+    pub settings_path: PathBuf,
 }
 
 pub struct App {
@@ -130,6 +133,9 @@ pub struct App {
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
     shot: Option<Shot>,
+    /// Where choices are saved; none for a screenshot run, which reads
+    /// them but leaves them as they were.
+    settings_path: Option<PathBuf>,
     /// Pretend the display is this many points, whatever the window size.
     emulate: Option<(f32, f32)>,
     /// Force the cover policy instead of picking it by screen size.
@@ -269,7 +275,9 @@ impl App {
             self_update,
             handoff,
             gamepad,
+            settings_path,
         } = options;
+        let settings = Settings::load(&settings_path);
         ui::install_fonts(ctx);
         ctx.set_visuals(ui::visuals());
         ctx.set_zoom_factor(zoom);
@@ -303,7 +311,7 @@ impl App {
             online: true,
             tab: Tab::default(),
             collections: Loadable::default(),
-            collections_installed_only: false,
+            collections_installed_only: settings.collections_installed_only,
             collection_filtered: None,
             collection_asks: 0,
             collections_wanted: Vec::new(),
@@ -311,7 +319,7 @@ impl App {
             collection_rows: ui::Rows::default(),
             toolbar_focus: [None; Tab::ALL.len()],
             downloads_row: (0, 0),
-            playable_only: false,
+            playable_only: settings.playable_only,
             query: String::new(),
             focus_search: false,
             blur_search: false,
@@ -321,6 +329,7 @@ impl App {
             quitting: None,
             actions: Vec::new(),
             rows: ui::Rows::default(),
+            settings_path: shot.is_none().then_some(settings_path),
             shot,
             emulate,
             low_spec,
@@ -875,6 +884,7 @@ impl App {
             Action::SetPlayableOnly(on) => {
                 if self.playable_only != on {
                     self.playable_only = on;
+                    self.save_settings();
                     self.request_collection_filtered(None);
                     self.rebuild_sections();
                     self.rebuild_collection_sections();
@@ -904,6 +914,7 @@ impl App {
             Action::SetCollectionsInstalledOnly(on) => {
                 if self.collections_installed_only != on {
                     self.collections_installed_only = on;
+                    self.save_settings();
                     self.request_collection_filtered(None);
                     self.rebuild_collection_sections();
                     self.collection_rows.follow = true;
@@ -1366,6 +1377,16 @@ impl App {
         }
         self.request_collection_filtered(Some(again));
         self.rebuild_collection_sections();
+    }
+
+    fn save_settings(&self) {
+        if let Some(path) = &self.settings_path {
+            Settings {
+                playable_only: self.playable_only,
+                collections_installed_only: self.collections_installed_only,
+            }
+            .save(path);
+        }
     }
 
     fn collection_filter(&self) -> CollectionFilter {

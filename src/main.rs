@@ -12,6 +12,7 @@ mod model;
 mod muos;
 mod qr;
 mod self_update;
+mod settings;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -196,6 +197,9 @@ fn main() -> anyhow::Result<()> {
         self_update: !cli.no_self_update,
         handoff: false,
         gamepad: None,
+        // zitch's own directory even when --app-name borrows another
+        // app's database.
+        settings_path: base_dirs.config_dir().join("zitch").join("settings.json"),
     };
     #[cfg(feature = "sdl-host")]
     {
