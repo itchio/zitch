@@ -65,10 +65,11 @@ pub struct App {
     collections: Loadable<Vec<CollectionGames>>,
     /// Show only installed games on the Collections tab.
     collections_installed_only: bool,
-    /// Per collection, every game that passes the page-wide filters, from
-    /// butler's query; missing while unknown. Keyed by the filter asked
-    /// with, so an answer to an old one is dropped.
-    collection_filtered: Option<(CollectionFilter, FilteredGames)>,
+    /// butler's answers for the page-wide filters, while one is on.
+    collection_filtered: Option<Filtered>,
+    /// Numbers each filtered query, so an older answer never replaces a
+    /// newer one.
+    collection_asks: u64,
     /// The collections on screen, as last sent to the backend.
     collections_wanted: Vec<i64>,
     /// Collections with a page request in flight.
@@ -302,6 +303,7 @@ impl App {
             collections: Loadable::default(),
             collections_installed_only: false,
             collection_filtered: None,
+            collection_asks: 0,
             collections_wanted: Vec::new(),
             collection_loading: Default::default(),
             collection_rows: ui::Rows::default(),
@@ -1290,11 +1292,15 @@ impl App {
             .iter()
             .map(|c| {
                 // With a filter on, butler's answer is the whole row; until
-                // it arrives, the first page filtered here stands in.
-                let exact = (filter.any() && !c.refreshing)
-                    .then(|| self.collection_filtered.as_ref()?.1.get(&c.collection.id))
-                    .flatten();
-                let waiting = c.refreshing || (filter.any() && exact.is_none());
+                // it arrives, the first page filtered here stands in. If
+                // the query failed, the row pages and filters here instead.
+                let id = c.collection.id;
+                let filtered = self.collection_filtered.as_ref().filter(|_| filter.any());
+                let exact = filtered
+                    .filter(|_| !c.refreshing)
+                    .and_then(|f| f.games.get(&id));
+                let failed = filtered.is_some_and(|f| f.failed.contains(&id));
+                let waiting = c.refreshing || (filter.any() && exact.is_none() && !failed);
                 settled &= !waiting;
                 let listed = exact.unwrap_or(&c.games);
                 let games: Vec<i64> = listed
@@ -1305,7 +1311,7 @@ impl App {
                     .collect();
                 // Filtered rows come whole from butler; only unfiltered
                 // ones page.
-                let more = !filter.any() && c.next_cursor.is_some();
+                let more = (!filter.any() || failed) && c.next_cursor.is_some();
                 let count = exact.map_or(c.collection.games_count, |_| games.len() as i64);
                 let note = match (games.is_empty(), installed_only) {
                     _ if more => None,
@@ -1332,18 +1338,22 @@ impl App {
         self.collection_rows.set_sections(sections);
     }
 
-    /// Clears what a sync left refreshing when it stopped early.
+    /// Clears what a sync left refreshing when it stopped early, and asks
+    /// again for filtered rows whose query failed.
     fn finish_collection_refresh(&mut self) {
         let Some(collections) = self.collections.get_mut() else {
             return;
         };
-        let mut stopped = Vec::new();
+        let mut again = Vec::new();
         for c in collections.iter_mut() {
             if std::mem::take(&mut c.refreshing) {
-                stopped.push(c.collection.id);
+                again.push(c.collection.id);
             }
         }
-        self.request_collection_filtered(Some(stopped));
+        if let Some(filtered) = &self.collection_filtered {
+            again.extend(filtered.failed.iter().copied());
+        }
+        self.request_collection_filtered(Some(again));
         self.rebuild_collection_sections();
     }
 
@@ -1366,28 +1376,40 @@ impl App {
         let Some(collections) = self.collections.get() else {
             return;
         };
-        let current = matches!(&self.collection_filtered, Some((f, _)) if *f == filter);
-        let collection_ids = match only {
-            Some(ids) if current => {
-                if let Some((_, known)) = &mut self.collection_filtered {
-                    for id in &ids {
-                        known.remove(id);
-                    }
-                }
-                ids
-            }
+        let current = self
+            .collection_filtered
+            .as_ref()
+            .is_some_and(|f| f.filter == filter);
+        let collection_ids: Vec<i64> = match only {
+            Some(ids) if current => ids,
             _ if current => return,
             _ => {
-                self.collection_filtered = Some((filter, Default::default()));
+                self.collection_filtered = Some(Filtered {
+                    filter,
+                    games: Default::default(),
+                    asked: Default::default(),
+                    failed: Default::default(),
+                });
                 collections.iter().map(|c| c.collection.id).collect()
             }
         };
-        if !collection_ids.is_empty() {
-            self.backend.send(Command::CollectionsFiltered {
-                filter,
-                collection_ids,
-            });
+        if collection_ids.is_empty() {
+            return;
         }
+        self.collection_asks += 1;
+        let ask = self.collection_asks;
+        if let Some(filtered) = &mut self.collection_filtered {
+            for id in &collection_ids {
+                filtered.games.remove(id);
+                filtered.failed.remove(id);
+                filtered.asked.insert(*id, ask);
+            }
+        }
+        self.backend.send(Command::CollectionsFiltered {
+            filter,
+            ask,
+            collection_ids,
+        });
     }
 
     /// Tells the backend which collections are on screen, so a refresh
@@ -1652,16 +1674,30 @@ impl App {
                     self.notify(format!("Couldn't load more: {error}"));
                     self.rebuild_collection_sections();
                 }
-                Event::CollectionsFiltered { filter, lists } => {
-                    // An answer to a filter since changed is dropped.
-                    if self
-                        .collection_filtered
-                        .as_ref()
-                        .is_some_and(|(current, _)| *current == filter)
-                    {
-                        self.catalog_add(Source::Collection, lists.iter().flat_map(|(_, g)| g));
-                        if let Some((_, known)) = &mut self.collection_filtered {
-                            known.extend(lists);
+                Event::CollectionFiltered {
+                    filter,
+                    ask,
+                    collection_id,
+                    games,
+                } => {
+                    // Only the latest question for this filter and
+                    // collection is answered.
+                    let latest = self.collection_filtered.as_ref().is_some_and(|f| {
+                        f.filter == filter && f.asked.get(&collection_id) == Some(&ask)
+                    });
+                    if latest {
+                        if let Ok(games) = &games {
+                            self.catalog_add(Source::Collection, games);
+                        }
+                        if let Some(filtered) = &mut self.collection_filtered {
+                            match games {
+                                Ok(games) => {
+                                    filtered.games.insert(collection_id, games);
+                                }
+                                Err(_) => {
+                                    filtered.failed.insert(collection_id);
+                                }
+                            }
                         }
                         self.rebuild_collection_sections();
                     }
@@ -2962,8 +2998,17 @@ fn drop_later<T: Send + 'static>(value: T) {
         .spawn(move || drop(value));
 }
 
-/// Each collection's games that pass a filter, by collection id.
-type FilteredGames = std::collections::HashMap<i64, Vec<Arc<Game>>>;
+/// butler's answers for one setting of the page-wide filters.
+struct Filtered {
+    filter: CollectionFilter,
+    /// Every game in each collection that passes, by collection id;
+    /// missing while unknown.
+    games: std::collections::HashMap<i64, Vec<Arc<Game>>>,
+    /// The latest question asked about each collection.
+    asked: std::collections::HashMap<i64, u64>,
+    /// Collections whose query failed, asked again after the next sync.
+    failed: std::collections::HashSet<i64>,
+}
 
 /// Where a catalog entry came from. A later variant's copy of a game
 /// replaces an earlier one's, never the reverse: the owned list's is the

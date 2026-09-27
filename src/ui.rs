@@ -790,9 +790,10 @@ pub fn library(
                 let last = (((viewport.max.x - ring) / stride).ceil() as usize).min(slots);
                 // Covers a move or two away load behind the ones shown: the
                 // next tiles along, and rows just above and below.
-                let near = ui
-                    .clip_rect()
-                    .expand2(vec2(0.0, tile_height + m.header_height));
+                let near = ui.clip_rect().expand2(vec2(
+                    PREFETCH_TILES as f32 * stride,
+                    tile_height + m.header_height,
+                ));
                 for col in first.saturating_sub(PREFETCH_TILES)..(last + PREFETCH_TILES).min(count)
                 {
                     let rect = Rect::from_min_size(

@@ -384,10 +384,13 @@ impl CoverLoader {
         animations.retain(|key, entry| key == url || matches!(entry, Entry::Pending));
         match animations.get(url) {
             Some(Entry::Ready(animation)) => return Some(Arc::clone(animation)),
-            Some(_) => return None,
-            None => {}
+            Some(Entry::Failed(_)) => return None,
+            // Asked again below, so it stays wanted while focused.
+            Some(Entry::Pending) => {}
+            None => {
+                animations.insert(url.to_string(), Entry::Pending);
+            }
         }
-        animations.insert(url.to_string(), Entry::Pending);
         drop(animations);
         let frame = self.inner.frame.load(Ordering::Relaxed);
         self.enqueue(Job::Animation(url.to_string()), Priority::Shown, frame, ctx);

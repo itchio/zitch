@@ -73,9 +73,11 @@ pub enum Command {
         cursor: String,
     },
     /// Every game in each collection that passes `filter`, from butler's
-    /// own query, so the answer covers pages not fetched yet.
+    /// own query, so the answer covers pages not fetched yet. Answered one
+    /// [`Event::CollectionFiltered`] per collection, carrying `ask`.
     CollectionsFiltered {
         filter: CollectionFilter,
+        ask: u64,
         collection_ids: Vec<i64>,
     },
     /// The collections on screen, refetched first while a sync is
@@ -167,9 +169,11 @@ pub enum Event {
         collection_id: i64,
         error: String,
     },
-    CollectionsFiltered {
+    CollectionFiltered {
         filter: CollectionFilter,
-        lists: Vec<(i64, Vec<Arc<Game>>)>,
+        ask: u64,
+        collection_id: i64,
+        games: Result<Vec<Arc<Game>>, String>,
     },
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
@@ -541,6 +545,7 @@ fn session(
             }
             Ok(Command::CollectionsFiltered {
                 filter,
+                ask,
                 collection_ids,
             }) => {
                 let profile_id = profile.id;
@@ -551,27 +556,19 @@ fn session(
                     |error| Event::Error(format!("{error:#}")),
                     move |client, emit| {
                         let query = filter.to_butler();
-                        let mut lists = Vec::with_capacity(collection_ids.len());
-                        for id in collection_ids {
-                            let mut games = Vec::new();
-                            let mut cursor = None;
-                            loop {
-                                let (page, next) = collection_page(
-                                    client,
-                                    profile_id,
-                                    id,
-                                    cursor.take(),
-                                    Some(query.clone()),
-                                )?;
-                                games.extend(page);
-                                match next {
-                                    Some(next) => cursor = Some(next),
-                                    None => break,
-                                }
+                        for collection_id in collection_ids {
+                            let games = filtered_games(client, profile_id, collection_id, &query)
+                                .map_err(|error| format!("{error:#}"));
+                            if let Err(error) = &games {
+                                log::warn!("filtering collection {collection_id}: {error}");
                             }
-                            lists.push((id, games));
+                            emit.send(Event::CollectionFiltered {
+                                filter,
+                                ask,
+                                collection_id,
+                                games,
+                            });
                         }
-                        emit.send(Event::CollectionsFiltered { filter, lists });
                         Ok(())
                     },
                 );
@@ -2417,6 +2414,31 @@ fn collection_shelf(
         refreshing: false,
     };
     Ok((shelf, page.stale == Some(true)))
+}
+
+/// Every game in the collection that passes `query`, all pages.
+fn filtered_games(
+    client: &Client,
+    profile_id: i64,
+    collection_id: i64,
+    query: &CollectionGamesFilters,
+) -> Result<Vec<Arc<Game>>> {
+    let mut games = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (page, next) = collection_page(
+            client,
+            profile_id,
+            collection_id,
+            cursor.take(),
+            Some(query.clone()),
+        )?;
+        games.extend(page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(games),
+        }
+    }
 }
 
 /// One page of a collection's games from butler's database, and the cursor
