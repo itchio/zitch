@@ -215,11 +215,15 @@ fn any_runs_here(scanned: &[String], device: &[String]) -> bool {
 /// Whether an upload is built for this device: on muOS something the
 /// firmware or the SDL shim can run, going by itch.io's scan of its files
 /// when it has one and its name otherwise; elsewhere an upload tagged for
-/// the OS.
-pub fn upload_runs_here(upload: &Upload) -> bool {
+/// the OS. With `scans_decide` ([`scans_decide`]), an unscanned upload
+/// does not count.
+pub fn upload_runs_here(upload: &Upload, scans_decide: bool) -> bool {
     if crate::muos::available() {
         if let Some(runs) = scan_runs_here(upload) {
             return runs;
+        }
+        if scans_decide {
+            return false;
         }
         let path = std::path::Path::new(&upload.filename);
         // An archive can hold anything; what it holds is only known once
@@ -232,6 +236,12 @@ pub fn upload_runs_here(upload: &Upload) -> bool {
     } else {
         runs_here(&upload.platforms)
     }
+}
+
+/// Whether itch.io's scans alone decide which of a game's uploads run
+/// here, leaving out the unscanned ones: on muOS, once any is scanned.
+pub fn scans_decide<'a>(uploads: impl IntoIterator<Item = &'a Upload>) -> bool {
+    crate::muos::available() && uploads.into_iter().any(|u| u.launch_targets.is_some())
 }
 
 /// What itch.io's scan of the upload's files says about this device, or

@@ -34,7 +34,7 @@ use crate::butlerd::types::{
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
-    GameUpdate, LaunchFailure, Profile, Prompt, UploadExt, UserExt, human_size,
+    GameUpdate, LaunchFailure, Profile, Prompt, UploadExt, UserExt, human_size, scans_decide,
     upload_platform_names, upload_runs_here,
 };
 
@@ -1599,9 +1599,12 @@ fn check_updates(client: &Client, emit: &Emitter) -> Result<Vec<GameUpdate>> {
     }
     let mut updates = result.updates;
     for update in updates.iter_mut().filter(|u| !u.direct) {
-        update
-            .choices
-            .retain(|c| c.upload.as_ref().is_some_and(upload_runs_here));
+        let decide = scans_decide(update.choices.iter().filter_map(|c| c.upload.as_ref()));
+        update.choices.retain(|c| {
+            c.upload
+                .as_ref()
+                .is_some_and(|u| upload_runs_here(u, decide))
+        });
     }
     updates.retain(|u| !u.choices.is_empty());
     log::info!("{} updates available", updates.len());
@@ -1817,7 +1820,10 @@ fn queue_install(
     // The scan and the filename rules can both be wrong, so on muOS the
     // uploads they turn down stay one choice away rather than dropped.
     let (mut uploads, likely) = if muos {
-        let (mut likely, rest): (Vec<_>, Vec<_>) = uploads.into_iter().partition(upload_runs_here);
+        let decide = scans_decide(&uploads);
+        let (mut likely, rest): (Vec<_>, Vec<_>) = uploads
+            .into_iter()
+            .partition(|u| upload_runs_here(u, decide));
         let count = likely.len();
         likely.extend(rest);
         (likely, count)
