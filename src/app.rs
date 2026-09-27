@@ -148,6 +148,8 @@ pub struct App {
     refreshing: bool,
     /// A background sync is running; the header shows a spinner.
     syncing: bool,
+    /// Row rebuilds held back while a batch of events is handled.
+    deferred: Option<Rebuilds>,
     minimize_while_playing: bool,
     handoff: bool,
     /// For window commands raised from events, outside a frame.
@@ -329,6 +331,7 @@ impl App {
             up_to_date_at: None,
             refreshing: false,
             syncing: false,
+            deferred: None,
             minimize_while_playing,
             handoff,
             ctx: ctx.clone(),
@@ -1147,6 +1150,10 @@ impl App {
     /// Library tab does: what is installed, then what was played last,
     /// and everything owned.
     fn rebuild_sections(&mut self) {
+        if let Some(deferred) = &mut self.deferred {
+            deferred.sections = true;
+            return;
+        }
         if self.owned.get().is_none() {
             return;
         }
@@ -1282,6 +1289,10 @@ impl App {
     /// One row per collection. With the installed filter on, collections
     /// with nothing installed sink to the bottom and say so.
     fn rebuild_collection_sections(&mut self) {
+        if let Some(deferred) = &mut self.deferred {
+            deferred.collections = true;
+            return;
+        }
         let Some(collections) = self.collections.get() else {
             return;
         };
@@ -1568,7 +1579,22 @@ impl App {
         }
     }
 
+    /// Handles what the backend sent since the last frame. A burst of
+    /// events rebuilds the rows once, at the end.
     fn handle_events(&mut self) {
+        self.deferred = Some(Rebuilds::default());
+        self.handle_each_event();
+        if let Some(deferred) = self.deferred.take() {
+            if deferred.sections {
+                self.rebuild_sections();
+            }
+            if deferred.collections {
+                self.rebuild_collection_sections();
+            }
+        }
+    }
+
+    fn handle_each_event(&mut self) {
         for event in self.backend.poll() {
             match event {
                 Event::Status(text) => self.status = text,
@@ -3006,6 +3032,13 @@ fn drop_later<T: Send + 'static>(value: T) {
     let _ = std::thread::Builder::new()
         .name("drop".into())
         .spawn(move || drop(value));
+}
+
+/// Which rows need rebuilding once the current batch of events is done.
+#[derive(Default)]
+struct Rebuilds {
+    sections: bool,
+    collections: bool,
 }
 
 /// butler's answers for one setting of the page-wide filters.

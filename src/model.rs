@@ -158,7 +158,7 @@ pub fn known_playable_here(game: &Game) -> bool {
     if crate::muos::available() {
         game.scanned_platforms
             .as_deref()
-            .is_some_and(|scanned| any_runs_here(scanned, &device_platforms()))
+            .is_some_and(|scanned| any_runs_here(scanned, device_platforms()))
     } else {
         runs_here(&game.platforms)
     }
@@ -186,7 +186,7 @@ impl CollectionFilter {
         };
         if self.playable {
             if crate::muos::available() {
-                filters.scanned_platforms = Some(device_platforms());
+                filters.scanned_platforms = Some(device_platforms().to_vec());
             } else {
                 filters.platform = Some(os_platform().to_string());
             }
@@ -198,10 +198,14 @@ impl CollectionFilter {
 /// What this device runs, in the words of a game's scanned platforms.
 /// The handheld profile is itch.io's check for an arm64 Linux build the
 /// SDL shim can put on screen.
-fn device_platforms() -> Vec<String> {
-    let mut platforms = crate::muos::runtimes();
-    platforms.push("linux-arm64-handheld".to_string());
-    platforms
+/// Worked out once: the filter asks this of every game in the library.
+fn device_platforms() -> &'static [String] {
+    static PLATFORMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PLATFORMS.get_or_init(|| {
+        let mut platforms = crate::muos::runtimes();
+        platforms.push("linux-arm64-handheld".to_string());
+        platforms
+    })
 }
 
 fn any_runs_here(scanned: &[String], device: &[String]) -> bool {
