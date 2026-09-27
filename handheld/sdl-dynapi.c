@@ -1,6 +1,7 @@
-/* Routes a statically linked SDL2 into the firmware's libSDL2.
+/* Routes a game's own SDL2 into the firmware's libSDL2.
  *
- * Linux builds of games usually carry their own SDL2, built on a desktop
+ * Linux builds of games usually carry their own SDL2, in the executable
+ * or in a library of their own, built on a desktop
  * with only X11, Wayland and KMSDRM display backends. muOS has none of
  * those; the only way onto its screen is the firmware's libSDL2 with its
  * "mali" backend. SDL2 keeps every public call behind a jump table and
@@ -36,14 +37,17 @@ static const char *const FIRMWARE_SDL[] = {
     "/usr/lib/aarch64-linux-gnu/libSDL2-2.0.so.0",
 };
 
+/* Local, so a library with SDL2 built in and exported keeps calling its
+   own entry points, which go through the table, rather than binding to
+   the firmware's. */
 static void *open_firmware_sdl(const char **path)
 {
     *path = getenv("ZITCH_SDL_LIB");
     if (*path) {
-        return dlopen(*path, RTLD_NOW | RTLD_GLOBAL);
+        return dlopen(*path, RTLD_NOW | RTLD_LOCAL);
     }
     for (size_t i = 0; i < sizeof(FIRMWARE_SDL) / sizeof(FIRMWARE_SDL[0]); i++) {
-        void *lib = dlopen(FIRMWARE_SDL[i], RTLD_NOW | RTLD_GLOBAL);
+        void *lib = dlopen(FIRMWARE_SDL[i], RTLD_NOW | RTLD_LOCAL);
         if (lib) {
             *path = FIRMWARE_SDL[i];
             return lib;
@@ -53,32 +57,52 @@ static void *open_firmware_sdl(const char **path)
 }
 #define UPSTREAM_COUNT (sizeof(UPSTREAM) / sizeof(UPSTREAM[0]))
 
-struct exe_image {
+/* The loaded object holding the SDL2 that asked: the executable, or a
+   library the game loaded with SDL2 built in. */
+struct sdl_image {
+    uintptr_t table;
     uintptr_t bias;
-    uintptr_t lo, hi;
+    /* Empty for the executable. */
+    const char *path;
 };
 
-static int main_image(struct dl_phdr_info *info, size_t size, void *data)
+static int find_image(struct dl_phdr_info *info, size_t size, void *data)
 {
     (void)size;
-    struct exe_image *exe = data;
-    exe->bias = info->dlpi_addr;
-    exe->lo = UINTPTR_MAX;
-    exe->hi = 0;
+    struct sdl_image *image = data;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
-        if (ph->p_type != PT_LOAD) {
-            continue;
-        }
         uintptr_t start = info->dlpi_addr + ph->p_vaddr;
-        if (start < exe->lo) {
-            exe->lo = start;
-        }
-        if (start + ph->p_memsz > exe->hi) {
-            exe->hi = start + ph->p_memsz;
+        if (ph->p_type == PT_LOAD && image->table >= start
+            && image->table < start + ph->p_memsz) {
+            image->bias = info->dlpi_addr;
+            image->path = info->dlpi_name ? info->dlpi_name : "";
+            return 1;
         }
     }
-    return 1;
+    return 0;
+}
+
+static int same_file(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_dev == sb.st_dev
+        && sa.st_ino == sb.st_ino;
+}
+
+/* The firmware library asks too, on its first call. */
+static int is_firmware_sdl(const char *path)
+{
+    const char *custom = getenv("ZITCH_SDL_LIB");
+    if (custom) {
+        return same_file(path, custom);
+    }
+    for (size_t i = 0; i < sizeof(FIRMWARE_SDL) / sizeof(FIRMWARE_SDL[0]); i++) {
+        if (same_file(path, FIRMWARE_SDL[i])) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* A stub is `adrp xN, page; ldr xN, [xN, #off]; ...; br x16`, sometimes
@@ -105,13 +129,13 @@ static uintptr_t stub_slot(uintptr_t pc)
     return 0;
 }
 
-/* Fills `names` with the slot each SDL_* stub in the executable reads
+/* Fills `names` with the slot each SDL_* stub in the image reads
    from, as copies the caller frees. Returns the number found, or -1
    when a stub contradicts the upstream order. */
-static int read_stubs(const struct exe_image *exe, uintptr_t table, uint32_t count,
-                      const char **names)
+static int read_stubs(const struct sdl_image *image, uint32_t count, const char **names)
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    uintptr_t table = image->table;
+    int fd = open(image->path[0] ? image->path : "/proc/self/exe", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         return 0;
     }
@@ -132,7 +156,7 @@ static int read_stubs(const struct exe_image *exe, uintptr_t table, uint32_t cou
     }
     const Elf64_Shdr *sh = (const Elf64_Shdr *)(map + eh->e_shoff);
     for (int s = 0; s < eh->e_shnum && found >= 0; s++) {
-        if (sh[s].sh_type != SHT_SYMTAB) {
+        if (sh[s].sh_type != SHT_SYMTAB && sh[s].sh_type != SHT_DYNSYM) {
             continue;
         }
         const Elf64_Sym *sym = (const Elf64_Sym *)(map + sh[s].sh_offset);
@@ -148,7 +172,7 @@ static int read_stubs(const struct exe_image *exe, uintptr_t table, uint32_t cou
             if (len > 5 && strcmp(name + len - 5, "_REAL") == 0) {
                 continue;
             }
-            uintptr_t slot = stub_slot(exe->bias + sym[i].st_value);
+            uintptr_t slot = stub_slot(image->bias + sym[i].st_value);
             if (slot < table || (slot - table) / sizeof(void *) >= count) {
                 continue;
             }
@@ -159,8 +183,10 @@ static int read_stubs(const struct exe_image *exe, uintptr_t table, uint32_t cou
                 found = -1;
                 break;
             }
-            names[index] = strdup(name);
-            found++;
+            if (!names[index]) {
+                names[index] = strdup(name);
+                found++;
+            }
         }
     }
 done:
@@ -190,10 +216,8 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
     if (apiver != 1) {
         return -1;
     }
-    struct exe_image exe = {0};
-    dl_iterate_phdr(main_image, &exe);
-    if ((uintptr_t)table < exe.lo || (uintptr_t)table >= exe.hi) {
-        /* A shared SDL2 asking, most likely the firmware's own. */
+    struct sdl_image image = {.table = (uintptr_t)table};
+    if (!dl_iterate_phdr(find_image, &image) || is_firmware_sdl(image.path)) {
         return -1;
     }
 
@@ -202,7 +226,7 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
     if (!names) {
         return -1;
     }
-    int stubs = read_stubs(&exe, (uintptr_t)table, count, names);
+    int stubs = read_stubs(&image, count, names);
     if (stubs < 0) {
         free_names(names, count);
         return -1;
@@ -231,7 +255,7 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
         slots[i] = fn ? fn : (void *)unknown_entry;
     }
     free_names(names, count);
-    fprintf(stderr, "sdl-dynapi: %u of %u SDL entries routed to %s, %d read from stubs\n",
-            mapped, count, path, stubs);
+    fprintf(stderr, "sdl-dynapi: %u of %u SDL entries of %s routed to %s, %d read from stubs\n",
+            mapped, count, image.path[0] ? image.path : "the executable", path, stubs);
     return 0;
 }
