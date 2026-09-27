@@ -380,6 +380,14 @@ pub enum Direction {
     Home,
     /// To the last item in the row.
     End,
+    /// A screenful of rows up.
+    PageUp,
+    /// A screenful of rows down.
+    PageDown,
+    /// To the first row.
+    Top,
+    /// To the last row.
+    Bottom,
 }
 
 /// What the interface asked for while drawing. Applied after the frame so

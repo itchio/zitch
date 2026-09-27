@@ -15,7 +15,7 @@ use sdl2::mouse::MouseButton;
 
 use crate::app::{App, Options, Shot};
 use crate::backend::{Backend, Waker};
-use crate::gamepad::{Gamepad, PadButton, Stick, button_action};
+use crate::gamepad::{Gamepad, PadButton, Stick, Triggers, button_action};
 use crate::images::CoverLoader;
 use crate::model::Action;
 
@@ -156,7 +156,14 @@ pub fn run(
     let mut scrub = false;
 
     'frames: loop {
-        let deadline = pads.stick.deadline().or(pads.dpad.deadline());
+        let deadline = [
+            pads.stick.deadline(),
+            pads.dpad.deadline(),
+            pads.triggers.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         if let Some(deadline) = deadline {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
@@ -457,6 +464,7 @@ struct Pads {
     dpad_pos: (f32, f32),
     left_trigger: bool,
     right_trigger: bool,
+    triggers: Triggers,
 }
 
 impl Pads {
@@ -471,6 +479,7 @@ impl Pads {
             dpad_pos: (0.0, 0.0),
             left_trigger: false,
             right_trigger: false,
+            triggers: Triggers::default(),
         }
     }
 
@@ -551,16 +560,14 @@ impl Pads {
                     &mut self.right_trigger
                 };
                 let pressed = value > TRIGGER_PRESSED;
-                let edge = pressed && !*held;
-                *held = pressed;
-                if edge {
-                    return button_action(if axis == Axis::TriggerLeft {
-                        PadButton::LeftTrigger
-                    } else {
-                        PadButton::RightTrigger
-                    });
+                if pressed == *held {
+                    return None;
                 }
-                return None;
+                *held = pressed;
+                return self
+                    .triggers
+                    .update(self.left_trigger, self.right_trigger)
+                    .map(Action::MoveFocus);
             }
             _ => return None,
         }
@@ -577,6 +584,9 @@ impl Pads {
         }
         if self.dpad.deadline().is_some() {
             moves.extend(self.dpad.update(self.dpad_pos.0, self.dpad_pos.1));
+        }
+        if self.triggers.deadline().is_some() {
+            moves.extend(self.triggers.update(self.left_trigger, self.right_trigger));
         }
         moves
     }

@@ -220,6 +220,10 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "right" => Ok(Step::Act(Action::MoveFocus(Direction::Right))),
             "home" => Ok(Step::Act(Action::MoveFocus(Direction::Home))),
             "end" => Ok(Step::Act(Action::MoveFocus(Direction::End))),
+            "pageup" => Ok(Step::Act(Action::MoveFocus(Direction::PageUp))),
+            "pagedown" => Ok(Step::Act(Action::MoveFocus(Direction::PageDown))),
+            "top" => Ok(Step::Act(Action::MoveFocus(Direction::Top))),
+            "bottom" => Ok(Step::Act(Action::MoveFocus(Direction::Bottom))),
             "enter" => Ok(Step::Act(Action::Activate)),
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
@@ -394,6 +398,16 @@ impl App {
                 Action::MoveFocus(Direction::Home),
             );
             key(Modifiers::NONE, Key::End, Action::MoveFocus(Direction::End));
+            key(
+                Modifiers::NONE,
+                Key::PageUp,
+                Action::MoveFocus(Direction::PageUp),
+            );
+            key(
+                Modifiers::NONE,
+                Key::PageDown,
+                Action::MoveFocus(Direction::PageDown),
+            );
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
             key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
@@ -643,8 +657,13 @@ impl App {
                         (true, Direction::Down) | (false, Direction::Right) => {
                             prompt.focus = (prompt.focus + 1).min(last)
                         }
-                        (_, Direction::Home) => prompt.focus = 0,
-                        (_, Direction::End) => prompt.focus = last,
+                        // A prompt's list is short; a page reaches its end.
+                        (_, Direction::Home | Direction::PageUp | Direction::Top) => {
+                            prompt.focus = 0
+                        }
+                        (_, Direction::End | Direction::PageDown | Direction::Bottom) => {
+                            prompt.focus = last
+                        }
                         _ => {}
                     }
                 }
@@ -716,7 +735,11 @@ impl App {
                 Action::MoveFocus(direction) if login.has_checkbox() => {
                     login.focused = matches!(
                         direction,
-                        Direction::Down | Direction::Right | Direction::End
+                        Direction::Down
+                            | Direction::Right
+                            | Direction::End
+                            | Direction::PageDown
+                            | Direction::Bottom
                     );
                 }
                 Action::Activate if login.focused && login.has_checkbox() => {
@@ -2946,9 +2969,13 @@ fn step_toolbar_focus(
         (Some(index), Direction::Right) => Landing::Toolbar((index + 1).min(last)),
         (Some(_), Direction::Home) => Landing::Toolbar(0),
         (Some(_), Direction::End) => Landing::Toolbar(last),
-        (Some(index), Direction::Up) => Landing::Toolbar(index),
-        (Some(index), Direction::Down) if rows_empty => Landing::Toolbar(index),
-        (Some(_), Direction::Down) => Landing::FirstRow,
+        (Some(index), Direction::Up | Direction::PageUp | Direction::Top) => {
+            Landing::Toolbar(index)
+        }
+        (Some(index), Direction::Down | Direction::PageDown | Direction::Bottom) if rows_empty => {
+            Landing::Toolbar(index)
+        }
+        (Some(_), Direction::Down | Direction::PageDown | Direction::Bottom) => Landing::FirstRow,
         (None, Direction::Up) if at_first_row && stops > 0 => Landing::Toolbar(0),
         (None, _) => Landing::Rows,
     }
@@ -2965,8 +2992,9 @@ fn step_download_row(
     let row = match direction {
         Direction::Up => row.saturating_sub(1),
         Direction::Down => (row + 1).min(last),
-        Direction::Home => 0,
-        Direction::End => last,
+        // The list is short; a page reaches its end.
+        Direction::Home | Direction::PageUp | Direction::Top => 0,
+        Direction::End | Direction::PageDown | Direction::Bottom => last,
         _ => row,
     };
     let buttons = rows.get(row).map_or(0, |r| r.buttons.len());

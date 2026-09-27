@@ -26,8 +26,6 @@ pub enum PadButton {
     North,
     LeftBumper,
     RightBumper,
-    LeftTrigger,
-    RightTrigger,
     Guide,
     Start,
 }
@@ -39,7 +37,6 @@ pub fn button_action(button: PadButton) -> Option<Action> {
         PadButton::North => Action::FocusSearch,
         PadButton::LeftBumper => Action::CycleTab(-1),
         PadButton::RightBumper => Action::CycleTab(1),
-        PadButton::LeftTrigger | PadButton::RightTrigger => return None,
         PadButton::Guide | PadButton::Start => Action::Menu,
     })
 }
@@ -174,6 +171,66 @@ impl Stick {
     }
 }
 
+/// The triggers: a press pages, and still holding after a pause runs to
+/// the top or bottom, once.
+#[derive(Default)]
+pub struct Triggers {
+    held: Option<TriggerHold>,
+}
+
+struct TriggerHold {
+    page: Direction,
+    since: Instant,
+    /// The run to the end has happened; nothing more until released.
+    ran: bool,
+}
+
+impl Triggers {
+    /// The move for the triggers now held: up for the left, down for the
+    /// right. Call it on every change and again at [`Self::deadline`].
+    pub fn update(&mut self, left: bool, right: bool) -> Option<Direction> {
+        let page = match (left, right) {
+            (true, false) => Direction::PageUp,
+            (false, true) => Direction::PageDown,
+            _ => {
+                self.held = None;
+                return None;
+            }
+        };
+        let now = Instant::now();
+        match self.held.as_mut() {
+            Some(held) if held.page == page => {
+                if held.ran || now < held.since + STICK_FIRST_REPEAT {
+                    return None;
+                }
+                held.ran = true;
+                Some(if page == Direction::PageUp {
+                    Direction::Top
+                } else {
+                    Direction::Bottom
+                })
+            }
+            _ => {
+                self.held = Some(TriggerHold {
+                    page,
+                    since: now,
+                    ran: false,
+                });
+                Some(page)
+            }
+        }
+    }
+
+    /// When holding turns into a run to the end, while that is still to
+    /// come.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.held
+            .as_ref()
+            .filter(|held| !held.ran)
+            .map(|held| held.since + STICK_FIRST_REPEAT)
+    }
+}
+
 /// The dominant axis once the stick leaves the dead zone. Up is positive y.
 fn stick_direction(x: f32, y: f32) -> Option<Direction> {
     if x.abs() < STICK_THRESHOLD && y.abs() < STICK_THRESHOLD {
@@ -199,7 +256,7 @@ mod reader {
 
     use gilrs::{Axis, Button, EventType, Gilrs};
 
-    use super::{Gamepad, PadButton, PadSender, Stick, button_action};
+    use super::{Gamepad, PadButton, PadSender, Stick, Triggers, button_action};
     use crate::model::{Action, Direction};
 
     /// How long the reader sleeps with nothing held. Hotplug and input both
@@ -245,10 +302,15 @@ mod reader {
     /// Runs until the interface drops its receiver.
     fn read_loop(mut gilrs: Gilrs, tx: &PadSender, ctx: &egui::Context) {
         let mut stick = Stick::default();
+        let mut triggers = Triggers::default();
         loop {
-            let wait = stick.deadline().map_or(IDLE_WAIT, |next| {
-                next.saturating_duration_since(Instant::now())
-            });
+            let wait = [stick.deadline(), triggers.deadline()]
+                .into_iter()
+                .flatten()
+                .min()
+                .map_or(IDLE_WAIT, |next| {
+                    next.saturating_duration_since(Instant::now())
+                });
             let mut sent = false;
             if let Some(event) = gilrs.next_event_blocking(Some(wait)) {
                 match event.event {
@@ -284,7 +346,13 @@ mod reader {
                     x.abs() >= super::STICK_THRESHOLD || y.abs() >= super::STICK_THRESHOLD
                 })
                 .unwrap_or((0.0, 0.0));
-            if let Some(direction) = stick.update(x, y) {
+            // Triggers the same way: held on any controller.
+            let held = |button| gilrs.gamepads().any(|(_, pad)| pad.is_pressed(button));
+            let (left, right) = (held(Button::LeftTrigger2), held(Button::RightTrigger2));
+            for direction in [stick.update(x, y), triggers.update(left, right)]
+                .into_iter()
+                .flatten()
+            {
                 if tx.send(Action::MoveFocus(direction)).is_err() {
                     return;
                 }
@@ -306,11 +374,9 @@ mod reader {
             Button::East => PadButton::East,
             Button::North => PadButton::North,
             // gilrs names the bumpers LeftTrigger/RightTrigger; the triggers
-            // proper are the *2 variants.
+            // proper are the *2 variants, read as held state instead.
             Button::LeftTrigger => PadButton::LeftBumper,
             Button::RightTrigger => PadButton::RightBumper,
-            Button::LeftTrigger2 => PadButton::LeftTrigger,
-            Button::RightTrigger2 => PadButton::RightTrigger,
             Button::Mode => PadButton::Guide,
             Button::Start => PadButton::Start,
             _ => return None,
@@ -344,5 +410,26 @@ mod tests {
         assert_eq!(stick.update(0.0, 0.0), None);
         assert!(stick.deadline().is_none());
         assert_eq!(stick.update(0.0, 1.0), Some(Direction::Up));
+    }
+
+    #[test]
+    fn trigger_pages_then_runs_to_the_end_once() {
+        let mut triggers = Triggers::default();
+        assert_eq!(triggers.update(false, true), Some(Direction::PageDown));
+        assert_eq!(triggers.update(false, true), None);
+        // Held past the pause.
+        triggers.held.as_mut().unwrap().since -= STICK_FIRST_REPEAT;
+        assert_eq!(triggers.update(false, true), Some(Direction::Bottom));
+        assert_eq!(triggers.update(false, true), None);
+        assert!(triggers.deadline().is_none());
+        assert_eq!(triggers.update(false, false), None);
+        assert_eq!(triggers.update(true, false), Some(Direction::PageUp));
+    }
+
+    #[test]
+    fn both_triggers_do_nothing() {
+        let mut triggers = Triggers::default();
+        assert_eq!(triggers.update(true, true), None);
+        assert!(triggers.deadline().is_none());
     }
 }

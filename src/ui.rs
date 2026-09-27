@@ -504,6 +504,12 @@ impl Rows {
             .map(|(row, _)| row)
     }
 
+    /// How many rows a page moves: those at least partly in view, since a
+    /// handheld's screen may not hold even two whole rows.
+    fn page(&self) -> usize {
+        self.visible().count().max(1)
+    }
+
     pub fn col(&self) -> usize {
         self.cols.get(self.row).copied().unwrap_or(0)
     }
@@ -554,6 +560,10 @@ impl Rows {
             }
             Direction::Up => self.row = self.row.saturating_sub(1),
             Direction::Down => self.row = (self.row + 1).min(self.sections.len() - 1),
+            Direction::PageUp => self.row = self.row.saturating_sub(self.page()),
+            Direction::PageDown => self.row = (self.row + self.page()).min(self.sections.len() - 1),
+            Direction::Top => self.row = 0,
+            Direction::Bottom => self.row = self.sections.len() - 1,
             Direction::Home => self.cols[self.row] = 0,
             Direction::End => {
                 self.cols[self.row] = self.sections[self.row].games.len().saturating_sub(1)
