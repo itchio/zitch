@@ -415,8 +415,12 @@ pub fn scanned_platform_words(game: &Game) -> Option<Vec<(String, bool)>> {
     let scanned = game.scanned_platforms.as_deref()?;
     Some(platform_words_here(scanned, |p| {
         if crate::muos::available() {
-            device_platforms().iter().any(|d| d == p)
-                || crate::muos::love_platforms().iter().any(|d| d == p)
+            any_runs_here(
+                &[p.to_string()],
+                device_platforms(),
+                &[],
+                crate::muos::love_platforms(),
+            )
         } else {
             desktop_runs(p)
         }
