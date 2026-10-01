@@ -233,6 +233,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             "qr" => Ok(Step::Act(Action::ShowQr)),
+            "y" => Ok(Step::Act(Action::Secondary)),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "guide" => Ok(Step::Act(Action::Menu)),
@@ -414,7 +415,7 @@ impl App {
             );
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
-            key(Modifiers::NONE, Key::Slash, Action::Secondary);
+            key(Modifiers::NONE, Key::Slash, Action::Search);
             key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
             key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
@@ -735,9 +736,11 @@ impl App {
         }
         if self.qr_shown() {
             match action {
-                Action::Back | Action::Activate | Action::Secondary | Action::HideQr => {
-                    self.qr = None
-                }
+                Action::Back
+                | Action::Activate
+                | Action::Secondary
+                | Action::Search
+                | Action::HideQr => self.qr = None,
                 Action::Menu => {
                     self.raise_window();
                     self.menu = Some(0);
@@ -805,6 +808,7 @@ impl App {
                             match self.active_rows() {
                                 Some(rows) => {
                                     rows.row = 0;
+                                    rows.settle_on_game();
                                     rows.follow = true;
                                 }
                                 None => self.downloads_row = (0, 0),
@@ -1007,9 +1011,29 @@ impl App {
                     self.actions.push(Action::SetTab(self.tab.next(step)));
                 }
             }
-            Action::Secondary => match self.page {
+            Action::Search => match self.page {
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
+                }
+                Page::Library => {}
+                Page::Game { .. } => self.actions.push(Action::ShowQr),
+            },
+            Action::Secondary => match self.page {
+                Page::Library if self.tab != Tab::Downloads => {
+                    let stops = self.toolbar().1.len();
+                    let rows_empty = self.rows_empty();
+                    let slot = tab_slot(self.tab);
+                    if self.toolbar_focus_in(stops, rows_empty).is_none() {
+                        self.toolbar_focus[slot] = Some(0);
+                    } else if !rows_empty {
+                        // Back to the game that had focus, which the rows
+                        // kept while the filters had it.
+                        self.toolbar_focus[slot] = None;
+                        if let Some(rows) = self.active_rows() {
+                            rows.settle_on_game();
+                            rows.follow = true;
+                        }
+                    }
                 }
                 Page::Library => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
@@ -2483,9 +2507,19 @@ impl App {
                 if let Some(label) = confirm {
                     hints.push((vec![Glyph::Confirm], label.to_string()));
                 }
+                if self.input_mode == InputMode::Gamepad && self.tab != Tab::Downloads {
+                    let label = if on_toolbar.is_none() {
+                        Some("Filters")
+                    } else {
+                        (!rows_empty).then_some("Games")
+                    };
+                    if let Some(label) = label {
+                        hints.push((vec![Glyph::Secondary], label.to_string()));
+                    }
+                }
                 match self.tab {
                     Tab::Library => {
-                        if !self.handheld {
+                        if self.input_mode != InputMode::Gamepad && !self.handheld {
                             hints.push((vec![Glyph::Secondary], "Search".to_string()));
                         }
                         hints.push((vec![Glyph::Menu], "Menu".to_string()));

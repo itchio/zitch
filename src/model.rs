@@ -563,9 +563,12 @@ pub enum Action {
     SetShareDeviceInfo(bool),
     /// Step through the tabs, wrapping.
     CycleTab(i32),
-    /// Y on a pad, Slash on a keyboard: search on the library, the QR
-    /// code on a game's page.
+    /// Y on a pad: in and out of the filters on the library, the QR code
+    /// on a game's page.
     Secondary,
+    /// Slash on a keyboard: the search box on the library, the QR code
+    /// on a game's page.
+    Search,
     /// Show the open game's page as a QR code.
     ShowQr,
     /// Close the QR code.

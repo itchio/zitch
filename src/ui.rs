@@ -530,6 +530,23 @@ impl Rows {
     }
 
     /// Focuses a game by id, preferring the current row.
+    /// Moves focus off a row with no games, such as a note, to the nearest
+    /// one that has some, looking below first.
+    pub fn settle_on_game(&mut self) {
+        if self.focused_game().is_some() {
+            return;
+        }
+        let has_games = |row: usize| self.sections.get(row).is_some_and(|s| !s.games.is_empty());
+        let nearest = (1..self.sections.len()).find_map(|step| {
+            [self.row + step, self.row.wrapping_sub(step)]
+                .into_iter()
+                .find(|&row| has_games(row))
+        });
+        if let Some(row) = nearest {
+            self.row = row;
+        }
+    }
+
     pub fn focus_game(&mut self, id: i64) {
         let in_current = self
             .sections
@@ -3171,7 +3188,37 @@ pub fn downloads(
 
 #[cfg(test)]
 mod tests {
-    use super::rfc3339_to_unix;
+    use super::{Rows, Section, rfc3339_to_unix};
+
+    fn section(games: &[i64]) -> Section {
+        Section {
+            title: String::new(),
+            games: games.to_vec(),
+            note: games.is_empty().then(|| "No games".to_string()),
+            more: false,
+            collection: None,
+        }
+    }
+
+    #[test]
+    fn settles_on_the_nearest_row_with_games() {
+        let mut rows = Rows::default();
+        rows.set_sections(vec![
+            section(&[1]),
+            section(&[]),
+            section(&[]),
+            section(&[2]),
+        ]);
+        rows.row = 1;
+        rows.settle_on_game();
+        assert_eq!(rows.focused_game(), Some(1));
+        rows.row = 2;
+        rows.settle_on_game();
+        assert_eq!(rows.focused_game(), Some(2));
+        rows.row = 3;
+        rows.settle_on_game();
+        assert_eq!(rows.row, 3);
+    }
 
     #[test]
     fn parses_butler_timestamps() {
