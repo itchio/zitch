@@ -11,6 +11,7 @@ mod images;
 mod model;
 mod muos;
 mod qr;
+mod report;
 mod self_update;
 mod settings;
 mod ui;

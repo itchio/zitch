@@ -29,6 +29,21 @@ fn resolution() -> Option<String> {
 
 /// A compact JSON object describing this device, for `device_info`.
 pub fn gather() -> String {
+    Value::Object(fields()).to_string()
+}
+
+/// [`gather`] plus zitch's version and the LÖVE here, for a
+/// compatibility report.
+pub fn for_report() -> String {
+    let mut info = fields();
+    info.insert("zitch".into(), json!(env!("ZITCH_VERSION")));
+    if let Some(love) = muos::love_version() {
+        info.insert("love".into(), json!(love));
+    }
+    Value::Object(info).to_string()
+}
+
+fn fields() -> Map<String, Value> {
     let mut info = Map::new();
     let on_muos = muos::available();
     info.insert(
@@ -48,7 +63,7 @@ pub fn gather() -> String {
     if let Some(resolution) = resolution() {
         info.insert("resolution".into(), json!(resolution));
     }
-    Value::Object(info).to_string()
+    info
 }
 
 #[cfg(test)]

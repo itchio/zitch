@@ -102,6 +102,9 @@ pub struct Prompt {
     /// The choices stand in a column stepped with Up and Down, rather
     /// than a row stepped with Left and Right.
     pub stacked: bool,
+    /// Detail drawn under the choice at the same index; choices past its
+    /// end have none.
+    pub details: Vec<UploadDetail>,
     /// Work under way: a status line and how far along it is, 0 to 1.
     pub progress: Option<(String, f32)>,
 }
@@ -354,6 +357,158 @@ fn scan_runs_here(upload: &Upload) -> Option<bool> {
     Some(targets.iter().any(|t| {
         serde::Deserialize::deserialize(t).is_ok_and(|t| crate::muos::scanned_target_runs_here(&t))
     }))
+}
+
+/// What an upload picker shows under an upload's name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UploadDetail {
+    /// What the upload holds in words, each with whether this device runs
+    /// it: from itch.io's scan when there is one, its tags otherwise.
+    pub platforms: Vec<(String, bool)>,
+    /// Size, kind, and how sure the platforms are.
+    pub notes: Vec<String>,
+}
+
+pub fn upload_detail(upload: &Upload, scans_decide: bool) -> UploadDetail {
+    use serde::Deserialize;
+    let muos = crate::muos::available();
+    let mut detail = UploadDetail::default();
+    let scanned = upload.launch_targets.as_ref().and_then(|t| t.as_array());
+    match scanned {
+        Some(targets) => {
+            for target in targets {
+                let Ok(target) = crate::muos::ScannedTarget::deserialize(target) else {
+                    continue;
+                };
+                let Some((word, here)) = scanned_target_word(&target) else {
+                    continue;
+                };
+                match detail.platforms.iter_mut().find(|(w, _)| *w == word) {
+                    Some((_, runs)) => *runs |= here,
+                    None => detail.platforms.push((word, here)),
+                }
+            }
+            if targets.is_empty() {
+                detail.notes.push("scan found nothing to run".to_string());
+            }
+        }
+        None => {
+            let by_name = muos && crate::muos::runs_here(std::path::Path::new(&upload.filename));
+            detail.platforms = platform_words(&upload.platforms)
+                .into_iter()
+                .map(|word| {
+                    let here = !muos && runs_here(&upload.platforms) && word == os_word();
+                    (word.to_string(), here)
+                })
+                .collect();
+            if muos {
+                detail.notes.push(if by_name {
+                    "not scanned, file name looks playable".to_string()
+                } else if scans_decide || !upload_runs_here(upload, false) {
+                    "not scanned".to_string()
+                } else {
+                    "not scanned, archive may hold anything".to_string()
+                });
+            }
+        }
+    }
+    if upload.size > 0 {
+        detail.notes.insert(0, human_size(upload.size));
+    }
+    if upload.demo {
+        detail.notes.push("demo".to_string());
+    }
+    if let Some(kind) = upload_kind(upload) {
+        detail.notes.push(kind.to_string());
+    }
+    detail
+}
+
+/// An upload's type in words, unless it is a plain download.
+pub fn upload_kind(upload: &Upload) -> Option<&'static str> {
+    use crate::butlerd::types::UploadType;
+    match upload.r#type {
+        UploadType::Default | UploadType::Other | UploadType::Unknown => None,
+        UploadType::Flash => Some("flash"),
+        UploadType::Unity => Some("unity web player"),
+        UploadType::Java => Some("java"),
+        UploadType::HTML => Some("html"),
+        UploadType::Soundtrack => Some("soundtrack"),
+        UploadType::Book => Some("book"),
+        UploadType::Video => Some("video"),
+        UploadType::Documentation => Some("documentation"),
+        UploadType::Mod => Some("mod"),
+        UploadType::AudioAssets => Some("audio assets"),
+        UploadType::GraphicalAssets => Some("graphical assets"),
+        UploadType::Sourcecode => Some("source code"),
+    }
+}
+
+/// This OS as [`platform_words`] names it.
+fn os_word() -> &'static str {
+    match os_platform() {
+        "linux" => "Linux",
+        "osx" => "macOS",
+        _ => "Windows",
+    }
+}
+
+/// A scanned launch target in words, with whether it runs here. Native
+/// builds name their architecture, since that decides it on a handheld.
+fn scanned_target_word(target: &crate::muos::ScannedTarget) -> Option<(String, bool)> {
+    use crate::butlerd::types::{Arch, Flavor};
+    let arch = target
+        .linux_info
+        .as_ref()
+        .and_then(|i| i.arch)
+        .or(target.arch);
+    let (os, platform_os) = match target.flavor {
+        Flavor::NativeLinux => ("Linux", "linux"),
+        Flavor::NativeWindows | Flavor::ScriptWindows | Flavor::MSI => ("Windows", "windows"),
+        Flavor::NativeMacos | Flavor::AppMacos => ("macOS", "osx"),
+        _ => ("", ""),
+    };
+    let here = |platform: &str| {
+        if crate::muos::available() {
+            crate::muos::scanned_target_runs_here(target)
+        } else {
+            desktop_runs(platform)
+        }
+    };
+    if !os.is_empty() {
+        let (arch_word, arch_id) = match arch {
+            Some(Arch::Amd64) => (" x64", "amd64"),
+            Some(Arch::_386) => (" x86", "386"),
+            Some(Arch::Arm64) => (" ARM64", "arm64"),
+            Some(Arch::Arm) => (" ARM", "arm"),
+            Some(Arch::Riscv64) => (" RISC-V", "riscv64"),
+            Some(Arch::Universal) => (" universal", "universal"),
+            _ => ("", ""),
+        };
+        let runs = here(&format!("{platform_os}-{arch_id}"));
+        return Some((format!("{os}{arch_word}"), runs));
+    }
+    let word = match target.flavor {
+        Flavor::ROM => {
+            let system = target
+                .engine
+                .as_ref()
+                .and_then(|e| e.details.as_ref())
+                .and_then(|d| d.get("system"))
+                .and_then(|s| s.as_str())?;
+            rom_system_name(system)
+        }
+        Flavor::Love => match target.engine.as_ref().and_then(|e| e.version.as_deref()) {
+            Some(version) if !version.is_empty() => format!("LÖVE {version}"),
+            _ => "LÖVE, version unknown".to_string(),
+        },
+        flavor => {
+            let id = serde_json::to_value(flavor).ok()?;
+            scanned_platform_word(id.as_str()?)?
+        }
+    };
+    let runs = crate::muos::available() && crate::muos::scanned_target_runs_here(target);
+    Some((word, runs))
 }
 
 /// The archive types butler unpacks on install.
@@ -671,6 +826,11 @@ pub enum Action {
     },
     /// Focus a prompt button; the pointer is already there.
     PromptFocus(usize),
+    /// Focus a row of the compatibility report; the pointer is already
+    /// there.
+    ReportFocus(usize),
+    /// Whether zitch asks how a game ran after playing it.
+    SetAskReports(bool),
     /// Hide games with no upload for this device, on every tab.
     SetPlayableOnly(bool),
     /// Include or leave out one type in "Playable here".

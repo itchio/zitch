@@ -23,6 +23,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::butlerd::types::{Arch, Candidate, Engine, EngineInfo, Flavor, LinuxInfo};
+use crate::report::{Run, STDERR_TAIL};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// Where Andromeda keeps the launch handoff files; Jacaranda uses /tmp.
@@ -164,6 +165,11 @@ fn love() -> Option<&'static Love> {
             .find_map(love_at)
     })
     .as_ref()
+}
+
+/// The LÖVE version games run on here, if there is one.
+pub fn love_version() -> Option<&'static str> {
+    love().map(|love| love.version.as_str())
 }
 
 /// The runtime around a `love` binary, if it is one: `liblove` sits in a
@@ -800,26 +806,43 @@ pub fn begin() {
 
 /// Runs the content and returns when it exits. `name` is what the
 /// firmware shows in its overlays and history; `args` and `env` are the
-/// manifest action's, and apply where the runtime takes them.
+/// manifest action's, and apply where the runtime takes them. What can
+/// be seen of the run goes in `run`.
 pub fn launch(
     name: &str,
     content: &Content,
     args: &[String],
     env: &HashMap<String, String>,
+    run: &mut Run,
 ) -> Result<()> {
     log::info!(
         "launching {} as {}",
         content.path().display(),
         content.label()
     );
+    let file = content
+        .path()
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let result = match content {
         Content::Rom { path, system } => {
             if !args.is_empty() {
                 log::warn!("ignoring manifest arguments {args:?} for a ROM");
             }
+            run.strategy = Some("retroarch");
+            run.core = Some(system.core.clone());
+            run.launch_target = Some(format!("rom:{} {file}", system.id));
             launch_rom(name, system, path, env)
         }
-        Content::Love { path } => launch_love(path, args, env),
+        Content::Love { path } => {
+            run.strategy = Some("love");
+            run.launch_target = Some(match love_version() {
+                Some(version) => format!("love:{version} {file}"),
+                None => format!("love {file}"),
+            });
+            launch_love(path, args, env, run)
+        }
     };
     *RUNNING.lock().unwrap_or_else(|p| p.into_inner()) = None;
     result
@@ -896,8 +919,14 @@ fn set_foreground(process: &str) {
 
 /// Runs a `.love` (or a folder) in LÖVE. Its own SDL window takes the
 /// screen, like RetroArch's. The panic combo gets its pid, as there is
-/// no launcher script to name it.
-fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> Result<()> {
+/// no launcher script to name it. Its stderr still reaches ours, and its
+/// tail and exit status go in `run`.
+fn launch_love(
+    path: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    run: &mut Run,
+) -> Result<()> {
     let love = love().context("no LÖVE on this device")?;
     let dir = love.binary.parent().unwrap_or(Path::new("/"));
     let mut command = Command::new(&love.binary);
@@ -910,17 +939,56 @@ fn launch_love(path: &Path, args: &[String], env: &HashMap<String, String>) -> R
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
-        .envs(env);
+        .envs(env)
+        .stderr(std::process::Stdio::piped());
     let mut child =
         spawn_group(&mut command).with_context(|| format!("running {}", love.binary.display()))?;
     set_foreground(&child.id().to_string());
+    // Drained as it comes, or the game blocks once the pipe fills.
+    let drain = child
+        .stderr
+        .take()
+        .map(|pipe| std::thread::spawn(move || stderr_tail(pipe)));
     let status = child
         .wait()
         .with_context(|| format!("waiting for {}", love.binary.display()))?;
+    if let Some(tail) = drain.and_then(|d| d.join().ok()) {
+        run.stderr_tail = tail;
+    }
+    run.exit_code = status.code();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        run.signal = status.signal();
+    }
     if !status.success() {
         bail!("love exited with {status}");
     }
     Ok(())
+}
+
+/// Copies a game's stderr to ours until it closes, keeping the last
+/// [`STDERR_TAIL`] bytes.
+fn stderr_tail(mut pipe: impl std::io::Read) -> String {
+    use std::io::Write;
+    let mut kept: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let _ = std::io::stderr().write_all(&buf[..n]);
+                kept.extend_from_slice(&buf[..n]);
+                if kept.len() > 2 * STDERR_TAIL {
+                    kept.drain(..kept.len() - STDERR_TAIL);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&kept);
+    crate::report::tail(&text, STDERR_TAIL).to_string()
 }
 
 /// Runs `rom` in the firmware's emulator for `system`.

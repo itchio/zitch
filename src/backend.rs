@@ -29,14 +29,15 @@ use crate::butlerd::types::{
     ProfileLoginWithDeviceCancelParams, ProfileLoginWithDeviceParams,
     ProfileLoginWithDeviceRequestDeviceInfoResult, ProfileLoginWithDeviceResult,
     ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
-    UninstallPerformParams, Upload, UploadType, VersionGetParams, VersionGetResult,
+    UninstallPerformParams, Upload, VersionGetParams, VersionGetResult,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
-    GameUpdate, LaunchFailure, Profile, Prompt, UploadExt, UserExt, human_size, scans_decide,
-    upload_platform_names, upload_runs_here,
+    GameUpdate, LaunchFailure, Profile, Prompt, UploadDetail, UploadExt, UserExt, scans_decide,
+    upload_detail, upload_platform_names, upload_runs_here,
 };
+use crate::report::{Report, Run};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -127,6 +128,8 @@ pub enum Command {
     SetShareDeviceInfo(bool),
     /// Forget the saved login and go back to the sign-in page.
     ChangeUser,
+    /// Send a compatibility report, in the background.
+    Report(Box<Report>),
     Shutdown,
 }
 
@@ -218,9 +221,11 @@ pub enum Event {
         cave_id: String,
     },
     /// The `Launch` call returned; the game has exited or never started.
+    /// `run` is what was seen of the game, when it was launched.
     LaunchFinished {
         cave_id: String,
         result: Result<(), LaunchFailure>,
+        run: Option<Run>,
     },
     /// Updates butler found for installed games, one per cave.
     Updates(Vec<GameUpdate>),
@@ -689,6 +694,7 @@ fn session(
                             message: "another game is still running".into(),
                             log: Vec::new(),
                         }),
+                        run: None,
                     });
                     continue;
                 }
@@ -711,6 +717,7 @@ fn session(
                                 message: error.root_cause().to_string(),
                                 log: Vec::new(),
                             }),
+                            run: None,
                         }
                     },
                     move |client, emit| {
@@ -720,6 +727,7 @@ fn session(
                                 emit.send(Event::LaunchFinished {
                                     cave_id,
                                     result: Ok(()),
+                                    run: None,
                                 });
                                 return Ok(());
                             }
@@ -727,12 +735,13 @@ fn session(
                                 emit.send(Event::LaunchFinished {
                                     cave_id,
                                     result: Err(failure),
+                                    run: None,
                                 });
                                 return Ok(());
                             }
                         };
                         let quit = launches.track(&cave_id, client)?;
-                        let result = launch(
+                        let (result, run) = launch(
                             client,
                             &config,
                             &prompts,
@@ -759,10 +768,34 @@ fn session(
                                 log::warn!("  {line}");
                             }
                         }
-                        emit.send(Event::LaunchFinished { cave_id, result });
+                        emit.send(Event::LaunchFinished {
+                            cave_id,
+                            result,
+                            run: Some(run),
+                        });
                         Ok(())
                     },
                 );
+            }
+            Ok(Command::Report(report)) => {
+                let config = Arc::clone(config);
+                let profile_id = profile.id;
+                let spawned = std::thread::Builder::new()
+                    .name("report".into())
+                    .spawn(move || {
+                        let key = match &config.api_key {
+                            Some(key) => Ok(key.clone()),
+                            None => crate::report::saved_api_key(&config.dbpath, profile_id),
+                        };
+                        let sent =
+                            key.and_then(|key| crate::report::send(&config.api_url, &key, &report));
+                        if let Err(error) = sent {
+                            log::warn!("compatibility report not sent: {error:#}");
+                        }
+                    });
+                if let Err(error) = spawned {
+                    log::warn!("starting the report thread: {error}");
+                }
             }
             Ok(Command::QuitGame { cave_id }) => {
                 launches.quit(&cave_id);
@@ -950,12 +983,24 @@ impl Prompts {
     /// the first as the primary one. `None` means dismissed, or the
     /// interface went away.
     fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, Some(0), false)
+        self.show(emit, title, body, choices, Vec::new(), Some(0), false)
     }
 
     /// Shows a pick between equals: a column, none drawn as primary.
     fn pick(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, None, true)
+        self.show(emit, title, body, choices, Vec::new(), None, true)
+    }
+
+    /// A pick with detail under the first choices, one each.
+    fn pick_detailed(
+        &self,
+        emit: &Emitter,
+        title: &str,
+        body: &str,
+        choices: &[&str],
+        details: Vec<UploadDetail>,
+    ) -> Option<usize> {
+        self.show(emit, title, body, choices, details, None, true)
     }
 
     fn show(
@@ -964,6 +1009,7 @@ impl Prompts {
         title: &str,
         body: &str,
         choices: &[&str],
+        details: Vec<UploadDetail>,
         primary: Option<usize>,
         stacked: bool,
     ) -> Option<usize> {
@@ -981,6 +1027,7 @@ impl Prompts {
             focus: 0,
             primary,
             stacked,
+            details,
             progress: None,
         }));
         let choice = rx.recv().ok().flatten();
@@ -1232,7 +1279,7 @@ fn plan_launch(
 /// logged at error level, which is where the game's stderr ends up.
 /// `target` names a launch target by path, as `Launch.GetTargets` gave
 /// it; `name` is the game's title, for what the firmware shows while a
-/// payload of ours runs.
+/// payload of ours runs. Comes back with what was seen of the run.
 #[allow(clippy::too_many_arguments)]
 fn launch(
     client: &Client,
@@ -1243,8 +1290,10 @@ fn launch(
     target: Option<&str>,
     name: &str,
     emit: &Emitter,
-) -> Result<(), LaunchFailure> {
+) -> (Result<(), LaunchFailure>, Run) {
     let mut errors: std::collections::VecDeque<String> = Default::default();
+    let run = std::cell::RefCell::new(Run::default());
+    let started = std::cell::Cell::new(None);
     let launching = LaunchCall {
         client,
         config,
@@ -1254,6 +1303,8 @@ fn launch(
         target,
         name,
         emit,
+        run: &run,
+        started: &started,
     };
     let result = launch_inner(&launching, |line| {
         if errors.len() == LAUNCH_LOG_TAIL {
@@ -1261,7 +1312,16 @@ fn launch(
         }
         errors.push_back(line);
     });
-    result.map_err(|error| LaunchFailure {
+    let mut run = run.into_inner();
+    run.seconds = started.get().map(|at: Instant| at.elapsed().as_secs());
+    if run.strategy == Some("native") {
+        run.launch_target = target.map(|t| format!("native {t}"));
+        // butler logs a native game's stderr at error level.
+        let lines: Vec<&str> = errors.iter().map(String::as_str).collect();
+        run.stderr_tail =
+            crate::report::tail(&lines.join("\n"), crate::report::STDERR_TAIL).to_string();
+    }
+    let result = result.map_err(|error| LaunchFailure {
         // Our own reply to a RuntimeLaunch comes back wrapped as a
         // remote error; the words are ours already.
         message: error
@@ -1273,7 +1333,8 @@ fn launch(
             .into_iter()
             .filter(|l| !l.starts_with("Relaying launch failure") && !l.starts_with("Had error"))
             .collect(),
-    })
+    });
+    (result, run)
 }
 
 /// One launch's particulars, shared by the call and its request handlers.
@@ -1286,6 +1347,10 @@ struct LaunchCall<'a> {
     target: Option<&'a str>,
     name: &'a str,
     emit: &'a Emitter,
+    /// Filled in as the launch goes.
+    run: &'a std::cell::RefCell<Run>,
+    /// When the game came up.
+    started: &'a std::cell::Cell<Option<Instant>>,
 }
 
 fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String)) -> Result<()> {
@@ -1298,6 +1363,8 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
         target,
         name,
         emit,
+        run,
+        started,
     } = *launching;
     std::fs::create_dir_all(&config.prereqs_dir)
         .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
@@ -1317,7 +1384,10 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
         Incoming::Notification { method, params } => {
             match AnyNotification::decode(&method, params) {
                 Ok(AnyNotification::LaunchRunning(n)) => {
+                    started.set(Some(Instant::now()));
+                    // Only a game butler runs itself has a pid.
                     if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
+                        run.borrow_mut().strategy = Some("native");
                         crate::muos::foreground(pid);
                     }
                     emit.send(Event::LaunchRunning {
@@ -1359,7 +1429,7 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
                     return;
                 }
             };
-            let outcome = answer_launch_request(client, prompts, name, emit, &id, request);
+            let outcome = answer_launch_request(client, prompts, name, emit, &id, request, run);
             if let Err(error) = outcome {
                 log::warn!("answering {method}: {error:#}");
                 let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
@@ -1376,6 +1446,7 @@ fn answer_launch_request(
     emit: &Emitter,
     id: &serde_json::Value,
     request: AnyServerRequest,
+    run: &std::cell::RefCell<Run>,
 ) -> Result<()> {
     match request {
         AnyServerRequest::RuntimeLaunch(p) => {
@@ -1390,7 +1461,10 @@ fn answer_launch_request(
             // than that.
             let args = p.args.as_deref().unwrap_or(&[]);
             let env = p.env.clone().unwrap_or_default();
-            match crate::muos::launch(name, &content, args, &env) {
+            let mut seen = Run::default();
+            let launched = crate::muos::launch(name, &content, args, &env, &mut seen);
+            *run.borrow_mut() = seen;
+            match launched {
                 Ok(()) => client.reply(id, RuntimeLaunchResult {}),
                 Err(error) => client.reply_error(id, 500, &format!("{error:#}")),
             }
@@ -1863,39 +1937,6 @@ fn queue_install(
     Ok(Queued::Yes)
 }
 
-/// One line per upload for the picker: its name, size, and what marks it
-/// out when the name alone does not.
-fn upload_label(upload: &Upload) -> String {
-    let mut label = upload.name().to_string();
-    let mut notes = Vec::new();
-    if upload.size > 0 {
-        notes.push(human_size(upload.size));
-    }
-    if upload.demo {
-        notes.push("demo".to_string());
-    }
-    let kind = match upload.r#type {
-        UploadType::Default | UploadType::Other | UploadType::Unknown => None,
-        UploadType::Flash => Some("flash"),
-        UploadType::Unity => Some("unity web player"),
-        UploadType::Java => Some("java"),
-        UploadType::HTML => Some("html"),
-        UploadType::Soundtrack => Some("soundtrack"),
-        UploadType::Book => Some("book"),
-        UploadType::Video => Some("video"),
-        UploadType::Documentation => Some("documentation"),
-        UploadType::Mod => Some("mod"),
-        UploadType::AudioAssets => Some("audio assets"),
-        UploadType::GraphicalAssets => Some("graphical assets"),
-        UploadType::Sourcecode => Some("source code"),
-    };
-    notes.extend(kind.map(str::to_string));
-    if !notes.is_empty() {
-        label.push_str(&format!(" ({})", notes.join(", ")));
-    }
-    label
-}
-
 /// The upload picker's title; the Downloads tab recognises it by this.
 pub const UPLOAD_PICKER: &str = "Which download?";
 
@@ -1917,21 +1958,24 @@ fn pick_upload(
     uploads: &[Upload],
     likely: usize,
 ) -> Option<usize> {
-    let labels: Vec<String> = uploads.iter().map(upload_label).collect();
+    let labels: Vec<&str> = uploads.iter().map(UploadExt::name).collect();
+    let decide = scans_decide(uploads);
+    let details: Vec<UploadDetail> = uploads.iter().map(|u| upload_detail(u, decide)).collect();
     let others = uploads.len() - likely;
     let title = &game.title;
     if likely > 0 && others > 0 {
         let show_all = format!("Show all {} downloads", uploads.len());
-        let mut choices: Vec<&str> = labels[..likely].iter().map(String::as_str).collect();
+        let mut choices: Vec<&str> = labels[..likely].to_vec();
         choices.push(&show_all);
         choices.push("Cancel");
         let body = downloads_here(title, likely);
-        let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
+        let shown = details[..likely].to_vec();
+        let picked = prompts.pick_detailed(emit, UPLOAD_PICKER, &body, &choices, shown)?;
         if picked != likely {
             return (picked < likely).then_some(picked);
         }
     }
-    let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let mut choices = labels.clone();
     choices.push("Cancel");
     let body = if likely == 0 {
         format!("{title} has no download recognised for this device. Install one anyway?")
@@ -1942,7 +1986,7 @@ fn pick_upload(
     } else {
         format!("{title}: the last {others} downloads were not recognised for this device.")
     };
-    let picked = prompts.pick(emit, UPLOAD_PICKER, &body, &choices)?;
+    let picked = prompts.pick_detailed(emit, UPLOAD_PICKER, &body, &choices, details)?;
     (picked < labels.len()).then_some(picked)
 }
 

@@ -10,9 +10,10 @@ use crate::images::{Animation, CoverLoader, Variant};
 pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, PlayableType,
-    Prompt, Tab, UploadExt, platform_names, playable_here, scanned_platform_words,
+    Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here, scanned_platform_words,
 };
 use crate::qr::QrCode;
+use crate::report::{self, Rating, Report};
 
 // The itch app's palette (renderer/styles.ts): codGray, itemBackground,
 // ivory, carnation, gossip, amber.
@@ -1946,6 +1947,71 @@ fn pill_with(
     }
 }
 
+/// A full-width choice with its name over a line of detail: platforms
+/// green where they run here, then the notes.
+fn choice_card(
+    ui: &mut Ui,
+    m: &Metrics,
+    label: &str,
+    detail: &UploadDetail,
+    focused: bool,
+) -> egui::Response {
+    let pad = vec2(m.space(16.0), m.space(9.0));
+    let inner = ui.available_width() - 2.0 * pad.x;
+    let name_color = if focused {
+        TEXT
+    } else {
+        Color32::from_rgb(0xe8, 0xe2, 0xdf)
+    };
+    let name = one_line(ui, label, bold(m.button), name_color, inner);
+    let font = FontId::proportional(m.caption);
+    let format = |color| egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    for (i, (word, here)) in detail.platforms.iter().enumerate() {
+        if i > 0 {
+            job.append(", ", 0.0, format(DIM));
+        }
+        job.append(word, 0.0, format(if *here { GREEN } else { DIM }));
+    }
+    if detail.platforms.is_empty() {
+        job.append("no platforms listed", 0.0, format(DIM));
+    }
+    for note in &detail.notes {
+        job.append(" · ", 0.0, format(DIM));
+        job.append(note, 0.0, format(DIM));
+    }
+    job.wrap.max_width = inner;
+    job.wrap.max_rows = 2;
+    let info = ui.painter().layout_job(job);
+    let gap = m.space(3.0);
+    let size = vec2(
+        ui.available_width(),
+        name.size().y + gap + info.size().y + 2.0 * pad.y,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let radii = [m.space(12.0); 4];
+    let border = m.space(1.25).max(1.0);
+    let (fill, edge) = if focused {
+        (SURFACE_HOVER, BORDER_HOVER)
+    } else {
+        (SURFACE, BORDER)
+    };
+    fill_squircle(ui, rect, radii, fill, Stroke::new(border, edge));
+    if focused {
+        focus_ring(ui, rect, radii, m);
+    }
+    let top = rect.min + pad;
+    let name_height = name.size().y;
+    ui.painter().galley(top, name, name_color);
+    ui.painter()
+        .galley(top + vec2(0.0, name_height + gap), info, DIM);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A control on the row above a tab's list. Every button and every filter
 /// option is one focus stop, numbered left to right across the row.
 pub enum ToolbarControl {
@@ -2232,7 +2298,12 @@ pub fn prompt(
                                     for (index, label) in prompt.choices.iter().enumerate() {
                                         let focused = index == prompt.focus;
                                         let primary = prompt.primary == Some(index);
-                                        let response = pill(ui, m, label, focused, primary);
+                                        let response = match prompt.details.get(index) {
+                                            Some(detail) => {
+                                                choice_card(ui, m, label, detail, focused)
+                                            }
+                                            None => pill(ui, m, label, focused, primary),
+                                        };
                                         if focused {
                                             ui.scroll_to_rect(response.rect.expand(m.ring), None);
                                         }
@@ -2263,6 +2334,306 @@ pub fn prompt(
     // that redraws only on input would show the first frame's layout, so
     // ask for frames until the dialog holds still.
     let id = egui::Id::new("prompt-rect");
+    let rect = shown.response.rect;
+    if ctx.data(|d| d.get_temp::<Rect>(id)) != Some(rect) {
+        ctx.data_mut(|d| d.insert_temp(id, rect));
+        ctx.request_repaint();
+    }
+}
+
+/// The question after a play session: a rating, then what went wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportView {
+    pub game: String,
+    /// The report as it will be sent; its rating follows focus until one
+    /// is picked.
+    pub draft: Report,
+    /// A rating is picked and the second step shows.
+    pub picked: bool,
+    /// On the ratings, an index into [`Rating::ALL`]. After, an index into
+    /// [`report::flags`] while the rating asks for them, then Send, then
+    /// Skip.
+    pub focus: usize,
+}
+
+/// What a [`ReportView`] row does when activated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportRow {
+    Rating(Rating),
+    Flag(&'static str),
+    Send,
+    Skip,
+}
+
+impl ReportView {
+    pub fn new(game: String, draft: Report) -> Self {
+        let focus = Rating::ALL
+            .iter()
+            .position(|r| *r == draft.rating)
+            .unwrap_or(0);
+        Self {
+            game,
+            draft,
+            picked: false,
+            focus,
+        }
+    }
+
+    fn flag_rows(&self) -> usize {
+        if self.draft.rating.asks_flags() {
+            report::flags().count()
+        } else {
+            0
+        }
+    }
+
+    pub fn rows(&self) -> usize {
+        if self.picked {
+            self.flag_rows() + 2
+        } else {
+            Rating::ALL.len()
+        }
+    }
+
+    pub fn row(&self, index: usize) -> Option<ReportRow> {
+        if !self.picked {
+            return Rating::ALL.get(index).copied().map(ReportRow::Rating);
+        }
+        let flags = self.flag_rows();
+        match index {
+            i if i < flags => report::flags().nth(i).map(|(_, f)| ReportRow::Flag(f.id)),
+            i if i == flags => Some(ReportRow::Send),
+            i if i == flags + 1 => Some(ReportRow::Skip),
+            _ => None,
+        }
+    }
+
+    pub fn focused(&self) -> Option<ReportRow> {
+        self.row(self.focus)
+    }
+
+    /// Moves focus: up and down through the rows, left and right between
+    /// flag groups, and between Send and Skip.
+    pub fn step(&mut self, direction: Direction) {
+        let last = self.rows().saturating_sub(1);
+        let flags = self.flag_rows();
+        let group_of = |i: usize| report::flags().nth(i).map(|(g, _)| g);
+        self.focus = match direction {
+            Direction::Up => self.focus.saturating_sub(1),
+            Direction::Down => (self.focus + 1).min(last),
+            Direction::Left | Direction::Right if self.picked && self.focus < flags => {
+                let group = group_of(self.focus).unwrap_or(0);
+                let target = if direction == Direction::Right {
+                    group + 1
+                } else {
+                    group.saturating_sub(1)
+                };
+                match (0..flags).find(|&i| group_of(i) == Some(target)) {
+                    Some(first) => first,
+                    // Right from the last group reaches Send.
+                    None if direction == Direction::Right => flags,
+                    None => self.focus,
+                }
+            }
+            Direction::Left if self.picked && self.focus == flags + 1 => flags,
+            Direction::Right if self.picked && self.focus == flags => flags + 1,
+            Direction::Home | Direction::PageUp | Direction::Top => 0,
+            Direction::End | Direction::PageDown | Direction::Bottom => last,
+            _ => self.focus,
+        };
+        if !self.picked {
+            self.draft.rating = Rating::ALL[self.focus];
+        }
+    }
+
+    /// Takes the focused rating and moves on to what went wrong, or
+    /// straight to Send when the rating asks nothing more.
+    pub fn pick(&mut self) {
+        self.draft.rating = Rating::ALL[self.focus.min(Rating::ALL.len() - 1)];
+        self.picked = true;
+        self.focus = 0;
+    }
+
+    /// Back to the ratings, keeping the flags checked so far.
+    pub fn unpick(&mut self) {
+        self.picked = false;
+        self.focus = Rating::ALL
+            .iter()
+            .position(|r| *r == self.draft.rating)
+            .unwrap_or(0);
+    }
+
+    pub fn toggle(&mut self, flag: &'static str) {
+        match self.draft.flags.iter().position(|f| *f == flag) {
+            Some(index) => {
+                self.draft.flags.remove(index);
+            }
+            None => self.draft.flags.push(flag),
+        }
+    }
+
+    /// The report to send: flags only for a rating that asks for them,
+    /// in screen order.
+    pub fn finish(&self) -> Report {
+        let mut report = self.draft.clone();
+        report.flags = if report.rating.asks_flags() {
+            report::flags()
+                .map(|(_, f)| f.id)
+                .filter(|id| self.draft.flags.contains(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        report
+    }
+}
+
+pub fn report(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    page: Rect,
+    view: &ReportView,
+    actions: &mut Vec<Action>,
+) {
+    egui::Area::new(egui::Id::new("report-dim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
+        });
+    let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
+    let shown = egui::Area::new(egui::Id::new("report"))
+        .order(egui::Order::Foreground)
+        .anchor(
+            egui::Align2::CENTER_CENTER,
+            page.center() - ctx.content_rect().center(),
+        )
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(TILE_BG)
+                .corner_radius(CornerRadius::same(14))
+                .stroke(Stroke::new(1.0, BORDER))
+                .inner_margin(m.space(24.0))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    let budget = page.height() * 0.9 - 2.0 * m.space(24.0);
+                    let top = ui.cursor().top();
+                    let title = if view.picked {
+                        view.draft.rating.label()
+                    } else {
+                        "How did it run?"
+                    };
+                    ui.label(egui::RichText::new(title).font(bold(m.dialog)).color(TEXT));
+                    ui.add_space(m.space(4.0));
+                    let subtitle = if view.picked && view.draft.rating.asks_flags() {
+                        "What went wrong?"
+                    } else {
+                        view.game.as_str()
+                    };
+                    subtle_truncated(ui, m, subtitle);
+                    ui.add_space(m.space(10.0));
+                    // The note stays in view under the scrolling rows.
+                    let note = "Includes device details and the game's error output.";
+                    let note_height = m.caption + m.space(14.0);
+                    let budget =
+                        (budget - (ui.cursor().top() - top) - note_height).max(m.space(60.0));
+                    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+                    let mut row_response = |response: egui::Response, index: usize| {
+                        if response.hovered() && pointer_moved {
+                            actions.push(Action::ReportFocus(index));
+                        }
+                        if response.clicked() {
+                            actions.push(Action::ReportFocus(index));
+                            actions.push(Action::Activate);
+                        }
+                    };
+                    ui.allocate_ui(vec2(ui.available_width(), budget), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("report", view.picked))
+                            .auto_shrink([false, true])
+                            .max_height(budget)
+                            .scroll_bar_visibility(scroll_bar(ui, true))
+                            .show(ui, |ui| {
+                                ui.add_space(m.ring);
+                                if !view.picked {
+                                    ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
+                                    for (index, rating) in Rating::ALL.iter().enumerate() {
+                                        let focused = index == view.focus;
+                                        let response = ui
+                                            .horizontal(|ui| {
+                                                ui.add_space(m.ring);
+                                                pill(ui, m, rating.label(), focused, false)
+                                            })
+                                            .inner;
+                                        if focused {
+                                            ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                                        }
+                                        row_response(response, index);
+                                    }
+                                } else {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    let mut index = 0;
+                                    if view.draft.rating.asks_flags() {
+                                        for group in report::FLAG_GROUPS {
+                                            ui.add_space(m.space(6.0));
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(m.ring + m.space(8.0));
+                                                ui.label(
+                                                    egui::RichText::new(group.label)
+                                                        .font(bold(m.caption))
+                                                        .color(DIM),
+                                                );
+                                            });
+                                            ui.add_space(m.space(4.0));
+                                            for flag in group.flags {
+                                                let checked = view.draft.flags.contains(&flag.id);
+                                                let response = check_row(
+                                                    ui,
+                                                    m,
+                                                    ("flag", index),
+                                                    flag.label,
+                                                    checked,
+                                                    index == view.focus,
+                                                );
+                                                row_response(response, index);
+                                                index += 1;
+                                            }
+                                        }
+                                        ui.add_space(m.space(16.0));
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = m.space(12.0);
+                                        ui.add_space(m.ring);
+                                        for (offset, label) in ["Send", "Skip"].iter().enumerate() {
+                                            let row = index + offset;
+                                            let focused = row == view.focus;
+                                            let response = pill(ui, m, label, focused, offset == 0);
+                                            if focused {
+                                                ui.scroll_to_rect(
+                                                    response.rect.expand(m.ring),
+                                                    None,
+                                                );
+                                            }
+                                            row_response(response, row);
+                                        }
+                                    });
+                                }
+                                ui.add_space(m.ring);
+                            });
+                    });
+                    ui.add_space(m.space(10.0));
+                    ui.label(
+                        egui::RichText::new(note)
+                            .font(FontId::proportional(m.caption))
+                            .color(DIM),
+                    );
+                });
+        });
+    let id = egui::Id::new("report-rect");
     let rect = shown.response.rect;
     if ctx.data(|d| d.get_temp::<Rect>(id)) != Some(rect) {
         ctx.data_mut(|d| d.insert_temp(id, rect));
@@ -2462,42 +2833,7 @@ pub fn playable_types(
                     });
                     ui.add_space(m.space(4.0));
                 }
-                let width = ui.available_width() - 2.0 * m.ring;
-                let height = m.space(32.0);
-                let (outer, _) = ui.allocate_exact_size(
-                    vec2(ui.available_width(), height + m.space(2.0)),
-                    Sense::hover(),
-                );
-                let rect = Rect::from_min_size(
-                    pos2(outer.left() + m.ring, outer.top()),
-                    vec2(width.min(m.space(420.0)), height),
-                );
-                let response = ui.interact(rect, ui.id().with(("type", index)), Sense::click());
-                let focused = index == row;
-                if focused || response.hovered() {
-                    fill_squircle(ui, rect, [m.space(6.0); 4], TILE_HOVER, Stroke::NONE);
-                }
-                if focused {
-                    focus_ring(ui, rect, [m.space(6.0); 4], m);
-                    ui.scroll_to_rect(rect.expand(m.ring), None);
-                }
-                let icon = m.icon(14.0);
-                let icon_rect = Rect::from_min_size(
-                    pos2(rect.left() + m.space(8.0), rect.center().y - icon / 2.0),
-                    vec2(icon, icon),
-                );
-                if checked {
-                    checkbox_icon(ui, icon_rect, TEXT);
-                } else {
-                    checkbox_box(ui, icon_rect, TEXT.gamma_multiply(0.5));
-                }
-                ui.painter().text(
-                    pos2(icon_rect.right() + m.space(10.0), rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(m.body),
-                    if checked { TEXT } else { DIM },
-                );
+                let response = check_row(ui, m, ("type", index), label, checked, index == row);
                 if response.hovered() && pointer_moved {
                     actions.push(Action::FocusTypeRow(index));
                 }
@@ -2508,6 +2844,54 @@ pub fn playable_types(
             }
             ui.add_space(m.ring);
         });
+}
+
+/// A checkbox and its label on a row that takes focus, scrolled into
+/// view when focused. Leaves room for the focus ring on either side.
+fn check_row(
+    ui: &mut Ui,
+    m: &Metrics,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    checked: bool,
+    focused: bool,
+) -> egui::Response {
+    let width = ui.available_width() - 2.0 * m.ring;
+    let height = m.space(32.0);
+    let (outer, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), height + m.space(2.0)),
+        Sense::hover(),
+    );
+    let rect = Rect::from_min_size(
+        pos2(outer.left() + m.ring, outer.top()),
+        vec2(width.min(m.space(420.0)), height),
+    );
+    let response = ui.interact(rect, ui.id().with(id), Sense::click());
+    if focused || response.hovered() {
+        fill_squircle(ui, rect, [m.space(6.0); 4], TILE_HOVER, Stroke::NONE);
+    }
+    if focused {
+        focus_ring(ui, rect, [m.space(6.0); 4], m);
+        ui.scroll_to_rect(rect.expand(m.ring), None);
+    }
+    let icon = m.icon(14.0);
+    let icon_rect = Rect::from_min_size(
+        pos2(rect.left() + m.space(8.0), rect.center().y - icon / 2.0),
+        vec2(icon, icon),
+    );
+    if checked {
+        checkbox_icon(ui, icon_rect, TEXT);
+    } else {
+        checkbox_box(ui, icon_rect, TEXT.gamma_multiply(0.5));
+    }
+    ui.painter().text(
+        pos2(icon_rect.right() + m.space(10.0), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(m.body),
+        if checked { TEXT } else { DIM },
+    );
+    response
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.

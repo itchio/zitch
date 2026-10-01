@@ -33,6 +33,9 @@ libc = "0.2"
 # The sign-in QR code and the PKCE secrets behind its URL.
 qrcodegen = "1.8"
 sha2 = "0.10"
+# Reads the signed-in API key from butler's database, for compatibility
+# reports. Bundled so the firmware's libsqlite does not matter.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [features]
 default = ["eframe-host", "gilrs"]

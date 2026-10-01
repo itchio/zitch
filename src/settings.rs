@@ -17,6 +17,11 @@ pub struct Settings {
     /// Types "Playable here" leaves out, by scanned platform id. Kept as
     /// what is off so a type the device gains later starts out on.
     pub playable_hidden: Vec<String>,
+    /// Never ask how a game ran.
+    pub reports_off: bool,
+    /// Uploads a compatibility report was sent for, which are not asked
+    /// about again.
+    pub reported_uploads: Vec<i64>,
 }
 
 impl Settings {
@@ -69,6 +74,8 @@ mod tests {
             playable_only: true,
             collections_installed_only: true,
             playable_hidden: vec!["rom:snes".to_string()],
+            reports_off: true,
+            reported_uploads: vec![12],
         };
         settings.save(&path);
         assert_eq!(Settings::load(&path), settings);

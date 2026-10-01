@@ -15,6 +15,7 @@ use crate::model::{
     Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
 };
 use crate::qr::QrCode;
+use crate::report::{Rating, Report, Run};
 use crate::self_update::{self, SelfUpdate};
 use crate::settings::Settings;
 use crate::ui;
@@ -136,6 +137,12 @@ pub struct App {
     login: Option<LoginView>,
     /// The open game's page as a QR code, over the page.
     qr: Option<ui::QrView>,
+    /// How the last game ran, asked after it exits.
+    report: Option<ui::ReportView>,
+    /// Never ask how a game ran.
+    reports_off: bool,
+    /// Uploads already reported on, not asked about again.
+    reported_uploads: Vec<i64>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -195,6 +202,8 @@ pub enum Step {
     Capture,
     /// Raise a sample failure notice, to look at it.
     Notice,
+    /// Ask how a sample game ran, to look at the question.
+    Report,
     /// Type into the search box.
     Search(String),
 }
@@ -235,6 +244,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "back" => Ok(Step::Act(Action::Back)),
             "capture" => Ok(Step::Capture),
             "notice" => Ok(Step::Notice),
+            "report" => Ok(Step::Report),
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             "qr" => Ok(Step::Act(Action::ShowQr)),
@@ -351,6 +361,9 @@ impl App {
             page: Page::Library,
             login: None,
             qr: None,
+            report: None,
+            reports_off: settings.reports_off,
+            reported_uploads: settings.reported_uploads,
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -648,11 +661,20 @@ impl App {
                     title: "Which download?".into(),
                     body: format!("Sample has {count} downloads for this device."),
                     choices: (1..=*count)
-                        .map(|i| format!("Sample - Linux - build {i} (135.9 MB)"))
+                        .map(|i| format!("Sample - Linux - build {i}"))
                         .collect(),
                     focus: 0,
                     primary: None,
                     stacked: true,
+                    details: (1..=*count)
+                        .map(|i| crate::model::UploadDetail {
+                            platforms: vec![
+                                ("Linux ARM64".into(), i == 1),
+                                ("Linux x64".into(), false),
+                            ],
+                            notes: vec!["135.9 MB".into()],
+                        })
+                        .collect(),
                     progress: None,
                 },
                 None => Prompt {
@@ -663,6 +685,7 @@ impl App {
                     focus: 0,
                     primary: Some(0),
                     stacked: false,
+                    details: Vec::new(),
                     progress: None,
                 },
             });
@@ -726,6 +749,24 @@ impl App {
             }
             return;
         }
+        if let Some(view) = self.report.as_mut() {
+            match action {
+                Action::MoveFocus(direction) => view.step(direction),
+                Action::ReportFocus(index) if index < view.rows() => view.focus = index,
+                Action::Activate => match view.focused() {
+                    Some(ui::ReportRow::Rating(_)) => view.pick(),
+                    Some(ui::ReportRow::Flag(flag)) => view.toggle(flag),
+                    Some(ui::ReportRow::Send) => self.send_report(),
+                    Some(ui::ReportRow::Skip) | None => self.report = None,
+                },
+                // Start sends from either step, with the rating in focus.
+                Action::Menu => self.send_report(),
+                Action::Back if view.picked => view.unpick(),
+                Action::Back => self.report = None,
+                _ => {}
+            }
+            return;
+        }
         if let Some(focus) = self.menu {
             let items = self.menu_items();
             match action {
@@ -737,8 +778,12 @@ impl App {
                 Action::Activate => {
                     if let Some(action) = items.into_iter().nth(focus).map(|item| item.action) {
                         // Quit keeps the drawer in place under the overlay;
-                        // a refresh keeps it to show its progress.
-                        if !matches!(action, Action::Quit | Action::RefreshLibrary) {
+                        // a refresh keeps it to show its progress, a
+                        // toggle its new state.
+                        if !matches!(
+                            action,
+                            Action::Quit | Action::RefreshLibrary | Action::SetAskReports(_)
+                        ) {
                             self.menu = None;
                         }
                         self.actions.push(action);
@@ -747,6 +792,7 @@ impl App {
                 Action::Back | Action::Menu => self.menu = None,
                 Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
                 Action::RefreshLibrary => self.refresh_library(),
+                Action::SetAskReports(on) => self.set_ask_reports(on),
                 _ => {}
             }
             return;
@@ -1182,7 +1228,8 @@ impl App {
                 self.backend.send(Command::Launch { cave_id });
             }
             // Only meaningful while a prompt is open, handled above.
-            Action::Answer { .. } | Action::PromptFocus(_) => {}
+            Action::Answer { .. } | Action::PromptFocus(_) | Action::ReportFocus(_) => {}
+            Action::SetAskReports(on) => self.set_ask_reports(on),
             Action::Install { game_id } => {
                 let Some(game) = self.game(game_id).cloned() else {
                     return;
@@ -1562,6 +1609,8 @@ impl App {
                 playable_only: self.playable_only,
                 collections_installed_only: self.collections_installed_only,
                 playable_hidden: self.playable_hidden.clone(),
+                reports_off: self.reports_off,
+                reported_uploads: self.reported_uploads.clone(),
             }
             .save(path);
         }
@@ -1748,6 +1797,19 @@ impl App {
                     self.rebuild_sections();
                 }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
+                Step::Report => {
+                    self.report = Some(ui::ReportView::new(
+                        "Sample game".into(),
+                        Report {
+                            game_id: 0,
+                            upload_id: 0,
+                            build_id: None,
+                            rating: Rating::Perfect,
+                            flags: Vec::new(),
+                            run: Run::default(),
+                        },
+                    ))
+                }
                 Step::Notice => self.notify(
                     "Couldn't check for updates: a sample failure from the screenshot script"
                         .into(),
@@ -2008,8 +2070,15 @@ impl App {
                         self.hide_window();
                     }
                 }
-                Event::LaunchFinished { cave_id, result } => {
+                Event::LaunchFinished {
+                    cave_id,
+                    result,
+                    run,
+                } => {
                     self.running.remove(&cave_id);
+                    if let Some(run) = run {
+                        self.offer_report(&cave_id, result.is_err(), run);
+                    }
                     if let Err(failure) = result {
                         // The game's page shows the failure in full; the
                         // header line is for when the user is elsewhere.
@@ -2327,6 +2396,66 @@ impl App {
     }
 
     /// Something failed that has no page to show it on.
+    /// How long a session has to be before zitch asks how it ran. A
+    /// failed launch is asked about whatever its length.
+    const REPORT_AFTER_SECONDS: u64 = 30;
+
+    /// Asks how the game in `cave_id` ran, unless the player turned that
+    /// off, already reported on this upload, or barely played.
+    fn offer_report(&mut self, cave_id: &str, failed: bool, run: Run) {
+        if self.reports_off || self.login.is_some() || self.shot.is_some() {
+            return;
+        }
+        let long_enough = run.seconds.is_some_and(|s| s >= Self::REPORT_AFTER_SECONDS);
+        if !failed && !long_enough {
+            return;
+        }
+        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+            return;
+        };
+        let (Some(game), Some(upload)) = (&cave.game, &cave.upload) else {
+            return;
+        };
+        if self.reported_uploads.contains(&upload.id) {
+            return;
+        }
+        let draft = Report {
+            game_id: game.id,
+            upload_id: upload.id,
+            build_id: cave.build.as_ref().map(|b| b.id),
+            rating: if failed {
+                Rating::WontRun
+            } else {
+                Rating::Perfect
+            },
+            flags: Vec::new(),
+            run,
+        };
+        self.report = Some(ui::ReportView::new(game.title.clone(), draft));
+    }
+
+    fn set_ask_reports(&mut self, on: bool) {
+        self.reports_off = !on;
+        self.save_settings();
+    }
+
+    /// Sends the open report in the background and closes it.
+    fn send_report(&mut self) {
+        let Some(view) = self.report.take() else {
+            return;
+        };
+        let report = view.finish();
+        if report.game_id == 0 {
+            // The screenshot script's sample.
+            return;
+        }
+        if !self.reported_uploads.contains(&report.upload_id) {
+            self.reported_uploads.push(report.upload_id);
+            self.save_settings();
+        }
+        self.backend.send(Command::Report(Box::new(report)));
+    }
+
     fn notify(&mut self, message: String) {
         log::warn!("{message}");
         self.notice = Some((message, Instant::now()));
@@ -2411,6 +2540,7 @@ impl App {
             primary: (choices.len() > 1).then_some(0),
             choices: choices.into_iter().map(String::from).collect(),
             stacked: false,
+            details: Vec::new(),
             progress,
         })
     }
@@ -2468,6 +2598,7 @@ impl App {
     /// database's, not the profile's, and the next session resends them.
     fn sign_out(&mut self) {
         self.profile = None;
+        self.report = None;
         self.owned = Loadable::Loading;
         self.collections = Loadable::default();
         self.collection_filtered = None;
@@ -2522,6 +2653,15 @@ impl App {
             });
         }
         items.push(ui::MenuItem {
+            label: if self.reports_off {
+                "Ask how games ran: off".into()
+            } else {
+                "Ask how games ran: on".into()
+            },
+            action: Action::SetAskReports(self.reports_off),
+            busy: false,
+        });
+        items.push(ui::MenuItem {
             label: "Quit".into(),
             action: Action::Quit,
             busy: false,
@@ -2556,6 +2696,21 @@ impl App {
                 hints.push((vec![Glyph::Confirm], choice.clone()));
             }
             hints.push((vec![Glyph::Back], "Dismiss".to_string()));
+            return hints;
+        }
+        if let Some(view) = &self.report {
+            let mut hints = vec![(vec![Glyph::Navigate], "Choose".to_string())];
+            let confirm = match view.focused() {
+                Some(ui::ReportRow::Rating(_)) => "Select",
+                Some(ui::ReportRow::Flag(flag)) if view.draft.flags.contains(&flag) => "Uncheck",
+                Some(ui::ReportRow::Flag(_)) => "Check",
+                Some(ui::ReportRow::Send) => "Send",
+                Some(ui::ReportRow::Skip) | None => "Skip",
+            };
+            hints.push((vec![Glyph::Confirm], confirm.to_string()));
+            hints.push((vec![Glyph::Menu], "Send".to_string()));
+            let back = if view.picked { "Back" } else { "Skip" };
+            hints.push((vec![Glyph::Back], back.to_string()));
             return hints;
         }
         if self.handed_off().is_some() {
@@ -2802,7 +2957,10 @@ impl App {
                 &self.glyphs,
                 self.input_mode,
                 &hints,
-                self.prompt.is_some() || self.menu.is_some() || self.qr_shown(),
+                self.prompt.is_some()
+                    || self.menu.is_some()
+                    || self.qr_shown()
+                    || self.report.is_some(),
                 self.menu.is_some(),
             );
         }
@@ -3089,6 +3247,9 @@ impl App {
             && let Some(qr) = &self.qr
         {
             ui::qr(ui.ctx(), &m, ui.max_rect(), page, qr, &mut self.actions);
+        }
+        if let Some(view) = &self.report {
+            ui::report(ui.ctx(), &m, ui.max_rect(), page, view, &mut self.actions);
         }
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), page, prompt, &mut self.actions);
