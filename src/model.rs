@@ -157,9 +157,14 @@ pub fn playable_here(game: &Game) -> bool {
 /// hide, not to refuse an install.
 pub fn known_playable_here(game: &Game, hidden: &[String]) -> bool {
     if crate::muos::available() {
-        game.scanned_platforms
-            .as_deref()
-            .is_some_and(|scanned| any_runs_here(scanned, device_platforms(), hidden))
+        game.scanned_platforms.as_deref().is_some_and(|scanned| {
+            any_runs_here(
+                scanned,
+                device_platforms(),
+                hidden,
+                crate::muos::love_platforms(),
+            )
+        })
     } else {
         runs_here(&game.platforms)
     }
@@ -189,8 +194,11 @@ impl CollectionFilter {
         };
         if self.playable {
             if crate::muos::available() {
-                let wanted = shown_types(device_platforms(), &self.hidden);
-                filters.scanned_platforms = Some(wanted.into_iter().cloned().collect());
+                filters.scanned_platforms = Some(wanted_platforms(
+                    device_platforms(),
+                    &self.hidden,
+                    crate::muos::love_platforms(),
+                ));
             } else {
                 filters.platform = Some(os_platform().to_string());
             }
@@ -285,9 +293,26 @@ pub fn shown_types<'a>(device: &'a [String], hidden: &[String]) -> Vec<&'a Strin
     }
 }
 
-fn any_runs_here(scanned: &[String], device: &[String], hidden: &[String]) -> bool {
-    let shown = shown_types(device, hidden);
-    scanned.iter().any(|p| shown.contains(&p))
+/// The scanned platforms the shown types match. A LÖVE game only counts
+/// with a version this device runs, `love` alone says nothing about which.
+fn wanted_platforms(device: &[String], hidden: &[String], love: &[String]) -> Vec<String> {
+    shown_types(device, hidden)
+        .into_iter()
+        .flat_map(|id| match id.as_str() {
+            "love" => love.to_vec(),
+            _ => vec![id.clone()],
+        })
+        .collect()
+}
+
+fn any_runs_here(
+    scanned: &[String],
+    device: &[String],
+    hidden: &[String],
+    love: &[String],
+) -> bool {
+    let wanted = wanted_platforms(device, hidden, love);
+    scanned.iter().any(|p| wanted.contains(p))
 }
 
 /// Whether an upload is built for this device: on muOS something the
@@ -391,6 +416,7 @@ pub fn scanned_platform_words(game: &Game) -> Option<Vec<(String, bool)>> {
     Some(platform_words_here(scanned, |p| {
         if crate::muos::available() {
             device_platforms().iter().any(|d| d == p)
+                || crate::muos::love_platforms().iter().any(|d| d == p)
         } else {
             desktop_runs(p)
         }
@@ -429,6 +455,10 @@ fn desktop_runs(platform: &str) -> bool {
 fn scanned_platform_word(platform: &str) -> Option<String> {
     if let Some(system) = platform.strip_prefix("rom:") {
         return Some(rom_system_name(system));
+    }
+    // a runtime named with its version, e.g. love:11.5
+    if let Some((flavor, version)) = platform.split_once(':') {
+        return scanned_platform_word(flavor).map(|word| format!("{word} {version}"));
     }
     let word = match platform {
         "linux-arm" | "linux-arm64" | "linux-arm64-handheld" => "Linux ARM",
@@ -710,31 +740,39 @@ mod tests {
     #[test]
     fn scanned_platforms_match_device() {
         let device = strings(&["love", "rom:gba", "linux-arm64-handheld"]);
-        assert!(any_runs_here(
-            &strings(&["windows-amd64", "rom:gba"]),
-            &device,
-            &[]
-        ));
-        assert!(any_runs_here(
-            &strings(&["linux-arm64", "linux-arm64-handheld"]),
-            &device,
-            &[]
-        ));
-        assert!(!any_runs_here(&strings(&["linux-arm64"]), &device, &[]));
-        assert!(!any_runs_here(&strings(&["rom:snes"]), &device, &[]));
-        assert!(!any_runs_here(&[], &device, &[]));
+        let love = strings(&["love:11.4", "love:11.5"]);
+        let runs = |scanned: &[&str]| any_runs_here(&strings(scanned), &device, &[], &love);
+        assert!(runs(&["windows-amd64", "rom:gba"]));
+        assert!(runs(&["linux-arm64", "linux-arm64-handheld"]));
+        assert!(runs(&["love:11.4"]));
+        assert!(!runs(&["love"]));
+        assert!(!runs(&["love:12.0"]));
+        assert!(!runs(&["linux-arm64"]));
+        assert!(!runs(&["rom:snes"]));
+        assert!(!runs(&[]));
     }
 
     #[test]
     fn hidden_types_do_not_count() {
         let device = strings(&["love", "rom:gba"]);
         let hidden = strings(&["rom:gba"]);
-        assert!(!any_runs_here(&strings(&["rom:gba"]), &device, &hidden));
-        assert!(any_runs_here(
-            &strings(&["rom:gba", "love"]),
+        let love = strings(&["love:11.5"]);
+        assert!(!any_runs_here(
+            &strings(&["rom:gba"]),
             &device,
-            &hidden
+            &hidden,
+            &love
         ));
+        assert!(any_runs_here(
+            &strings(&["rom:gba", "love:11.5"]),
+            &device,
+            &hidden,
+            &love
+        ));
+        assert_eq!(
+            wanted_platforms(&device, &strings(&["love"]), &love),
+            ["rom:gba"]
+        );
     }
 
     #[test]
@@ -742,7 +780,7 @@ mod tests {
         let device = strings(&["love", "rom:gba"]);
         let hidden = strings(&["love", "rom:gba"]);
         assert_eq!(shown_types(&device, &hidden).len(), 2);
-        assert!(any_runs_here(&strings(&["rom:gba"]), &device, &hidden));
+        assert!(any_runs_here(&strings(&["rom:gba"]), &device, &hidden, &[]));
     }
 
     #[test]
@@ -758,6 +796,8 @@ mod tests {
                 "pico8-cart",
                 "script",
                 "rom:pocket",
+                "love:11.5",
+                "godot-pck:4.2",
             ]),
             |p| device.iter().any(|d| d == p),
         );
@@ -767,6 +807,8 @@ mod tests {
             ("macOS", false),
             ("PICO-8", true),
             ("Analogue Pocket", false),
+            ("LÖVE 11.5", false),
+            ("Godot 4.2", false),
         ];
         assert_eq!(
             words,

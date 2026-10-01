@@ -61,12 +61,36 @@ const APPLICATION_DIRS: [&str; 2] = [
 /// What Jacaranda ships, assumed when the host's cannot be read.
 const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
 
-/// Why a game cannot run on the LÖVE that is here. The 0.x series is a
-/// different API, so 11.x will not load those at all.
+/// Why a game cannot run on the LÖVE that is here. It has to be made
+/// for the same major version and no newer a minor one; the 0.x series
+/// is a different API, so 11.x will not load those at all. A game that
+/// does not say which LÖVE it wants is turned away rather than guessed.
 fn love_blocker(wanted: &str, have: &str) -> Option<String> {
-    wanted
-        .starts_with("0.")
-        .then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
+    let Some((major, minor)) = parse_version(wanted) else {
+        return Some(format!(
+            "does not say which LÖVE it was made for; this device has LÖVE {have}"
+        ));
+    };
+    let runs = parse_version(have).is_some_and(|(m, n)| m == major && minor <= n);
+    (!runs).then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
+}
+
+/// The LÖVE games this device runs, in the words of a game's scanned
+/// platforms: `love:11.0` up to its own version.
+pub fn love_platforms() -> &'static [String] {
+    static PLATFORMS: OnceLock<Vec<String>> = OnceLock::new();
+    PLATFORMS.get_or_init(|| {
+        love()
+            .map(|love| love_platforms_for(&love.version))
+            .unwrap_or_default()
+    })
+}
+
+fn love_platforms_for(have: &str) -> Vec<String> {
+    let Some((major, minor)) = parse_version(have) else {
+        return Vec::new();
+    };
+    (0..=minor).map(|n| format!("love:{major}.{n}")).collect()
 }
 
 struct Love {
@@ -1233,9 +1257,22 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
     #[test]
     fn old_love_games_are_turned_away() {
         assert_eq!(love_blocker("11.5", "11.5"), None);
-        assert_eq!(love_blocker("", "11.5"), None);
+        assert_eq!(love_blocker("11.3", "11.5"), None);
+        assert_eq!(love_blocker("11.5", "11.5.1"), None);
+        assert!(love_blocker("", "11.5").is_some());
+        assert!(love_blocker("11.6", "11.5").is_some());
+        assert!(love_blocker("12.0", "11.5").is_some());
         assert!(love_blocker("0.8.0", "11.5").is_some());
         assert!(love_blocker("0.10.2", "11.5").unwrap().contains("11.5"));
+    }
+
+    #[test]
+    fn love_platforms_up_to_ours() {
+        assert_eq!(
+            love_platforms_for("11.2"),
+            ["love:11.0", "love:11.1", "love:11.2"]
+        );
+        assert!(love_platforms_for("").is_empty());
     }
 
     #[test]
