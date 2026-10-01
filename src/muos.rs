@@ -64,13 +64,9 @@ const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
 /// Why a game cannot run on the LÖVE that is here. It has to be made
 /// for the same major version and no newer a minor one; the 0.x series
 /// is a different API, so 11.x will not load those at all. A game that
-/// does not say which LÖVE it wants is turned away rather than guessed.
+/// does not say which LÖVE it wants is given a try.
 fn love_blocker(wanted: &str, have: &str) -> Option<String> {
-    let Some((major, minor)) = parse_version(wanted) else {
-        return Some(format!(
-            "does not say which LÖVE it was made for; this device has LÖVE {have}"
-        ));
-    };
+    let (major, minor) = parse_version(wanted)?;
     let runs = parse_version(have).is_some_and(|(m, n)| m == major && minor <= n);
     (!runs).then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
 }
@@ -354,7 +350,7 @@ pub struct ScannedTarget {
 }
 
 /// Whether a scanned target would run once installed, by the checks
-/// launching it makes.
+/// launching it makes, except that a LÖVE game must say its version.
 pub fn scanned_target_runs_here(target: &ScannedTarget) -> bool {
     scanned_target_fits(target, glibc_version())
 }
@@ -371,6 +367,8 @@ fn scanned_target_fits(target: &ScannedTarget, glibc: (u32, u32)) -> bool {
                     i.os.as_deref().unwrap_or("").is_empty() && blocker(i, glibc).is_none()
                 })
         }
+        // A LÖVE game that does not say its version only runs if picked.
+        Flavor::Love if !target.engine.as_ref().is_some_and(love_version_known) => false,
         flavor => {
             let candidate = Candidate {
                 flavor,
@@ -380,6 +378,10 @@ fn scanned_target_fits(target: &ScannedTarget, glibc: (u32, u32)) -> bool {
             content_for(&candidate, PathBuf::new()).is_ok()
         }
     }
+}
+
+fn love_version_known(engine: &EngineInfo) -> bool {
+    parse_version(engine.version.as_deref().unwrap_or("")).is_some()
 }
 
 fn parse_version(version: &str) -> Option<(u32, u32)> {
@@ -1259,7 +1261,7 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         assert_eq!(love_blocker("11.5", "11.5"), None);
         assert_eq!(love_blocker("11.3", "11.5"), None);
         assert_eq!(love_blocker("11.5", "11.5.1"), None);
-        assert!(love_blocker("", "11.5").is_some());
+        assert_eq!(love_blocker("", "11.5"), None);
         assert!(love_blocker("11.6", "11.5").is_some());
         assert!(love_blocker("12.0", "11.5").is_some());
         assert!(love_blocker("0.8.0", "11.5").is_some());
