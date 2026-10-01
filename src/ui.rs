@@ -9,8 +9,8 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 pub use crate::model::human_size;
 use crate::model::{
-    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, Prompt, Tab,
-    UploadExt, platform_names, playable_here, scanned_platform_words,
+    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, PlayableType,
+    Prompt, Tab, UploadExt, platform_names, playable_here, scanned_platform_words,
 };
 use crate::qr::QrCode;
 
@@ -2410,6 +2410,104 @@ pub fn qr_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
     response
         .on_hover_text("QR code")
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The Playable types page: Everything, then a checkbox for each type
+/// under its group's heading. `row` is the focused one, 0 for Everything.
+pub fn playable_types(
+    ui: &mut Ui,
+    m: &Metrics,
+    types: &[PlayableType],
+    hidden: &[String],
+    row: usize,
+    actions: &mut Vec<Action>,
+) {
+    ui.label(
+        egui::RichText::new("Playable types")
+            .font(bold(m.heading))
+            .color(TEXT),
+    );
+    ui.add_space(m.space(4.0));
+    subtle(ui, m, "Playable here shows games of the checked types.");
+    ui.add_space(m.space(10.0));
+    let rect = ui.available_rect_before_wrap().expand2(vec2(m.ring, 0.0));
+    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(scroll_bar(ui, false))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(m.ring);
+            let all_on = types.iter().all(|t| !hidden.contains(&t.id));
+            let mut group = None;
+            let rows = std::iter::once(("Everything", all_on, None)).chain(
+                types
+                    .iter()
+                    .map(|t| (t.label.as_str(), !hidden.contains(&t.id), Some(t))),
+            );
+            for (index, (label, checked, kind)) in rows.enumerate() {
+                if let Some(kind) = kind
+                    && group != Some(kind.group)
+                {
+                    group = Some(kind.group);
+                    ui.add_space(m.space(10.0));
+                    ui.horizontal(|ui| {
+                        ui.add_space(m.ring + m.space(8.0));
+                        ui.label(
+                            egui::RichText::new(kind.group.label())
+                                .font(bold(m.caption))
+                                .color(DIM),
+                        );
+                    });
+                    ui.add_space(m.space(4.0));
+                }
+                let width = ui.available_width() - 2.0 * m.ring;
+                let height = m.space(32.0);
+                let (outer, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), height + m.space(2.0)),
+                    Sense::hover(),
+                );
+                let rect = Rect::from_min_size(
+                    pos2(outer.left() + m.ring, outer.top()),
+                    vec2(width.min(m.space(420.0)), height),
+                );
+                let response = ui.interact(rect, ui.id().with(("type", index)), Sense::click());
+                let focused = index == row;
+                if focused || response.hovered() {
+                    fill_squircle(ui, rect, [m.space(6.0); 4], TILE_HOVER, Stroke::NONE);
+                }
+                if focused {
+                    focus_ring(ui, rect, [m.space(6.0); 4], m);
+                    ui.scroll_to_rect(rect.expand(m.ring), None);
+                }
+                let icon = m.icon(14.0);
+                let icon_rect = Rect::from_min_size(
+                    pos2(rect.left() + m.space(8.0), rect.center().y - icon / 2.0),
+                    vec2(icon, icon),
+                );
+                if checked {
+                    checkbox_icon(ui, icon_rect, TEXT);
+                } else {
+                    checkbox_box(ui, icon_rect, TEXT.gamma_multiply(0.5));
+                }
+                ui.painter().text(
+                    pos2(icon_rect.right() + m.space(10.0), rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(m.body),
+                    if checked { TEXT } else { DIM },
+                );
+                if response.hovered() && pointer_moved {
+                    actions.push(Action::FocusTypeRow(index));
+                }
+                if response.clicked() {
+                    actions.push(Action::FocusTypeRow(index));
+                    actions.push(Action::Activate);
+                }
+            }
+            ui.add_space(m.ring);
+        });
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.

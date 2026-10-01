@@ -14,6 +14,9 @@ pub struct Settings {
     pub playable_only: bool,
     /// The Collections tab's "Installed" toggle.
     pub collections_installed_only: bool,
+    /// Types "Playable here" leaves out, by scanned platform id. Kept as
+    /// what is off so a type the device gains later starts out on.
+    pub playable_hidden: Vec<String>,
 }
 
 impl Settings {
@@ -65,6 +68,7 @@ mod tests {
         let settings = Settings {
             playable_only: true,
             collections_installed_only: true,
+            playable_hidden: vec!["rom:snes".to_string()],
         };
         settings.save(&path);
         assert_eq!(Settings::load(&path), settings);
@@ -77,6 +81,7 @@ mod tests {
             serde_json::from_str(r#"{"playable_only": true, "from_the_future": 1}"#).unwrap();
         assert!(parsed.playable_only);
         assert!(!parsed.collections_installed_only);
+        assert!(parsed.playable_hidden.is_empty());
     }
 
     #[test]

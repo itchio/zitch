@@ -557,6 +557,7 @@ fn session(
                 let profile_id = profile.id;
                 // Not reaching butler at all fails every collection asked.
                 let all = collection_ids.clone();
+                let failed_filter = filter.clone();
                 spawn_op(
                     "collections-filtered".into(),
                     Arc::clone(link),
@@ -564,7 +565,7 @@ fn session(
                     move |error| {
                         log::warn!("filtering collections: {error:#}");
                         Event::CollectionsFilterFailed {
-                            filter,
+                            filter: failed_filter.clone(),
                             ask,
                             collection_ids: all.clone(),
                         }
@@ -574,7 +575,7 @@ fn session(
                         for collection_id in collection_ids {
                             match filtered_games(client, profile_id, collection_id, &query) {
                                 Ok(games) => emit.send(Event::CollectionFiltered {
-                                    filter,
+                                    filter: filter.clone(),
                                     ask,
                                     collection_id,
                                     games,
@@ -582,7 +583,7 @@ fn session(
                                 Err(error) => {
                                     log::warn!("filtering collection {collection_id}: {error:#}");
                                     emit.send(Event::CollectionsFilterFailed {
-                                        filter,
+                                        filter: filter.clone(),
                                         ask,
                                         collection_ids: vec![collection_id],
                                     });

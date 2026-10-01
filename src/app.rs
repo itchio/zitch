@@ -121,6 +121,11 @@ pub struct App {
     downloads_row: (usize, usize),
     /// Hide games with no upload for this device, on every tab.
     playable_only: bool,
+    /// Types "Playable here" leaves out.
+    playable_hidden: Vec<String>,
+    /// Where Back goes from the Playable types page: the page it was
+    /// opened over.
+    types_return: Page,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
     focus_search: bool,
@@ -234,6 +239,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
             "qr" => Ok(Step::Act(Action::ShowQr)),
             "y" => Ok(Step::Act(Action::Secondary)),
+            "types" => Ok(Step::Act(Action::Open(Page::PlayableTypes { row: 0 }))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "guide" => Ok(Step::Act(Action::Menu)),
@@ -286,6 +292,15 @@ impl App {
             settings_path,
         } = options;
         let settings = Settings::load(&settings_path);
+        // Hiding every type this device has counts as hiding none, as the
+        // filter treats it, so the page shows them all on.
+        let mut playable_hidden = settings.playable_hidden;
+        if crate::model::device_platforms()
+            .iter()
+            .all(|p| playable_hidden.contains(p))
+        {
+            playable_hidden.clear();
+        }
         ui::install_fonts(ctx);
         ctx.set_visuals(ui::visuals());
         ctx.set_zoom_factor(zoom);
@@ -328,6 +343,8 @@ impl App {
             toolbar_focus: [None; Tab::ALL.len()],
             downloads_row: (0, 0),
             playable_only: settings.playable_only,
+            playable_hidden,
+            types_return: Page::Library,
             query: String::new(),
             focus_search: false,
             blur_search: false,
@@ -851,6 +868,21 @@ impl App {
                     };
                     self.page = Page::Game { id, button };
                 }
+                Page::PlayableTypes { row } => {
+                    // Everything, then each type.
+                    let last = crate::model::playable_types().len();
+                    let page = 6;
+                    let row = match direction {
+                        Direction::Up => row.saturating_sub(1),
+                        Direction::Down => (row + 1).min(last),
+                        Direction::PageUp => row.saturating_sub(page),
+                        Direction::PageDown => (row + page).min(last),
+                        Direction::Top | Direction::Home => 0,
+                        Direction::Bottom | Direction::End => last,
+                        Direction::Left | Direction::Right => row,
+                    };
+                    self.page = Page::PlayableTypes { row };
+                }
             },
             Action::FocusIndex(index) => {
                 if let Some(game) = self.owned.get().and_then(|games| games.get(index)) {
@@ -924,16 +956,48 @@ impl App {
                         self.actions.push(action.clone());
                     }
                 }
+                Page::PlayableTypes { row } => {
+                    let action = match crate::model::type_at_row(row) {
+                        Some(t) => Action::TogglePlayableType(t.id.clone()),
+                        None => Action::AllPlayableTypes,
+                    };
+                    self.actions.push(action);
+                }
             },
             Action::SetPlayableOnly(on) => {
                 if self.playable_only != on {
                     self.playable_only = on;
-                    self.save_settings();
-                    self.request_collection_filtered(None);
-                    self.rebuild_sections();
-                    self.rebuild_collection_sections();
-                    self.rows.follow = true;
-                    self.collection_rows.follow = true;
+                    self.playable_filter_changed();
+                }
+            }
+            Action::TogglePlayableType(id) => {
+                if let Some(index) = self.playable_hidden.iter().position(|h| *h == id) {
+                    self.playable_hidden.remove(index);
+                } else if self.shown_type_count() > 1 {
+                    self.playable_hidden.push(id);
+                } else {
+                    self.notify("At least one type stays on".to_string());
+                    return;
+                }
+                self.playable_filter_changed();
+            }
+            Action::OnlyPlayableType(id) => {
+                self.playable_hidden = crate::model::playable_types()
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .filter(|t| *t != id)
+                    .collect();
+                self.playable_filter_changed();
+            }
+            Action::AllPlayableTypes => {
+                if !self.playable_hidden.is_empty() {
+                    self.playable_hidden.clear();
+                    self.playable_filter_changed();
+                }
+            }
+            Action::FocusTypeRow(row) => {
+                if let Page::PlayableTypes { .. } = self.page {
+                    self.page = Page::PlayableTypes { row };
                 }
             }
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
@@ -1015,7 +1079,7 @@ impl App {
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
-                Page::Library => {}
+                Page::Library | Page::PlayableTypes { .. } => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
             },
             Action::Secondary => match self.page {
@@ -1037,6 +1101,11 @@ impl App {
                 }
                 Page::Library => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
+                Page::PlayableTypes { row } => {
+                    if let Some(t) = crate::model::type_at_row(row) {
+                        self.actions.push(Action::OnlyPlayableType(t.id.clone()));
+                    }
+                }
             },
             Action::ShowQr => {
                 if let Page::Game { id, .. } = self.page
@@ -1073,10 +1142,18 @@ impl App {
                     }
                     self.page = Page::Library;
                 }
+                Page::PlayableTypes { .. } => {
+                    self.page = std::mem::replace(&mut self.types_return, Page::Library);
+                }
             },
             Action::MenuFocus(_) => {}
             Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
             Action::Open(page) => {
+                if matches!(page, Page::PlayableTypes { .. })
+                    && !matches!(self.page, Page::PlayableTypes { .. })
+                {
+                    self.types_return = self.page.clone();
+                }
                 self.page = page;
             }
             Action::Update { cave_id } => {
@@ -1315,9 +1392,27 @@ impl App {
         self.rows.set_sections(sections);
     }
 
+    /// Saves the "Playable here" choices and refilters every tab.
+    fn playable_filter_changed(&mut self) {
+        self.save_settings();
+        self.request_collection_filtered(None);
+        self.rebuild_sections();
+        self.rebuild_collection_sections();
+        self.rows.follow = true;
+        self.collection_rows.follow = true;
+    }
+
+    /// How many of the device's types "Playable here" includes.
+    fn shown_type_count(&self) -> usize {
+        crate::model::device_platforms()
+            .iter()
+            .filter(|p| !self.playable_hidden.contains(p))
+            .count()
+    }
+
     /// Whether the game clears the page-wide filter.
     fn passes(&self, game: &Game) -> bool {
-        !self.playable_only || known_playable_here(game)
+        !self.playable_only || known_playable_here(game, &self.playable_hidden)
     }
 
     /// A row after the page-wide filter: none when it was empty anyway, a
@@ -1466,6 +1561,7 @@ impl App {
             Settings {
                 playable_only: self.playable_only,
                 collections_installed_only: self.collections_installed_only,
+                playable_hidden: self.playable_hidden.clone(),
             }
             .save(path);
         }
@@ -1475,6 +1571,11 @@ impl App {
         CollectionFilter {
             installed: self.collections_installed_only,
             playable: self.playable_only,
+            hidden: if self.playable_only {
+                self.playable_hidden.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -1499,7 +1600,7 @@ impl App {
             _ if current => return,
             _ => {
                 self.collection_filtered = Some(Filtered {
-                    filter,
+                    filter: filter.clone(),
                     games: Default::default(),
                     asked: Default::default(),
                     failed: Default::default(),
@@ -1528,10 +1629,10 @@ impl App {
 
     /// Whether `ask` is the latest question about this collection under
     /// this filter; answers to older ones are dropped.
-    fn is_latest_ask(&self, filter: CollectionFilter, ask: u64, collection_id: i64) -> bool {
+    fn is_latest_ask(&self, filter: &CollectionFilter, ask: u64, collection_id: i64) -> bool {
         self.collection_filtered
             .as_ref()
-            .is_some_and(|f| f.filter == filter && f.asked.get(&collection_id) == Some(&ask))
+            .is_some_and(|f| f.filter == *filter && f.asked.get(&collection_id) == Some(&ask))
     }
 
     /// Tells the backend which collections are on screen, so a refresh
@@ -1817,7 +1918,7 @@ impl App {
                     collection_id,
                     games,
                 } => {
-                    if self.is_latest_ask(filter, ask, collection_id) {
+                    if self.is_latest_ask(&filter, ask, collection_id) {
                         self.catalog_add(Source::Collection, &games);
                         if let Some(filtered) = &mut self.collection_filtered {
                             filtered.games.insert(collection_id, games);
@@ -1832,7 +1933,7 @@ impl App {
                 } => {
                     let failed: Vec<i64> = collection_ids
                         .into_iter()
-                        .filter(|id| self.is_latest_ask(filter, ask, *id))
+                        .filter(|id| self.is_latest_ask(&filter, ask, *id))
                         .collect();
                     if let Some(filtered) = &mut self.collection_filtered
                         && !failed.is_empty()
@@ -2413,6 +2514,13 @@ impl App {
                 busy: matches!(update.state(), self_update::State::Downloading { .. }),
             });
         }
+        if crate::muos::available() {
+            items.push(ui::MenuItem {
+                label: "Playable types".into(),
+                action: Action::Open(Page::PlayableTypes { row: 0 }),
+                busy: false,
+            });
+        }
         items.push(ui::MenuItem {
             label: "Quit".into(),
             action: Action::Quit,
@@ -2549,6 +2657,25 @@ impl App {
                     }
                     if !game.url.is_empty() {
                         hints.push((vec![Glyph::Secondary], "QR code".to_string()));
+                    }
+                }
+                hints.push((vec![Glyph::Back], "Back".to_string()));
+                hints
+            }
+            Page::PlayableTypes { row } => {
+                let mut hints = vec![(vec![Glyph::NavigateVertical], "Choose".to_string())];
+                match crate::model::type_at_row(row) {
+                    // Everything is already on: A has nothing to do.
+                    None if self.shown_type_count() == crate::model::device_platforms().len() => {}
+                    None => hints.push((vec![Glyph::Confirm], "Turn all on".to_string())),
+                    Some(t) => {
+                        let label = if self.playable_hidden.contains(&t.id) {
+                            "Turn on"
+                        } else {
+                            "Turn off"
+                        };
+                        hints.push((vec![Glyph::Confirm], label.to_string()));
+                        hints.push((vec![Glyph::Secondary], "Only this".to_string()));
                     }
                 }
                 hints.push((vec![Glyph::Back], "Back".to_string()));
@@ -2724,7 +2851,7 @@ impl App {
                             Page::Game { id, .. } => {
                                 self.game(id).is_some_and(|g| !g.url.is_empty())
                             }
-                            Page::Library => false,
+                            Page::Library | Page::PlayableTypes { .. } => false,
                         };
                         if has_url && ui::qr_button(ui, &m).clicked() {
                             self.actions.push(Action::ShowQr);
@@ -2937,6 +3064,14 @@ impl App {
                             None => self.actions.push(Action::Back),
                         }
                     }
+                    (Loadable::Loaded(_), Page::PlayableTypes { row }) => ui::playable_types(
+                        ui,
+                        &m,
+                        crate::model::playable_types(),
+                        &self.playable_hidden,
+                        row,
+                        &mut self.actions,
+                    ),
                 }
             })
             .response

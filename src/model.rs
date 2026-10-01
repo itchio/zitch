@@ -152,13 +152,14 @@ pub fn playable_here(game: &Game) -> bool {
 }
 
 /// Whether itch.io's scan of the game's uploads found something this
-/// device runs, for the "Playable here" filter. Not every upload gets
-/// scanned, so a miss here is a reason to hide, not to refuse an install.
-pub fn known_playable_here(game: &Game) -> bool {
+/// device runs, of the types not in `hidden`, for the "Playable here"
+/// filter. Not every upload gets scanned, so a miss here is a reason to
+/// hide, not to refuse an install.
+pub fn known_playable_here(game: &Game, hidden: &[String]) -> bool {
     if crate::muos::available() {
         game.scanned_platforms
             .as_deref()
-            .is_some_and(|scanned| any_runs_here(scanned, device_platforms()))
+            .is_some_and(|scanned| any_runs_here(scanned, device_platforms(), hidden))
     } else {
         runs_here(&game.platforms)
     }
@@ -166,10 +167,12 @@ pub fn known_playable_here(game: &Game) -> bool {
 
 /// The page-wide filters as a collection query, so butler returns only
 /// the games that pass instead of every page being fetched to find them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CollectionFilter {
     pub installed: bool,
     pub playable: bool,
+    /// Types left out of "Playable here"; empty while it is off.
+    pub hidden: Vec<String>,
 }
 
 impl CollectionFilter {
@@ -179,14 +182,15 @@ impl CollectionFilter {
 
     /// butler's filter matching [`known_playable_here`] and the installed
     /// toggle.
-    pub fn to_butler(self) -> CollectionGamesFilters {
+    pub fn to_butler(&self) -> CollectionGamesFilters {
         let mut filters = CollectionGamesFilters {
             installed: self.installed,
             ..Default::default()
         };
         if self.playable {
             if crate::muos::available() {
-                filters.scanned_platforms = Some(device_platforms().to_vec());
+                let wanted = shown_types(device_platforms(), &self.hidden);
+                filters.scanned_platforms = Some(wanted.into_iter().cloned().collect());
             } else {
                 filters.platform = Some(os_platform().to_string());
             }
@@ -199,7 +203,7 @@ impl CollectionFilter {
 /// The handheld profile is itch.io's check for an arm64 Linux build the
 /// SDL shim can put on screen.
 /// Worked out once: the filter asks this of every game in the library.
-fn device_platforms() -> &'static [String] {
+pub fn device_platforms() -> &'static [String] {
     static PLATFORMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     PLATFORMS.get_or_init(|| {
         let mut platforms = crate::muos::runtimes();
@@ -208,8 +212,82 @@ fn device_platforms() -> &'static [String] {
     })
 }
 
-fn any_runs_here(scanned: &[String], device: &[String]) -> bool {
-    scanned.iter().any(|p| device.contains(p))
+/// A heading for the types on the Playable types page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeGroup {
+    Native,
+    Engines,
+    Systems,
+}
+
+impl TypeGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            TypeGroup::Native => "Native",
+            TypeGroup::Engines => "Engines",
+            TypeGroup::Systems => "Systems",
+        }
+    }
+}
+
+/// One type the "Playable here" filter can include.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayableType {
+    pub id: String,
+    pub label: String,
+    pub group: TypeGroup,
+}
+
+/// The types this device runs, grouped, in page order.
+pub fn playable_types() -> &'static [PlayableType] {
+    static TYPES: std::sync::OnceLock<Vec<PlayableType>> = std::sync::OnceLock::new();
+    TYPES.get_or_init(|| {
+        let mut types: Vec<PlayableType> = device_platforms()
+            .iter()
+            .map(|id| {
+                let group = if id.starts_with("rom:") {
+                    TypeGroup::Systems
+                } else if id.starts_with("linux-") {
+                    TypeGroup::Native
+                } else {
+                    TypeGroup::Engines
+                };
+                let label = match id.as_str() {
+                    "linux-arm64-handheld" => "Handheld builds".to_string(),
+                    _ => scanned_platform_word(id).unwrap_or_else(|| id.clone()),
+                };
+                PlayableType {
+                    id: id.clone(),
+                    label,
+                    group,
+                }
+            })
+            .collect();
+        types.sort_by_key(|t| t.group as u8);
+        types
+    })
+}
+
+/// The type on a row of the Playable types page, which has Everything
+/// above the types.
+pub fn type_at_row(row: usize) -> Option<&'static PlayableType> {
+    playable_types().get(row.checked_sub(1)?)
+}
+
+/// The device's types that "Playable here" includes. Hiding all of them
+/// counts as hiding none, so the filter never comes up empty.
+pub fn shown_types<'a>(device: &'a [String], hidden: &[String]) -> Vec<&'a String> {
+    let shown: Vec<&String> = device.iter().filter(|p| !hidden.contains(p)).collect();
+    if shown.is_empty() {
+        device.iter().collect()
+    } else {
+        shown
+    }
+}
+
+fn any_runs_here(scanned: &[String], device: &[String], hidden: &[String]) -> bool {
+    let shown = shown_types(device, hidden);
+    scanned.iter().any(|p| shown.contains(&p))
 }
 
 /// Whether an upload is built for this device: on muOS something the
@@ -417,6 +495,11 @@ pub enum Page {
         id: i64,
         button: usize,
     },
+    /// The types "Playable here" includes, with a row focused: 0 is
+    /// Everything, then the types in [`playable_types`] order.
+    PlayableTypes {
+        row: usize,
+    },
 }
 
 /// A collection with the games butler has for it.
@@ -556,6 +639,14 @@ pub enum Action {
     PromptFocus(usize),
     /// Hide games with no upload for this device, on every tab.
     SetPlayableOnly(bool),
+    /// Include or leave out one type in "Playable here".
+    TogglePlayableType(String),
+    /// Leave out every type but this one.
+    OnlyPlayableType(String),
+    /// Include every type again.
+    AllPlayableTypes,
+    /// Focus a row on the Playable types page; the pointer is already there.
+    FocusTypeRow(usize),
     SetTab(Tab),
     /// Narrow the Collections tab to installed games, or show everything.
     SetCollectionsInstalledOnly(bool),
@@ -621,15 +712,37 @@ mod tests {
         let device = strings(&["love", "rom:gba", "linux-arm64-handheld"]);
         assert!(any_runs_here(
             &strings(&["windows-amd64", "rom:gba"]),
-            &device
+            &device,
+            &[]
         ));
         assert!(any_runs_here(
             &strings(&["linux-arm64", "linux-arm64-handheld"]),
-            &device
+            &device,
+            &[]
         ));
-        assert!(!any_runs_here(&strings(&["linux-arm64"]), &device));
-        assert!(!any_runs_here(&strings(&["rom:snes"]), &device));
-        assert!(!any_runs_here(&[], &device));
+        assert!(!any_runs_here(&strings(&["linux-arm64"]), &device, &[]));
+        assert!(!any_runs_here(&strings(&["rom:snes"]), &device, &[]));
+        assert!(!any_runs_here(&[], &device, &[]));
+    }
+
+    #[test]
+    fn hidden_types_do_not_count() {
+        let device = strings(&["love", "rom:gba"]);
+        let hidden = strings(&["rom:gba"]);
+        assert!(!any_runs_here(&strings(&["rom:gba"]), &device, &hidden));
+        assert!(any_runs_here(
+            &strings(&["rom:gba", "love"]),
+            &device,
+            &hidden
+        ));
+    }
+
+    #[test]
+    fn hiding_every_type_hides_none() {
+        let device = strings(&["love", "rom:gba"]);
+        let hidden = strings(&["love", "rom:gba"]);
+        assert_eq!(shown_types(&device, &hidden).len(), 2);
+        assert!(any_runs_here(&strings(&["rom:gba"]), &device, &hidden));
     }
 
     #[test]
