@@ -1263,36 +1263,53 @@ impl LoginView {
     }
 }
 
-/// The sign-in page: the QR code beside what to do with it. Modules are
-/// whole points so their edges land on pixels, which a camera needs.
+/// White modules around a QR code, which scanners need to find it.
+const QR_QUIET: usize = 4;
+
+/// The largest whole-point module that fits the code and its margin in
+/// `side`. Whole points put the edges on pixels, which a camera needs.
+fn qr_module(qr: &QrCode, side: f32) -> f32 {
+    (side / (qr.size + 2 * QR_QUIET) as f32).floor().max(1.0)
+}
+
+fn qr_side(qr: &QrCode, module: f32) -> f32 {
+    module * (qr.size + 2 * QR_QUIET) as f32
+}
+
+/// Paints the code on white from `origin`, returning the area it took.
+fn paint_qr(painter: &egui::Painter, qr: &QrCode, origin: egui::Pos2, module: f32) -> Rect {
+    let side = qr_side(qr, module);
+    let code = Rect::from_min_size(origin, vec2(side, side));
+    painter.rect_filled(code, CornerRadius::same(module as u8), Color32::WHITE);
+    for y in 0..qr.size {
+        for x in 0..qr.size {
+            if qr.dark(x, y) {
+                let min = origin + vec2((x + QR_QUIET) as f32, (y + QR_QUIET) as f32) * module;
+                painter.rect_filled(
+                    Rect::from_min_size(min, vec2(module, module)),
+                    CornerRadius::ZERO,
+                    Color32::BLACK,
+                );
+            }
+        }
+    }
+    code
+}
+
+/// The sign-in page: the QR code beside what to do with it.
 pub fn login(ui: &mut Ui, m: &Metrics, login: &LoginView, actions: &mut Vec<Action>) {
-    const QUIET: usize = 4;
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
     let code_font = bold(m.title);
     let code_row = ui.fonts_mut(|f| f.row_height(&code_font)) + m.space(12.0);
     let mut left = rect.left();
     if let Some(qr) = &login.qr {
-        let modules = qr.size + 2 * QUIET;
         // Leaves the text a column and a line under the code.
         let side_max = (rect.height() - code_row).min(rect.width() - m.space(220.0));
-        let module = (side_max / modules as f32).floor().max(1.0);
-        let side = module * modules as f32;
+        let module = qr_module(qr, side_max);
+        let side = qr_side(qr, module);
         let origin = pos2(rect.left(), rect.center().y - (side + code_row) / 2.0).round();
-        let code = Rect::from_min_size(origin, vec2(side, side));
-        painter.rect_filled(code, CornerRadius::same(module as u8), Color32::WHITE);
-        for y in 0..qr.size {
-            for x in 0..qr.size {
-                if qr.dark(x, y) {
-                    let min = origin + vec2((x + QUIET) as f32, (y + QUIET) as f32) * module;
-                    painter.rect_filled(
-                        Rect::from_min_size(min, vec2(module, module)),
-                        CornerRadius::ZERO,
-                        Color32::BLACK,
-                    );
-                }
-            }
-        }
+        let code = paint_qr(painter, qr, origin, module);
         if let Some(user_code) = &login.user_code {
             painter.text(
                 pos2(code.center().x, code.bottom() + m.space(12.0)),
@@ -2234,6 +2251,148 @@ pub fn prompt(
         ctx.data_mut(|d| d.insert_temp(id, rect));
         ctx.request_repaint();
     }
+}
+
+/// A game's page as a QR code, to open on a phone.
+pub struct QrView {
+    pub game_id: i64,
+    title: String,
+    /// The address under the code, without its scheme.
+    address: String,
+    code: QrCode,
+}
+
+impl QrView {
+    pub fn new(game: &Game) -> Option<QrView> {
+        let code = QrCode::encode(&game.url)?;
+        let address = game.url.trim_start_matches("https://");
+        Some(QrView {
+            game_id: game.id,
+            title: game.title.clone(),
+            address: address.trim_start_matches("http://").to_string(),
+            code,
+        })
+    }
+}
+
+/// One row of text, cut short with an ellipsis past `width`.
+fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), font, color, width);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    ui.painter().layout_job(job)
+}
+
+/// The QR code dialog: the game's title, its page as a code, and the
+/// address under it. Like `prompt`, it dims `screen` and centers in `page`.
+pub fn qr(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    page: Rect,
+    view: &QrView,
+    actions: &mut Vec<Action>,
+) {
+    egui::Area::new(egui::Id::new("qr"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let dim = ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
+            let pad = m.space(20.0);
+            let gap = m.space(12.0);
+            let max_inner = (page.width() * 0.9 - 2.0 * pad).max(0.0);
+            let title = one_line(ui, &view.title, bold(m.dialog), TEXT, max_inner);
+            let address = one_line(
+                ui,
+                &view.address,
+                FontId::proportional(m.caption),
+                DIM,
+                max_inner,
+            );
+            let text_height = title.size().y + address.size().y + 2.0 * gap;
+            let side_max = (page.height() * 0.92 - 2.0 * pad - text_height).min(max_inner);
+            let module = qr_module(&view.code, side_max);
+            let side = qr_side(&view.code, module);
+            let inner = side.max(title.size().x).max(address.size().x);
+            let size = vec2(inner + 2.0 * pad, side + text_height + 2.0 * pad);
+            let card = Rect::from_min_size((page.center() - size / 2.0).round(), size);
+            // Clicks on the card stay on it; the dim around it closes.
+            ui.allocate_rect(card, Sense::click());
+            if dim.clicked() {
+                actions.push(Action::HideQr);
+            }
+            let painter = ui.painter();
+            fill_squircle(
+                ui,
+                card,
+                [m.space(14.0); 4],
+                TILE_BG,
+                Stroke::new(1.0, BORDER),
+            );
+            let mut y = card.top() + pad;
+            painter.galley(
+                pos2(card.center().x - title.size().x / 2.0, y),
+                title.clone(),
+                TEXT,
+            );
+            y += title.size().y + gap;
+            paint_qr(
+                painter,
+                &view.code,
+                pos2(card.center().x - side / 2.0, y).round(),
+                module,
+            );
+            y += side + gap;
+            painter.galley(
+                pos2(card.center().x - address.size().x / 2.0, y),
+                address,
+                DIM,
+            );
+        });
+}
+
+/// The pointer's way to the QR code, beside the back button.
+pub fn qr_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
+    let size = m.space(40.0);
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let (fill, edge) = if response.hovered() {
+        (SURFACE_HOVER, BORDER_HOVER)
+    } else {
+        (SURFACE, BORDER)
+    };
+    ui.painter().circle(
+        rect.center(),
+        size / 2.0,
+        fill,
+        Stroke::new(m.space(1.25).max(1.0), edge),
+    );
+    // Three finder squares and a dot: a QR code's corners.
+    let cell = m.space(6.0);
+    let icon = Rect::from_center_size(rect.center(), vec2(2.5 * cell, 2.5 * cell));
+    let stroke = Stroke::new(m.space(1.5).max(1.0), TEXT);
+    for corner in [
+        icon.left_top(),
+        icon.right_top() - vec2(cell, 0.0),
+        icon.left_bottom() - vec2(0.0, cell),
+    ] {
+        let square = Rect::from_min_size(corner, vec2(cell, cell));
+        ui.painter()
+            .rect_stroke(square, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+    }
+    ui.painter().rect_filled(
+        Rect::from_min_size(
+            icon.right_bottom() - vec2(cell, cell) * 0.6,
+            vec2(cell, cell) * 0.6,
+        ),
+        CornerRadius::ZERO,
+        TEXT,
+    );
+    response
+        .on_hover_text("QR code")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.

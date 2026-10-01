@@ -24,7 +24,8 @@ pub enum Glyph {
     NavigateVertical,
     TabLeft,
     TabRight,
-    Search,
+    /// Y on a pad, Slash on a keyboard.
+    Secondary,
     /// Start on a pad, Escape on a keyboard.
     Menu,
 }
@@ -63,7 +64,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Gamepad, NavigateVertical => "xbox_dpad_vertical.png",
     Gamepad, TabLeft => "xbox_lb.png",
     Gamepad, TabRight => "xbox_rb.png",
-    Gamepad, Search => "xbox_button_color_y.png",
+    Gamepad, Secondary => "xbox_button_color_y.png",
     Gamepad, Menu => "xbox_button_menu.png",
     Keyboard, Confirm => "keyboard_enter.png",
     Keyboard, Back => "keyboard_escape.png",
@@ -72,7 +73,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Keyboard, NavigateVertical => "keyboard_arrows_vertical.png",
     Keyboard, TabLeft => "keyboard_q.png",
     Keyboard, TabRight => "keyboard_e.png",
-    Keyboard, Search => "keyboard_slash_forward.png",
+    Keyboard, Secondary => "keyboard_slash_forward.png",
     Keyboard, Menu => "keyboard_escape.png",
 ];
 

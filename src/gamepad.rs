@@ -34,7 +34,7 @@ pub fn button_action(button: PadButton) -> Option<Action> {
     Some(match button {
         PadButton::South => Action::Activate,
         PadButton::East => Action::Back,
-        PadButton::North => Action::FocusSearch,
+        PadButton::North => Action::Secondary,
         PadButton::LeftBumper => Action::CycleTab(-1),
         PadButton::RightBumper => Action::CycleTab(1),
         PadButton::Guide | PadButton::Start => Action::Menu,

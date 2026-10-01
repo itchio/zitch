@@ -563,8 +563,13 @@ pub enum Action {
     SetShareDeviceInfo(bool),
     /// Step through the tabs, wrapping.
     CycleTab(i32),
-    /// Put the cursor in the search box.
-    FocusSearch,
+    /// Y on a pad, Slash on a keyboard: search on the library, the QR
+    /// code on a game's page.
+    Secondary,
+    /// Show the open game's page as a QR code.
+    ShowQr,
+    /// Close the QR code.
+    HideQr,
     /// Leave the search box, keeping its text; focus goes to the results.
     SearchDone,
     ClearSearch,

@@ -129,6 +129,8 @@ pub struct App {
     page: Page,
     /// The sign-in code, while there is nothing to sign in with.
     login: Option<LoginView>,
+    /// The open game's page as a QR code, over the page.
+    qr: Option<ui::QrView>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -230,6 +232,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "notice" => Ok(Step::Notice),
             "nexttab" => Ok(Step::Act(Action::CycleTab(1))),
             "prevtab" => Ok(Step::Act(Action::CycleTab(-1))),
+            "qr" => Ok(Step::Act(Action::ShowQr)),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "guide" => Ok(Step::Act(Action::Menu)),
@@ -329,6 +332,7 @@ impl App {
             blur_search: false,
             page: Page::Library,
             login: None,
+            qr: None,
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -410,7 +414,7 @@ impl App {
             );
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
-            key(Modifiers::NONE, Key::Slash, Action::FocusSearch);
+            key(Modifiers::NONE, Key::Slash, Action::Secondary);
             key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
             key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
@@ -729,6 +733,19 @@ impl App {
             }
             return;
         }
+        if self.qr_shown() {
+            match action {
+                Action::Back | Action::Activate | Action::Secondary | Action::HideQr => {
+                    self.qr = None
+                }
+                Action::Menu => {
+                    self.raise_window();
+                    self.menu = Some(0);
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some(login) = &mut self.login {
             match action {
                 // Down onto the checkbox, up off it; nothing else to reach.
@@ -990,11 +1007,21 @@ impl App {
                     self.actions.push(Action::SetTab(self.tab.next(step)));
                 }
             }
-            Action::FocusSearch => {
-                if self.page.is_library() && self.tab == Tab::Library && !self.handheld {
+            Action::Secondary => match self.page {
+                Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
+                Page::Library => {}
+                Page::Game { .. } => self.actions.push(Action::ShowQr),
+            },
+            Action::ShowQr => {
+                if let Page::Game { id, .. } = self.page
+                    && let Some(game) = self.game(id)
+                {
+                    self.qr = ui::QrView::new(game);
+                }
             }
+            Action::HideQr => self.qr = None,
             Action::SearchDone => {
                 self.blur_search = true;
                 // Search hands control to its results, not back to the
@@ -1172,6 +1199,14 @@ impl App {
     /// Whether the game's page shows it running. Under a handoff it never
     /// does: the page sits behind the curtain, as the user will find it
     /// when the game exits.
+    /// The QR code is up, over the page of the game it was opened for.
+    fn qr_shown(&self) -> bool {
+        match (&self.qr, &self.page) {
+            (Some(qr), Page::Game { id, .. }) => qr.game_id == *id && self.login.is_none(),
+            _ => false,
+        }
+    }
+
     fn is_running(&self, game_id: i64) -> bool {
         !self.handoff
             && self
@@ -2394,6 +2429,9 @@ impl App {
         if self.handed_off().is_some() {
             return vec![(vec![Glyph::Back], "Cancel".to_string())];
         }
+        if self.qr_shown() {
+            return vec![(vec![Glyph::Back], "Close".to_string())];
+        }
         if let Some(login) = &self.login {
             let mut hints = Vec::new();
             if login.has_checkbox() {
@@ -2448,7 +2486,7 @@ impl App {
                 match self.tab {
                     Tab::Library => {
                         if !self.handheld {
-                            hints.push((vec![Glyph::Search], "Search".to_string()));
+                            hints.push((vec![Glyph::Secondary], "Search".to_string()));
                         }
                         hints.push((vec![Glyph::Menu], "Menu".to_string()));
                     }
@@ -2474,6 +2512,9 @@ impl App {
                     }
                     if let Some((label, _)) = buttons.get(button) {
                         hints.push((vec![Glyph::Confirm], label.to_string()));
+                    }
+                    if !game.url.is_empty() {
+                        hints.push((vec![Glyph::Secondary], "QR code".to_string()));
                     }
                 }
                 hints.push((vec![Glyph::Back], "Back".to_string()));
@@ -2600,7 +2641,7 @@ impl App {
                 &self.glyphs,
                 self.input_mode,
                 &hints,
-                self.prompt.is_some() || self.menu.is_some(),
+                self.prompt.is_some() || self.menu.is_some() || self.qr_shown(),
                 self.menu.is_some(),
             );
         }
@@ -2644,6 +2685,15 @@ impl App {
                         // the way back. The pad's footer hint covers it.
                         if ui::back_button(ui, &m).clicked() {
                             self.actions.push(Action::Back);
+                        }
+                        let has_url = match self.page {
+                            Page::Game { id, .. } => {
+                                self.game(id).is_some_and(|g| !g.url.is_empty())
+                            }
+                            Page::Library => false,
+                        };
+                        if has_url && ui::qr_button(ui, &m).clicked() {
+                            self.actions.push(Action::ShowQr);
                         }
                     } else {
                         // The strip's slot stays empty at the strip's height,
@@ -2865,6 +2915,11 @@ impl App {
             } else {
                 self.notice = None;
             }
+        }
+        if self.qr_shown()
+            && let Some(qr) = &self.qr
+        {
+            ui::qr(ui.ctx(), &m, ui.max_rect(), page, qr, &mut self.actions);
         }
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), page, prompt, &mut self.actions);
