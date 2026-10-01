@@ -385,13 +385,14 @@ fn host_glibc_version() -> Option<(u32, u32)> {
 
 /// dash's ROM system ids: what `Launch.GetTargets` runtimes take and
 /// what a ROM payload's `engine.details["system"]` holds.
-const ROM_IDS: [&str; 23] = [
+const ROM_IDS: [&str; 24] = [
     "nes",
     "snes",
     "gb",
     "gbc",
     "gba",
     "nds",
+    "3ds",
     "md",
     "32x",
     "sms",
@@ -483,8 +484,12 @@ fn systems() -> &'static HashMap<String, System> {
                         Some((*prefix, parse_manifest(name, &read(name)?)?))
                     })
                     .collect();
-            ids.filter_map(|id| Some((id.to_string(), resolve_manifest(id, &aliases, &manifests)?)))
-                .collect()
+            let board = board();
+            ids.filter_map(|id| {
+                let system = resolve_manifest(id, &aliases, &manifests, board.as_deref())?;
+                Some((id.to_string(), system))
+            })
+            .collect()
         } else {
             let dir = Path::new(ASSIGN_DIR);
             let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).ok();
@@ -509,6 +514,16 @@ struct ManifestSystem {
 #[derive(serde::Deserialize)]
 struct ManifestCore {
     core: String,
+    #[serde(default)]
+    require: Require,
+}
+
+/// What a core needs to be offered at all.
+#[derive(Default, serde::Deserialize)]
+struct Require {
+    /// The boards it runs on; any when empty.
+    #[serde(default)]
+    device: Vec<String>,
 }
 
 fn parse_manifest(name: &str, json: &str) -> Option<Manifest> {
@@ -528,6 +543,7 @@ fn resolve_manifest(
     id: &str,
     aliases: &HashMap<String, String>,
     manifests: &[(&str, Manifest)],
+    board: Option<&str>,
 ) -> Option<System> {
     let assign = aliases.get(assign_key(id))?;
     let (prefix, system) = manifests
@@ -537,6 +553,15 @@ fn resolve_manifest(
         log::warn!("{assign}: default core {} is not listed", system.default);
         return None;
     };
+    let devices = &core.require.device;
+    if !devices.is_empty() && !board.is_some_and(|b| devices.iter().any(|d| d == b)) {
+        log::info!(
+            "{assign}: {} only runs on {}",
+            system.default,
+            devices.join(", ")
+        );
+        return None;
+    }
     Some(System {
         id: id.to_string(),
         assign: assign.to_string(),
@@ -1085,7 +1110,7 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
             ),
         ];
         assert_eq!(
-            resolve_manifest("gba", &aliases, &manifests),
+            resolve_manifest("gba", &aliases, &manifests, None),
             Some(System {
                 id: "gba".into(),
                 assign: "Nintendo Game Boy Advance".into(),
@@ -1095,16 +1120,41 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
             })
         );
         // Only in the second manifest.
-        let n64 = resolve_manifest("n64", &aliases, &manifests).unwrap();
+        let n64 = resolve_manifest("n64", &aliases, &manifests, None).unwrap();
         assert_eq!(n64.core, "ext-mupen64plus-gliden64");
         assert_eq!(n64.launcher, "ext-mupen64plus - standalone - glide");
         // Not in assign.json at all.
-        assert_eq!(resolve_manifest("nds", &aliases, &manifests), None);
+        assert_eq!(resolve_manifest("nds", &aliases, &manifests, None), None);
         // In assign.json, in no manifest.
-        assert_eq!(resolve_manifest("md", &aliases, &manifests), None);
+        assert_eq!(resolve_manifest("md", &aliases, &manifests, None), None);
         // Listed, but its default core is not.
-        assert_eq!(resolve_manifest("nes", &aliases, &manifests), None);
+        assert_eq!(resolve_manifest("nes", &aliases, &manifests, None), None);
         assert!(parse_manifest("x.json", "not json").is_none());
+    }
+
+    #[test]
+    fn a_core_for_other_boards_is_left_out() {
+        let aliases = parse_assign(r#"{"3ds": "Nintendo 3DS"}"#);
+        let external = r#"{
+          "Nintendo 3DS": {
+            "default": "azahar - standalone",
+            "cores": {
+              "azahar - standalone": {
+                "core": "ext-azahar",
+                "launcher": "azahar.sh",
+                "require": {"device": ["rg-vita-pro"]}
+              }
+            }
+          }
+        }"#;
+        let manifests = vec![("ext-", parse_manifest("external.json", external).unwrap())];
+        assert_eq!(
+            resolve_manifest("3ds", &aliases, &manifests, Some("rg40xx-h")),
+            None
+        );
+        assert_eq!(resolve_manifest("3ds", &aliases, &manifests, None), None);
+        let vita = resolve_manifest("3ds", &aliases, &manifests, Some("rg-vita-pro")).unwrap();
+        assert_eq!(vita.core, "ext-azahar");
     }
 
     #[test]
