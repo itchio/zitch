@@ -110,6 +110,15 @@ pub fn data_url(page_url: &str) -> Option<String> {
     (!page.is_empty()).then(|| format!("{page}/data.json"))
 }
 
+/// Where a game's details stand, as the page draws them.
+pub enum Lookup {
+    Ready(Arc<PageInfo>),
+    /// Being fetched.
+    Loading,
+    /// Offline, failed, or nowhere to fetch from; the page goes without.
+    Missing,
+}
+
 enum Entry {
     Pending,
     Ready { info: Arc<PageInfo>, used: u64 },
@@ -187,29 +196,27 @@ impl PageInfoLoader {
 
     /// The game's details, once fetched. Asking while online starts the
     /// fetch; offline, only details already in memory come back.
-    pub fn get(
-        &self,
-        ctx: &egui::Context,
-        game_id: i64,
-        page_url: &str,
-        online: bool,
-    ) -> Option<Arc<PageInfo>> {
+    pub fn get(&self, ctx: &egui::Context, game_id: i64, page_url: &str, online: bool) -> Lookup {
         let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
         state.clock += 1;
         let clock = state.clock;
         match state.entries.get_mut(&game_id) {
             Some(Entry::Ready { info, used }) => {
                 *used = clock;
-                return Some(Arc::clone(info));
+                return Lookup::Ready(Arc::clone(info));
             }
-            Some(Entry::Pending) => return None,
-            Some(Entry::Failed { retry_at }) if Instant::now() < *retry_at => return None,
+            Some(Entry::Pending) => return Lookup::Loading,
+            Some(Entry::Failed { retry_at }) if Instant::now() < *retry_at => {
+                return Lookup::Missing;
+            }
             Some(Entry::Failed { .. }) | None => {}
         }
         if !online {
-            return None;
+            return Lookup::Missing;
         }
-        let url = data_url(page_url)?;
+        let Some(url) = data_url(page_url) else {
+            return Lookup::Missing;
+        };
         state.entries.insert(game_id, Entry::Pending);
         if let Some(replaced) = state.next.replace(Job {
             game_id,
@@ -219,7 +226,7 @@ impl PageInfoLoader {
             state.entries.remove(&replaced.game_id);
         }
         self.inner.queued.notify_one();
-        None
+        Lookup::Loading
     }
 }
 

@@ -14,7 +14,7 @@ use crate::model::{
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
     Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
 };
-use crate::page_info::PageInfoLoader;
+use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
 use crate::report::{Rating, Report, Run, SavedRun};
 use crate::self_update::{self, SelfUpdate};
@@ -3344,9 +3344,16 @@ impl App {
                                     .find_map(|cave| self.launch_failures.get(&cave.id));
                                 let install_failure =
                                     self.install_failures.get(&game.id).map(String::as_str);
-                                let info =
-                                    self.page_info
-                                        .get(ui.ctx(), game.id, &game.url, self.online);
+                                let (info, info_loading) = match self.page_info.get(
+                                    ui.ctx(),
+                                    game.id,
+                                    &game.url,
+                                    self.online,
+                                ) {
+                                    Lookup::Ready(info) => (Some(info), false),
+                                    Lookup::Loading => (None, true),
+                                    Lookup::Missing => (None, false),
+                                };
                                 ui::game_detail(
                                     ui,
                                     &m,
@@ -3363,6 +3370,7 @@ impl App {
                                         failure,
                                         install_failure,
                                         info: info.as_deref(),
+                                        info_loading,
                                         focused_shot: shot,
                                         scroll: self.detail_scroll.take(),
                                         visit: self.detail_visit,

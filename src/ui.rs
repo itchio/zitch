@@ -1602,6 +1602,8 @@ pub struct GameView<'a> {
     pub install_failure: Option<&'a str>,
     /// Screenshots and the rest from the game's data.json, once fetched.
     pub info: Option<&'a PageInfo>,
+    /// The data.json is being fetched; a placeholder holds its place.
+    pub info_loading: bool,
     /// The screenshot with focus, instead of a button.
     pub focused_shot: Option<usize>,
     /// Where to scroll this frame, after focus moved.
@@ -1637,6 +1639,7 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
         failure,
         install_failure,
         info,
+        info_loading,
         focused_shot,
         scroll,
         visit,
@@ -1677,6 +1680,8 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                 }
                 if let Some(info) = info {
                     page_info(ui, m, info, covers, focused_shot, scroll, actions);
+                } else if info_loading {
+                    page_info_placeholder(ui, m);
                 }
                 if scroll == Some(DetailScroll::End) {
                     let bottom = ui.min_rect().left_bottom();
@@ -1985,6 +1990,39 @@ fn page_info(
     }
 }
 
+/// Where the page info will go while it is fetched: the Screenshots
+/// heading with a spinner, over empty tiles the size the screenshots take.
+fn page_info_placeholder(ui: &mut Ui, m: &Metrics) {
+    ui.add_space(m.space(20.0));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = m.space(10.0);
+        ui.label(
+            egui::RichText::new("Screenshots")
+                .font(bold(m.section))
+                .color(DIM),
+        );
+        ui.add(egui::Spinner::new().size(m.space(16.0)).color(DIM));
+    });
+    ui.add_space(m.space(10.0));
+    let height = screenshot_height(m);
+    let width = (height * 4.0 / 3.0).round();
+    let gap = m.space(12.0);
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let painter = ui.painter_at(row.expand2(vec2(m.ring, 0.0)));
+    let mut left = row.left();
+    while left < row.right() + m.ring {
+        let tile = Rect::from_min_size(pos2(left, row.top()), vec2(width, height));
+        painter.rect_filled(tile, CornerRadius::same(m.space(8.0) as u8), TILE_BG);
+        left += width + gap;
+    }
+    ui.add_space(m.space(12.0));
+}
+
+/// Height of a screenshot in the strip.
+fn screenshot_height(m: &Metrics) -> f32 {
+    m.space(196.0)
+}
+
 /// The game's screenshots in a row that scrolls sideways. Only those in
 /// view, and the next one along, are loaded.
 fn screenshot_strip(
@@ -1996,7 +2034,7 @@ fn screenshot_strip(
     scroll: Option<DetailScroll>,
     actions: &mut Vec<Action>,
 ) {
-    let height = m.space(196.0);
+    let height = screenshot_height(m);
     let gap = m.space(12.0);
     let ring = m.ring;
     let radii = [m.space(8.0); 4];
@@ -2070,7 +2108,10 @@ fn screenshot_strip(
                     });
                 });
         });
-    ui.advance_cursor_after_rect(area);
+    // Only the column's own width: the page's layout grows to whatever is
+    // allocated, and the ring's room in the margin would shift everything
+    // after the strip left.
+    ui.advance_cursor_after_rect(area.shrink2(vec2(ring, 0.0)));
 }
 
 /// Tags as small outlined chips, wrapping onto as many lines as needed.
