@@ -830,13 +830,13 @@ pub fn launch(
             if !args.is_empty() {
                 log::warn!("ignoring manifest arguments {args:?} for a ROM");
             }
-            run.strategy = Some("retroarch");
+            run.strategy = Some("retroarch".into());
             run.core = Some(system.core.clone());
             run.launch_target = Some(format!("rom:{} {file}", system.id));
             launch_rom(name, system, path, env)
         }
         Content::Love { path } => {
-            run.strategy = Some("love");
+            run.strategy = Some("love".into());
             run.launch_target = Some(match love_version() {
                 Some(version) => format!("love:{version} {file}"),
                 None => format!("love {file}"),

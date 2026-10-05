@@ -1314,7 +1314,7 @@ fn launch(
     });
     let mut run = run.into_inner();
     run.seconds = started.get().map(|at: Instant| at.elapsed().as_secs());
-    if run.strategy == Some("native") {
+    if run.strategy.as_deref() == Some("native") {
         run.launch_target = target.map(|t| format!("native {t}"));
         // butler logs a native game's stderr at error level.
         let lines: Vec<&str> = errors.iter().map(String::as_str).collect();
@@ -1387,7 +1387,7 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
                     started.set(Some(Instant::now()));
                     // Only a game butler runs itself has a pid.
                     if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
-                        run.borrow_mut().strategy = Some("native");
+                        run.borrow_mut().strategy = Some("native".into());
                         crate::muos::foreground(pid);
                     }
                     emit.send(Event::LaunchRunning {

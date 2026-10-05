@@ -1,10 +1,12 @@
-//! Compatibility reports: after a play session the player says how the
-//! game ran, and zitch sends that to itch.io with what the device is and
-//! what it saw of the run.
+//! Compatibility reports: from a game's page, the player says how the
+//! game runs here, and zitch sends that to itch.io with what the device is
+//! and what it saw of the game's last run.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// How the game ran, in the player's words.
@@ -149,10 +151,11 @@ const LAUNCH_TARGET_MAX: usize = 512;
 
 /// What zitch saw of one run, without asking the player. Unknown fields
 /// stay out of the report.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Run {
     /// `native`, `love` or `retroarch`.
-    pub strategy: Option<&'static str>,
+    pub strategy: Option<String>,
     /// The RetroArch core.
     pub core: Option<String>,
     pub exit_code: Option<i32>,
@@ -167,7 +170,7 @@ pub struct Run {
 impl Run {
     fn to_json(&self) -> Value {
         let mut run = Map::new();
-        if let Some(strategy) = self.strategy {
+        if let Some(strategy) = &self.strategy {
             run.insert("strategy".into(), json!(strategy));
         }
         if let Some(core) = &self.core {
@@ -189,6 +192,49 @@ impl Run {
             );
         }
         Value::Object(run)
+    }
+}
+
+/// A cave's last run, with what was installed when it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRun {
+    pub upload_id: i64,
+    pub build_id: Option<i64>,
+    pub run: Run,
+}
+
+pub type Runs = HashMap<String, SavedRun>;
+
+/// The saved runs by cave id, or none when the file is missing or
+/// unreadable.
+pub fn load_runs(path: &Path) -> Runs {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
+            log::warn!("reading {}: {error}", path.display());
+            Runs::new()
+        }),
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("reading {}: {error}", path.display());
+            }
+            Runs::new()
+        }
+    }
+}
+
+/// Writes beside, then renames, like the settings.
+pub fn save_runs(path: &Path, runs: &Runs) {
+    let result = (|| -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let text = serde_json::to_string(runs).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("json.part");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(error) = result {
+        log::warn!("saving {}: {error}", path.display());
     }
 }
 
@@ -302,7 +348,7 @@ mod tests {
             rating: Rating::Perfect,
             flags: Vec::new(),
             run: Run {
-                strategy: Some("retroarch"),
+                strategy: Some("retroarch".into()),
                 core: Some("mgba_libretro.so".into()),
                 seconds: Some(95),
                 launch_target: Some("rom:gba Game.gba".into()),

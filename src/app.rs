@@ -15,7 +15,7 @@ use crate::model::{
     Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
 };
 use crate::qr::QrCode;
-use crate::report::{Rating, Report, Run};
+use crate::report::{Rating, Report, Run, SavedRun};
 use crate::self_update::{self, SelfUpdate};
 use crate::settings::Settings;
 use crate::ui;
@@ -137,12 +137,14 @@ pub struct App {
     login: Option<LoginView>,
     /// The open game's page as a QR code, over the page.
     qr: Option<ui::QrView>,
-    /// How the last game ran, asked after it exits.
+    /// What the game options list does, by choice.
+    game_options: Vec<Action>,
+    /// How a game runs here, while the player fills it in.
     report: Option<ui::ReportView>,
-    /// Never ask how a game ran.
-    reports_off: bool,
-    /// Uploads already reported on, not asked about again.
-    reported_uploads: Vec<i64>,
+    /// The last run of each cave, for a report filed later.
+    runs: std::collections::HashMap<String, SavedRun>,
+    /// Where `runs` is kept; none for a screenshot run.
+    runs_path: Option<PathBuf>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -302,6 +304,7 @@ impl App {
             settings_path,
         } = options;
         let settings = Settings::load(&settings_path);
+        let runs_path = settings_path.with_file_name("runs.json");
         // Hiding every type this device has counts as hiding none, as the
         // filter treats it, so the page shows them all on.
         let mut playable_hidden = settings.playable_hidden;
@@ -362,8 +365,9 @@ impl App {
             login: None,
             qr: None,
             report: None,
-            reports_off: settings.reports_off,
-            reported_uploads: settings.reported_uploads,
+            game_options: Vec::new(),
+            runs: crate::report::load_runs(&runs_path),
+            runs_path: shot.is_none().then_some(runs_path),
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -730,6 +734,12 @@ impl App {
                 Action::Answer { prompt: id, choice } if id == prompt.id => {
                     if id == Self::SELF_UPDATE_PROMPT {
                         self.answer_self_update(choice);
+                    } else if id == Self::GAME_OPTIONS_PROMPT {
+                        self.prompt = self.prompt_queue.pop_front();
+                        let options = std::mem::take(&mut self.game_options);
+                        if let Some(action) = choice.and_then(|c| options.into_iter().nth(c)) {
+                            self.actions.push(action);
+                        }
                     } else {
                         self.prompt = self.prompt_queue.pop_front();
                         self.backend.send(Command::Answer { prompt: id, choice });
@@ -757,7 +767,7 @@ impl App {
                     Some(ui::ReportRow::Rating(_)) => view.pick(),
                     Some(ui::ReportRow::Flag(flag)) => view.toggle(flag),
                     Some(ui::ReportRow::Send) => self.send_report(),
-                    Some(ui::ReportRow::Skip) | None => self.report = None,
+                    Some(ui::ReportRow::Cancel) | None => self.report = None,
                 },
                 // Start sends from either step, with the rating in focus.
                 Action::Menu => self.send_report(),
@@ -780,10 +790,7 @@ impl App {
                         // Quit keeps the drawer in place under the overlay;
                         // a refresh keeps it to show its progress, a
                         // toggle its new state.
-                        if !matches!(
-                            action,
-                            Action::Quit | Action::RefreshLibrary | Action::SetAskReports(_)
-                        ) {
+                        if !matches!(action, Action::Quit | Action::RefreshLibrary) {
                             self.menu = None;
                         }
                         self.actions.push(action);
@@ -792,7 +799,6 @@ impl App {
                 Action::Back | Action::Menu => self.menu = None,
                 Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
                 Action::RefreshLibrary => self.refresh_library(),
-                Action::SetAskReports(on) => self.set_ask_reports(on),
                 _ => {}
             }
             return;
@@ -897,16 +903,7 @@ impl App {
                     let Some(game) = self.game(id) else {
                         return;
                     };
-                    let buttons = ui::game_buttons(
-                        game,
-                        &self.caves_for(game.id),
-                        self.installs.get(&game.id),
-                        self.is_running(game.id),
-                        self.update_for(game.id),
-                        self.online,
-                    )
-                    .len()
-                    .max(1);
+                    let buttons = self.game_buttons(game).len().max(1);
                     let button = match direction {
                         Direction::Left => button.saturating_sub(1),
                         Direction::Right => (button + 1).min(buttons - 1),
@@ -990,14 +987,7 @@ impl App {
                     let Some(game) = self.game(id) else {
                         return;
                     };
-                    let buttons = ui::game_buttons(
-                        game,
-                        &self.caves_for(game.id),
-                        self.installs.get(&game.id),
-                        self.is_running(game.id),
-                        self.update_for(game.id),
-                        self.online,
-                    );
+                    let buttons = self.game_buttons(game);
                     if let Some((_, action)) = buttons.get(button) {
                         self.actions.push(action.clone());
                     }
@@ -1229,7 +1219,8 @@ impl App {
             }
             // Only meaningful while a prompt is open, handled above.
             Action::Answer { .. } | Action::PromptFocus(_) | Action::ReportFocus(_) => {}
-            Action::SetAskReports(on) => self.set_ask_reports(on),
+            Action::Report { cave_id } => self.open_report(&cave_id),
+            Action::GameOptions { cave_id } => self.open_game_options(&cave_id),
             Action::Install { game_id } => {
                 let Some(game) = self.game(game_id).cloned() else {
                     return;
@@ -1335,6 +1326,17 @@ impl App {
             })
             .map(|cave| cave.id.clone())
             .collect()
+    }
+
+    fn game_buttons(&self, game: &Game) -> Vec<(&'static str, Action)> {
+        ui::game_buttons(
+            game,
+            &self.caves_for(game.id),
+            self.installs.get(&game.id),
+            self.is_running(game.id),
+            self.update_for(game.id),
+            self.online,
+        )
     }
 
     fn update_for(&self, game_id: i64) -> Option<&GameUpdate> {
@@ -1609,8 +1611,6 @@ impl App {
                 playable_only: self.playable_only,
                 collections_installed_only: self.collections_installed_only,
                 playable_hidden: self.playable_hidden.clone(),
-                reports_off: self.reports_off,
-                reported_uploads: self.reported_uploads.clone(),
             }
             .save(path);
         }
@@ -2077,7 +2077,7 @@ impl App {
                 } => {
                     self.running.remove(&cave_id);
                     if let Some(run) = run {
-                        self.offer_report(&cave_id, result.is_err(), run);
+                        self.save_run(&cave_id, run);
                     }
                     if let Err(failure) = result {
                         // The game's page shows the failure in full; the
@@ -2396,34 +2396,61 @@ impl App {
     }
 
     /// Something failed that has no page to show it on.
-    /// How long a session has to be before zitch asks how it ran. A
-    /// failed launch is asked about whatever its length.
-    const REPORT_AFTER_SECONDS: u64 = 30;
+    /// Keeps a cave's last run, on disk too, for a report filed later.
+    fn save_run(&mut self, cave_id: &str, run: Run) {
+        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+            return;
+        };
+        let Some(upload) = &cave.upload else {
+            return;
+        };
+        let saved = SavedRun {
+            upload_id: upload.id,
+            build_id: cave.build.as_ref().map(|b| b.id),
+            run,
+        };
+        self.runs.insert(cave_id.to_string(), saved);
+        // Uninstalled caves go; an empty list may just not be loaded.
+        if !self.caves.is_empty() {
+            let caves = &self.caves;
+            self.runs.retain(|id, _| caves.iter().any(|c| &c.id == id));
+        }
+        if let Some(path) = &self.runs_path {
+            crate::report::save_runs(path, &self.runs);
+        }
+    }
 
-    /// Asks how the game in `cave_id` ran, unless the player turned that
-    /// off, already reported on this upload, or barely played.
-    fn offer_report(&mut self, cave_id: &str, failed: bool, run: Run) {
-        if self.reports_off || self.login.is_some() || self.shot.is_some() {
-            return;
-        }
-        let long_enough = run.seconds.is_some_and(|s| s >= Self::REPORT_AFTER_SECONDS);
-        if !failed && !long_enough {
-            return;
-        }
+    /// Whether the cave was launched, so there is something to report on.
+    fn reportable(&self, cave: &Cave) -> bool {
+        self.runs.contains_key(&cave.id)
+            || self.launch_failures.contains_key(&cave.id)
+            || cave
+                .stats
+                .as_ref()
+                .is_some_and(|s| s.local_seconds_run.unwrap_or(0) > 0 || s.seconds_run > 0)
+    }
+
+    /// Asks how the game in `cave_id` runs. The cave's last run goes with
+    /// the answer while it was of the build installed now.
+    fn open_report(&mut self, cave_id: &str) {
         let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
             return;
         };
         let (Some(game), Some(upload)) = (&cave.game, &cave.upload) else {
             return;
         };
-        if self.reported_uploads.contains(&upload.id) {
-            return;
-        }
+        let build_id = cave.build.as_ref().map(|b| b.id);
+        let run = self
+            .runs
+            .get(cave_id)
+            .filter(|saved| saved.upload_id == upload.id && saved.build_id == build_id)
+            .map(|saved| saved.run.clone())
+            .unwrap_or_default();
         let draft = Report {
             game_id: game.id,
             upload_id: upload.id,
-            build_id: cave.build.as_ref().map(|b| b.id),
-            rating: if failed {
+            build_id,
+            rating: if self.launch_failures.contains_key(cave_id) {
                 Rating::WontRun
             } else {
                 Rating::Perfect
@@ -2432,11 +2459,6 @@ impl App {
             run,
         };
         self.report = Some(ui::ReportView::new(game.title.clone(), draft));
-    }
-
-    fn set_ask_reports(&mut self, on: bool) {
-        self.reports_off = !on;
-        self.save_settings();
     }
 
     /// Sends the open report in the background and closes it.
@@ -2449,10 +2471,6 @@ impl App {
             // The screenshot script's sample.
             return;
         }
-        if !self.reported_uploads.contains(&report.upload_id) {
-            self.reported_uploads.push(report.upload_id);
-            self.save_settings();
-        }
         self.backend.send(Command::Report(Box::new(report)));
     }
 
@@ -2463,6 +2481,47 @@ impl App {
 
     /// The backend counts its prompt ids up from 1.
     const SELF_UPDATE_PROMPT: u64 = u64::MAX;
+    const GAME_OPTIONS_PROMPT: u64 = u64::MAX - 1;
+
+    /// The game page's More button: what else there is to do with the
+    /// installed game, as a list.
+    fn open_game_options(&mut self, cave_id: &str) {
+        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+            return;
+        };
+        let mut options = Vec::new();
+        if self.reportable(cave) {
+            options.push((
+                "Report compatibility",
+                Action::Report {
+                    cave_id: cave_id.to_string(),
+                },
+            ));
+        }
+        options.push((
+            "Uninstall",
+            Action::Uninstall {
+                cave_id: cave_id.to_string(),
+            },
+        ));
+        let title = cave
+            .game
+            .as_ref()
+            .map_or("Game", |g| g.title.as_str())
+            .to_string();
+        self.prompt = Some(Prompt {
+            id: Self::GAME_OPTIONS_PROMPT,
+            title,
+            body: String::new(),
+            choices: options.iter().map(|(label, _)| label.to_string()).collect(),
+            focus: 0,
+            primary: None,
+            stacked: true,
+            details: Vec::new(),
+            progress: None,
+        });
+        self.game_options = options.into_iter().map(|(_, action)| action).collect();
+    }
 
     /// The drawer's row: open the dialog, checking unless there is
     /// already something to show.
@@ -2653,15 +2712,6 @@ impl App {
             });
         }
         items.push(ui::MenuItem {
-            label: if self.reports_off {
-                "Ask how games ran: off".into()
-            } else {
-                "Ask how games ran: on".into()
-            },
-            action: Action::SetAskReports(self.reports_off),
-            busy: false,
-        });
-        items.push(ui::MenuItem {
             label: "Quit".into(),
             action: Action::Quit,
             busy: false,
@@ -2705,11 +2755,11 @@ impl App {
                 Some(ui::ReportRow::Flag(flag)) if view.draft.flags.contains(&flag) => "Uncheck",
                 Some(ui::ReportRow::Flag(_)) => "Check",
                 Some(ui::ReportRow::Send) => "Send",
-                Some(ui::ReportRow::Skip) | None => "Skip",
+                Some(ui::ReportRow::Cancel) | None => "Cancel",
             };
             hints.push((vec![Glyph::Confirm], confirm.to_string()));
             hints.push((vec![Glyph::Menu], "Send".to_string()));
-            let back = if view.picked { "Back" } else { "Skip" };
+            let back = if view.picked { "Back" } else { "Cancel" };
             hints.push((vec![Glyph::Back], back.to_string()));
             return hints;
         }
@@ -2796,14 +2846,7 @@ impl App {
             Page::Game { id, button } => {
                 let mut hints: Vec<(Vec<Glyph>, String)> = Vec::new();
                 if let Some(game) = self.game(id) {
-                    let buttons = ui::game_buttons(
-                        game,
-                        &self.caves_for(game.id),
-                        self.installs.get(&game.id),
-                        self.is_running(game.id),
-                        self.update_for(game.id),
-                        self.online,
-                    );
+                    let buttons = self.game_buttons(game);
                     if buttons.len() > 1 {
                         hints.push((vec![Glyph::NavigateHorizontal], "Choose".to_string()));
                     }

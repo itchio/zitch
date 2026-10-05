@@ -1548,8 +1548,8 @@ pub fn game_buttons(
                 ));
             }
             buttons.push((
-                "Uninstall",
-                Action::Uninstall {
+                "More",
+                Action::GameOptions {
                     cave_id: cave.id.clone(),
                 },
             ));
@@ -2341,7 +2341,8 @@ pub fn prompt(
     }
 }
 
-/// The question after a play session: a rating, then what went wrong.
+/// How a game runs here, as the player reports it: a rating, then what
+/// went wrong.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReportView {
     pub game: String,
@@ -2352,7 +2353,7 @@ pub struct ReportView {
     pub picked: bool,
     /// On the ratings, an index into [`Rating::ALL`]. After, an index into
     /// [`report::flags`] while the rating asks for them, then Send, then
-    /// Skip.
+    /// Cancel.
     pub focus: usize,
 }
 
@@ -2362,7 +2363,7 @@ pub enum ReportRow {
     Rating(Rating),
     Flag(&'static str),
     Send,
-    Skip,
+    Cancel,
 }
 
 impl ReportView {
@@ -2403,7 +2404,7 @@ impl ReportView {
         match index {
             i if i < flags => report::flags().nth(i).map(|(_, f)| ReportRow::Flag(f.id)),
             i if i == flags => Some(ReportRow::Send),
-            i if i == flags + 1 => Some(ReportRow::Skip),
+            i if i == flags + 1 => Some(ReportRow::Cancel),
             _ => None,
         }
     }
@@ -2413,7 +2414,7 @@ impl ReportView {
     }
 
     /// Moves focus: up and down through the rows, left and right between
-    /// flag groups, and between Send and Skip.
+    /// flag groups, and between Send and Cancel.
     pub fn step(&mut self, direction: Direction) {
         let last = self.rows().saturating_sub(1);
         let flags = self.flag_rows();
@@ -2608,7 +2609,8 @@ pub fn report(
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = m.space(12.0);
                                         ui.add_space(m.ring);
-                                        for (offset, label) in ["Send", "Skip"].iter().enumerate() {
+                                        for (offset, label) in ["Send", "Cancel"].iter().enumerate()
+                                        {
                                             let row = index + offset;
                                             let focused = row == view.focus;
                                             let response = pill(ui, m, label, focused, offset == 0);

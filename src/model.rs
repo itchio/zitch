@@ -829,8 +829,14 @@ pub enum Action {
     /// Focus a row of the compatibility report; the pointer is already
     /// there.
     ReportFocus(usize),
-    /// Whether zitch asks how a game ran after playing it.
-    SetAskReports(bool),
+    /// Ask how the game in this cave runs.
+    Report {
+        cave_id: String,
+    },
+    /// List what else there is to do with the game in this cave.
+    GameOptions {
+        cave_id: String,
+    },
     /// Hide games with no upload for this device, on every tab.
     SetPlayableOnly(bool),
     /// Include or leave out one type in "Playable here".
