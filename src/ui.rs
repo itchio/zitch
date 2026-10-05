@@ -12,6 +12,7 @@ use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, PlayableType,
     Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here, scanned_platform_words,
 };
+use crate::page_info::PageInfo;
 use crate::qr::QrCode;
 use crate::report::{self, Rating, Report};
 
@@ -1599,10 +1600,118 @@ pub struct GameView<'a> {
     pub failure: Option<&'a LaunchFailure>,
     /// Why the last install failed, shown the same way.
     pub install_failure: Option<&'a str>,
+    /// Screenshots and the rest from the game's data.json, once fetched.
+    pub info: Option<&'a PageInfo>,
+    /// The screenshot with focus, instead of a button.
+    pub focused_shot: Option<usize>,
+    /// Where to scroll this frame, after focus moved.
+    pub scroll: Option<DetailScroll>,
+    /// Counts openings of a game page, so each starts scrolled to the top.
+    pub visit: u64,
+}
+
+/// Where the game page scrolls when focus moves between its parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailScroll {
+    /// Back to the top, for the buttons.
+    Top,
+    /// The screenshots and what follows them, on entering them.
+    Screenshots,
+    /// Just enough to show the focused screenshot.
+    Shot,
+    /// To the bottom, for what is below the screenshots.
+    End,
 }
 
 pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
     let GameView {
+        game,
+        covers,
+        caves,
+        install,
+        running,
+        running_since,
+        update,
+        online,
+        focused_button,
+        failure,
+        install_failure,
+        info,
+        focused_shot,
+        scroll,
+        visit,
+    } = view;
+    let shots = info.map_or(0, |info| info.screenshots.len());
+    let focused_shot = focused_shot.filter(|&i| i < shots);
+    let focused_button = if focused_shot.is_some() {
+        usize::MAX
+    } else {
+        focused_button
+    };
+    egui::ScrollArea::vertical()
+        .id_salt(("game", visit))
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            ui.push_id(visit, |ui| {
+                let top = game_summary(
+                    ui,
+                    m,
+                    GameSummary {
+                        game,
+                        covers,
+                        caves,
+                        install,
+                        running,
+                        running_since,
+                        update,
+                        online,
+                        focused_button,
+                        failure,
+                        install_failure,
+                    },
+                    actions,
+                );
+                if scroll == Some(DetailScroll::Top) {
+                    top.scroll_to_me(Some(egui::Align::TOP));
+                }
+                if let Some(info) = info {
+                    page_info(ui, m, info, covers, focused_shot, scroll, actions);
+                }
+                if scroll == Some(DetailScroll::End) {
+                    let bottom = ui.min_rect().left_bottom();
+                    ui.scroll_to_rect(
+                        Rect::from_min_size(bottom, vec2(1.0, 0.0)),
+                        Some(egui::Align::BOTTOM),
+                    );
+                }
+            })
+        });
+}
+
+/// The top of the game page: what [`GameView`] has, less the page info.
+struct GameSummary<'a> {
+    game: &'a Game,
+    covers: &'a CoverLoader,
+    caves: &'a [&'a Cave],
+    install: Option<&'a InstallState>,
+    running: bool,
+    running_since: Option<Instant>,
+    update: Option<&'a GameUpdate>,
+    online: bool,
+    focused_button: usize,
+    failure: Option<&'a LaunchFailure>,
+    install_failure: Option<&'a str>,
+}
+
+/// The cover beside the title, status and buttons.
+fn game_summary(
+    ui: &mut Ui,
+    m: &Metrics,
+    view: GameSummary,
+    actions: &mut Vec<Action>,
+) -> egui::Response {
+    let GameSummary {
         game,
         covers,
         caves,
@@ -1811,7 +1920,282 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
                 }
             }
         });
+    })
+    .response
+}
+
+/// Screenshots, tags and the lines under them, below the top of the page.
+fn page_info(
+    ui: &mut Ui,
+    m: &Metrics,
+    info: &PageInfo,
+    covers: &CoverLoader,
+    focused_shot: Option<usize>,
+    scroll: Option<DetailScroll>,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(m.space(20.0));
+    let mut heading = None;
+    if !info.screenshots.is_empty() {
+        let label = ui.label(
+            egui::RichText::new("Screenshots")
+                .font(bold(m.section))
+                .color(if focused_shot.is_some() { TEXT } else { DIM }),
+        );
+        ui.add_space(m.space(10.0) - m.ring);
+        heading = Some(label.rect);
+        screenshot_strip(
+            ui,
+            m,
+            &info.screenshots,
+            covers,
+            focused_shot,
+            scroll,
+            actions,
+        );
+        ui.add_space(m.space(10.0) - m.ring);
+    }
+    if !info.tags.is_empty() {
+        tag_chips(ui, m, &info.tags);
+        ui.add_space(m.space(8.0));
+    }
+    for line in [info.authors_line(), info.price_line()]
+        .into_iter()
+        .flatten()
+    {
+        ui.label(
+            egui::RichText::new(line)
+                .font(FontId::proportional(m.body))
+                .color(DIM),
+        );
+        ui.add_space(m.space(2.0));
+    }
+    // Room below the last line, kept clear of the footer when scrolled to.
+    ui.add_space(m.space(12.0));
+    // From the heading down to the last line, as much as fits. After the
+    // strip, which scrolls itself sideways to the focused screenshot.
+    if scroll == Some(DetailScroll::Screenshots)
+        && let Some(heading) = heading
+    {
+        let bottom = ui.min_rect().bottom();
+        ui.scroll_to_rect(
+            Rect::from_x_y_ranges(heading.x_range(), heading.top()..=bottom),
+            None,
+        );
+    }
+}
+
+/// The game's screenshots in a row that scrolls sideways. Only those in
+/// view, and the next one along, are loaded.
+fn screenshot_strip(
+    ui: &mut Ui,
+    m: &Metrics,
+    urls: &[String],
+    covers: &CoverLoader,
+    focused: Option<usize>,
+    scroll: Option<DetailScroll>,
+    actions: &mut Vec<Action>,
+) {
+    let height = m.space(196.0);
+    let gap = m.space(12.0);
+    let ring = m.ring;
+    let radii = [m.space(8.0); 4];
+    // Out into the page margin by the ring, so the first screenshot lines
+    // up with the cover and its ring is not clipped.
+    let mut area = ui.available_rect_before_wrap();
+    area.min.x -= ring;
+    area.max.x += ring;
+    area.max.y = area.min.y + height + 2.0 * ring;
+    let mut strip = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("screenshot-strip")
+            .max_rect(area),
+    );
+    egui::ScrollArea::horizontal()
+        .id_salt("screenshots")
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(&mut strip, |ui| {
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::same(ring as i8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        let mut previous_shown = false;
+                        let sizes = covers.screenshot_sizes(urls);
+                        for (index, url) in urls.iter().enumerate() {
+                            // Until it loads, a screenshot holds a 4:3 space.
+                            let aspect = sizes[index].map_or(4.0 / 3.0, |s| s.x / s.y.max(1.0));
+                            let size = vec2((height * aspect).round(), height);
+                            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                            let shown = ui.is_rect_visible(rect);
+                            let texture = if shown {
+                                covers.screenshot(ui.ctx(), url)
+                            } else {
+                                if previous_shown {
+                                    covers.prefetch_screenshot(ui.ctx(), url);
+                                }
+                                None
+                            };
+                            previous_shown = shown;
+                            match texture {
+                                Some(texture) if shown => paint_texture(
+                                    ui,
+                                    egui::load::SizedTexture::from_handle(&texture),
+                                    rect,
+                                    CornerRadius::same(radii[0] as u8),
+                                ),
+                                _ => {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        CornerRadius::same(radii[0] as u8),
+                                        TILE_BG,
+                                    );
+                                }
+                            }
+                            if focused == Some(index) {
+                                focus_ring(ui, rect, radii, m);
+                                if matches!(
+                                    scroll,
+                                    Some(DetailScroll::Screenshots | DetailScroll::Shot)
+                                ) {
+                                    ui.scroll_to_rect(rect.expand(ring), None);
+                                }
+                            }
+                            if response.clicked() {
+                                actions.push(Action::ViewScreenshot(index));
+                            }
+                            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                    });
+                });
+        });
+    ui.advance_cursor_after_rect(area);
+}
+
+/// Tags as small outlined chips, wrapping onto as many lines as needed.
+fn tag_chips(ui: &mut Ui, m: &Metrics, tags: &[String]) {
+    let font = FontId::proportional(m.caption);
+    let pad = vec2(m.space(9.0), m.space(3.0));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(m.space(6.0), m.space(6.0));
+        for tag in tags {
+            let galley = ui.painter().layout_no_wrap(tag.clone(), font.clone(), DIM);
+            let size = galley.size() + 2.0 * pad;
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same((size.y / 2.0) as u8),
+                Stroke::new(1.0, BORDER),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().galley(rect.min + pad, galley, DIM);
+        }
     });
+}
+
+/// The screenshots being looked at full screen.
+pub struct ScreenshotView {
+    pub urls: Vec<String>,
+    pub index: usize,
+}
+
+/// One screenshot as large as the page allows, with the way to the others.
+pub fn screenshot_viewer(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    page: Rect,
+    view: &ScreenshotView,
+    covers: &CoverLoader,
+    actions: &mut Vec<Action>,
+) {
+    let Some(url) = view.urls.get(view.index) else {
+        return;
+    };
+    egui::Area::new(egui::Id::new("screenshot-viewer"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            // The whole screen takes clicks, so nothing under the viewer
+            // can be pressed; outside the screenshot closes it.
+            let backdrop = ui.allocate_rect(screen, Sense::click());
+            ui.painter()
+                .rect_filled(page, 0.0, Color32::from_gray(0x0c));
+            if backdrop.clicked() {
+                actions.push(Action::CloseScreenshot);
+            }
+            let pad = m.space(12.0);
+            let button = m.space(40.0);
+            let several = view.urls.len() > 1;
+            let side = if several { button + pad } else { 0.0 };
+            let room = page.shrink2(vec2(pad + side, pad));
+            for neighbour in [view.index.wrapping_sub(1), view.index + 1] {
+                if let Some(url) = view.urls.get(neighbour) {
+                    covers.prefetch_screenshot(ctx, url);
+                }
+            }
+            let shown = match covers.screenshot(ctx, url) {
+                Some(texture) => {
+                    let size = texture.size_vec2();
+                    let fit = (room.width() / size.x).min(room.height() / size.y);
+                    let rect = Rect::from_center_size(room.center(), size * fit);
+                    ui.allocate_rect(rect, Sense::click());
+                    paint_texture(
+                        ui,
+                        egui::load::SizedTexture::from_handle(&texture),
+                        rect,
+                        CornerRadius::same(m.space(6.0) as u8),
+                    );
+                    rect
+                }
+                None => {
+                    let spinner = m.space(32.0);
+                    egui::Spinner::new().size(spinner).color(DIM).paint_at(
+                        ui,
+                        Rect::from_center_size(room.center(), vec2(spinner, spinner)),
+                    );
+                    room
+                }
+            };
+            if !several {
+                return;
+            }
+            let inset = m.space(8.0);
+            badge(
+                ui,
+                m,
+                shown.left_bottom() + vec2(inset, -inset),
+                &format!("{} / {}", view.index + 1, view.urls.len()),
+                TEXT,
+            );
+            let arrows = [
+                (page.left() + pad, view.index.checked_sub(1), -1.0),
+                (
+                    page.right() - pad - button,
+                    Some(view.index + 1).filter(|&i| i < view.urls.len()),
+                    1.0,
+                ),
+            ];
+            for (left, target, direction) in arrows {
+                let Some(target) = target else {
+                    continue;
+                };
+                let rect = Rect::from_min_size(
+                    pos2(left, page.center().y - button / 2.0),
+                    vec2(button, button),
+                );
+                let response = ui.allocate_rect(rect, Sense::click());
+                round_chevron(ui, m, rect, response.hovered(), direction);
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    actions.push(Action::ViewScreenshot(target));
+                }
+            }
+        });
 }
 
 /// A spinner and a bold label, the height of a pill.
@@ -2203,6 +2587,15 @@ pub fn human_duration(seconds: i64) -> String {
 impl Page {
     pub fn is_library(&self) -> bool {
         matches!(self, Page::Library)
+    }
+
+    /// A game's page with its first button focused.
+    pub fn game(id: i64) -> Self {
+        Page::Game {
+            id,
+            button: 0,
+            shot: None,
+        }
     }
 }
 
@@ -3141,27 +3534,34 @@ fn footer_hints(
 pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
     let size = m.space(40.0);
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-    let (fill, edge) = if response.hovered() {
+    round_chevron(ui, m, rect, response.hovered(), -1.0);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A round button filling `rect` with a chevron pointing left for a
+/// negative `direction`, right for a positive one.
+fn round_chevron(ui: &Ui, m: &Metrics, rect: Rect, hovered: bool, direction: f32) {
+    let (fill, edge) = if hovered {
         (SURFACE_HOVER, BORDER_HOVER)
     } else {
         (SURFACE, BORDER)
     };
     ui.painter().circle(
         rect.center(),
-        size / 2.0,
+        rect.width() / 2.0,
         fill,
         Stroke::new(m.space(1.25).max(1.0), edge),
     );
     let c = rect.center();
     let arm = m.space(7.0);
+    let back = -direction.signum() * arm * 0.5;
     let points = [
-        pos2(c.x + arm * 0.5, c.y - arm),
-        pos2(c.x - arm * 0.5, c.y),
-        pos2(c.x + arm * 0.5, c.y + arm),
+        pos2(c.x + back, c.y - arm),
+        pos2(c.x - back, c.y),
+        pos2(c.x + back, c.y + arm),
     ];
     ui.painter()
         .add(egui::Shape::line(points.to_vec(), Stroke::new(3.0, TEXT)));
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// One segmented group from the itch app's filter bar. Returns the index

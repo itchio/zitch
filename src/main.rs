@@ -10,6 +10,7 @@ mod host_sdl;
 mod images;
 mod model;
 mod muos;
+mod page_info;
 mod qr;
 mod report;
 mod self_update;

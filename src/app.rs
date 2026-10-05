@@ -14,6 +14,7 @@ use crate::model::{
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
     Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
 };
+use crate::page_info::PageInfoLoader;
 use crate::qr::QrCode;
 use crate::report::{Rating, Report, Run, SavedRun};
 use crate::self_update::{self, SelfUpdate};
@@ -43,6 +44,8 @@ pub struct Options {
 pub struct App {
     backend: Backend,
     covers: CoverLoader,
+    /// Screenshots, tags and the like for game pages, while online.
+    page_info: PageInfoLoader,
     gamepad: Gamepad,
     glyphs: Glyphs,
     /// The device the user touched last, which picks the footer's glyphs.
@@ -137,6 +140,12 @@ pub struct App {
     login: Option<LoginView>,
     /// The open game's page as a QR code, over the page.
     qr: Option<ui::QrView>,
+    /// A screenshot of the open game, full screen over the page.
+    viewer: Option<ui::ScreenshotView>,
+    /// Where the game page scrolls to on its next frame, after focus moved.
+    detail_scroll: Option<ui::DetailScroll>,
+    /// Game pages opened so far; each opening starts at the top.
+    detail_visit: u64,
     /// What the game options list does, by choice.
     game_options: Vec<Action>,
     /// How a game runs here, while the player fills it in.
@@ -320,6 +329,7 @@ impl App {
         Self {
             backend,
             covers,
+            page_info: PageInfoLoader::new(),
             gamepad: gamepad.unwrap_or_else(|| Gamepad::new(ctx.clone())),
             glyphs: Glyphs::load(ctx),
             input_mode: InputMode::Keyboard,
@@ -364,6 +374,9 @@ impl App {
             page: Page::Library,
             login: None,
             qr: None,
+            viewer: None,
+            detail_scroll: None,
+            detail_visit: 0,
             report: None,
             game_options: Vec::new(),
             runs: crate::report::load_runs(&runs_path),
@@ -479,6 +492,13 @@ impl App {
 
     fn game(&self, id: i64) -> Option<&Game> {
         self.catalog.get(&id).map(|g| &**g)
+    }
+
+    /// Screenshots the game's page shows, once its details are in.
+    fn screenshot_count(&self, id: i64) -> usize {
+        self.page_info
+            .peek(id)
+            .map_or(0, |info| info.screenshots.len())
     }
 
     /// The cave and title under the launch curtain.
@@ -777,6 +797,34 @@ impl App {
             }
             return;
         }
+        // Only over a game's page; anything that leaves it closes the viewer.
+        if !matches!(self.page, Page::Game { .. }) {
+            self.viewer = None;
+        }
+        if let Some(view) = self.viewer.as_mut() {
+            let last = view.urls.len().saturating_sub(1);
+            match action {
+                Action::MoveFocus(Direction::Left) => view.index = view.index.saturating_sub(1),
+                Action::MoveFocus(Direction::Right) => view.index = (view.index + 1).min(last),
+                Action::ViewScreenshot(index) if index <= last => view.index = index,
+                Action::Activate | Action::Back | Action::CloseScreenshot => self.viewer = None,
+                // As over the QR code: the menu comes up, here in its place.
+                Action::Menu => {
+                    self.viewer = None;
+                    self.raise_window();
+                    self.menu = Some(0);
+                }
+                _ => {}
+            }
+            // The page's focus follows, so closing lands on the same one.
+            if let Some(view) = &self.viewer
+                && let Page::Game { shot, .. } = &mut self.page
+                && shot.is_some()
+            {
+                *shot = Some(view.index);
+            }
+            return;
+        }
         if let Some(focus) = self.menu {
             let items = self.menu_items();
             match action {
@@ -899,17 +947,41 @@ impl App {
                         }
                     }
                 }
-                Page::Game { id, button } => {
+                Page::Game { id, button, shot } => {
                     let Some(game) = self.game(id) else {
                         return;
                     };
                     let buttons = self.game_buttons(game).len().max(1);
-                    let button = match direction {
-                        Direction::Left => button.saturating_sub(1),
-                        Direction::Right => (button + 1).min(buttons - 1),
-                        _ => button,
+                    let shots = self.screenshot_count(id);
+                    let (button, shot) = match (shot.filter(|&i| i < shots), direction) {
+                        (None, Direction::Left) => (button.saturating_sub(1), None),
+                        (None, Direction::Right) => ((button + 1).min(buttons - 1), None),
+                        (None, Direction::Down) if shots > 0 => {
+                            self.detail_scroll = Some(ui::DetailScroll::Screenshots);
+                            (button, Some(0))
+                        }
+                        // Nothing more to focus below: the page scrolls to
+                        // show the rest.
+                        (_, Direction::Down) => {
+                            self.detail_scroll = Some(ui::DetailScroll::End);
+                            (button, shot)
+                        }
+                        (_, Direction::Up) => {
+                            self.detail_scroll = Some(ui::DetailScroll::Top);
+                            (button, None)
+                        }
+                        (Some(i), Direction::Left | Direction::Right) => {
+                            self.detail_scroll = Some(ui::DetailScroll::Shot);
+                            let i = if direction == Direction::Left {
+                                i.saturating_sub(1)
+                            } else {
+                                (i + 1).min(shots - 1)
+                            };
+                            (button, Some(i))
+                        }
+                        (shot, _) => (button, shot),
                     };
-                    self.page = Page::Game { id, button };
+                    self.page = Page::Game { id, button, shot };
                 }
                 Page::PlayableTypes { row } => {
                     // Everything, then each type.
@@ -947,7 +1019,11 @@ impl App {
             }
             Action::FocusButton(button) => {
                 if let Page::Game { id, .. } = self.page {
-                    self.page = Page::Game { id, button };
+                    self.page = Page::Game {
+                        id,
+                        button,
+                        shot: None,
+                    };
                 }
             }
             Action::Activate => match self.page.clone() {
@@ -968,8 +1044,7 @@ impl App {
                                 .and_then(|rows| rows.focused_game())
                                 .filter(|id| self.catalog.contains_key(id))
                             {
-                                self.actions
-                                    .push(Action::Open(Page::Game { id, button: 0 }));
+                                self.actions.push(Action::Open(Page::game(id)));
                             }
                         }
                         Tab::Downloads => {
@@ -983,7 +1058,10 @@ impl App {
                         }
                     }
                 }
-                Page::Game { id, button } => {
+                Page::Game {
+                    shot: Some(index), ..
+                } => self.actions.push(Action::ViewScreenshot(index)),
+                Page::Game { id, button, .. } => {
                     let Some(game) = self.game(id) else {
                         return;
                     };
@@ -1151,6 +1229,18 @@ impl App {
                 }
             }
             Action::HideQr => self.qr = None,
+            Action::ViewScreenshot(index) => {
+                if let Page::Game { id, .. } = self.page
+                    && let Some(info) = self.page_info.peek(id)
+                    && index < info.screenshots.len()
+                {
+                    self.viewer = Some(ui::ScreenshotView {
+                        urls: info.screenshots.clone(),
+                        index,
+                    });
+                }
+            }
+            Action::CloseScreenshot => self.viewer = None,
             Action::SearchDone => {
                 self.blur_search = true;
                 // Search hands control to its results, not back to the
@@ -1189,6 +1279,9 @@ impl App {
                     && !matches!(self.page, Page::PlayableTypes { .. })
                 {
                     self.types_return = self.page.clone();
+                }
+                if matches!(page, Page::Game { .. }) {
+                    self.detail_visit += 1;
                 }
                 self.page = page;
             }
@@ -2235,13 +2328,7 @@ impl App {
                 };
                 let mut buttons = vec![(label, Action::Update { cave_id })];
                 if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
-                    buttons.push((
-                        "Open",
-                        Action::Open(Page::Game {
-                            id: game.id,
-                            button: 0,
-                        }),
-                    ));
+                    buttons.push(("Open", Action::Open(Page::game(game.id))));
                 }
                 rows.push(ui::DownloadRow {
                     game,
@@ -2342,13 +2429,7 @@ impl App {
                 (format!("Failed, {error}"), true)
             } else {
                 if let Some(game) = game.filter(|g| self.catalog.contains_key(&g.id)) {
-                    buttons.push((
-                        "Open",
-                        Action::Open(Page::Game {
-                            id: game.id,
-                            button: 0,
-                        }),
-                    ));
+                    buttons.push(("Open", Action::Open(Page::game(game.id))));
                 }
                 let outcome = match download.reason {
                     DownloadReason::Install => "Installed",
@@ -2658,6 +2739,7 @@ impl App {
     fn sign_out(&mut self) {
         self.profile = None;
         self.report = None;
+        self.viewer = None;
         self.owned = Loadable::Loading;
         self.collections = Loadable::default();
         self.collection_filtered = None;
@@ -2766,6 +2848,17 @@ impl App {
         if self.handed_off().is_some() {
             return vec![(vec![Glyph::Back], "Cancel".to_string())];
         }
+        if let Some(view) = &self.viewer {
+            let mut hints = Vec::new();
+            if view.urls.len() > 1 {
+                hints.push((
+                    vec![Glyph::NavigateHorizontal],
+                    "Previous / Next".to_string(),
+                ));
+            }
+            hints.push((vec![Glyph::Back], "Close".to_string()));
+            return hints;
+        }
         if self.qr_shown() {
             return vec![(vec![Glyph::Back], "Close".to_string())];
         }
@@ -2843,15 +2936,23 @@ impl App {
                 }
                 hints
             }
-            Page::Game { id, button } => {
+            Page::Game { id, button, shot } => {
                 let mut hints: Vec<(Vec<Glyph>, String)> = Vec::new();
                 if let Some(game) = self.game(id) {
                     let buttons = self.game_buttons(game);
-                    if buttons.len() > 1 {
+                    let shots = self.screenshot_count(id);
+                    if shots > 0 {
+                        hints.push((vec![Glyph::Navigate], "Choose".to_string()));
+                    } else if buttons.len() > 1 {
                         hints.push((vec![Glyph::NavigateHorizontal], "Choose".to_string()));
                     }
-                    if let Some((label, _)) = buttons.get(button) {
-                        hints.push((vec![Glyph::Confirm], label.to_string()));
+                    match shot.filter(|&i| i < shots) {
+                        Some(_) => hints.push((vec![Glyph::Confirm], "View".to_string())),
+                        None => {
+                            if let Some((label, _)) = buttons.get(button) {
+                                hints.push((vec![Glyph::Confirm], label.to_string()));
+                            }
+                        }
                     }
                     if !game.url.is_empty() {
                         hints.push((vec![Glyph::Secondary], "QR code".to_string()));
@@ -3224,7 +3325,7 @@ impl App {
                             }
                         }
                     },
-                    (Loadable::Loaded(_), Page::Game { id, button }) => {
+                    (Loadable::Loaded(_), Page::Game { id, button, shot }) => {
                         match self.catalog.get(&id) {
                             Some(game) => {
                                 let caves: Vec<&Cave> = self
@@ -3243,6 +3344,9 @@ impl App {
                                     .find_map(|cave| self.launch_failures.get(&cave.id));
                                 let install_failure =
                                     self.install_failures.get(&game.id).map(String::as_str);
+                                let info =
+                                    self.page_info
+                                        .get(ui.ctx(), game.id, &game.url, self.online);
                                 ui::game_detail(
                                     ui,
                                     &m,
@@ -3258,6 +3362,10 @@ impl App {
                                         focused_button: button,
                                         failure,
                                         install_failure,
+                                        info: info.as_deref(),
+                                        focused_shot: shot,
+                                        scroll: self.detail_scroll.take(),
+                                        visit: self.detail_visit,
                                     },
                                     &mut self.actions,
                                 );
@@ -3293,6 +3401,19 @@ impl App {
         }
         if let Some(view) = &self.report {
             ui::report(ui.ctx(), &m, ui.max_rect(), page, view, &mut self.actions);
+        }
+        if let Some(view) = &self.viewer
+            && matches!(self.page, Page::Game { .. })
+        {
+            ui::screenshot_viewer(
+                ui.ctx(),
+                &m,
+                ui.max_rect(),
+                page,
+                view,
+                &self.covers,
+                &mut self.actions,
+            );
         }
         if let Some(prompt) = &self.prompt {
             ui::prompt(ui.ctx(), &m, ui.max_rect(), page, prompt, &mut self.actions);

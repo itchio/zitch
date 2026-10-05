@@ -7,12 +7,18 @@
 //! Textures live in a byte-budgeted LRU and the disk cache is pruned by
 //! age, both sized by the [`Policy`] in force.
 //!
+//! Screenshots for the game page go through the same workers but stay in
+//! memory: nothing about them is written to disk, and their textures have
+//! their own budget so they never push covers out.
+//!
 //! Work is asked for every frame by whatever is drawn. The workers take
 //! the most important request first, and a request nothing has asked for
 //! in the last couple of frames is dropped before it starts, so covers
 //! scrolled away or filtered out stop costing anything.
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -22,9 +28,14 @@ use egui::{ColorImage, TextureHandle};
 
 const WORKERS: usize = 4;
 const JPEG_QUALITY: u8 = 85;
+/// How much of a screenshot to read before trying to decode its first
+/// frame; doubled until it decodes or the download limit is reached.
+const STILL_CHUNK: u64 = 256 << 10;
 /// Failed loads try again after this, so covers fill in once the network
 /// is back.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// A screenshot over the download limit waits this long instead.
+const TOO_LARGE_RETRY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Behind transparent cover pixels, which JPEG cannot keep.
 const BACKDROP: [u8; 3] = [0x14, 0x12, 0x1a];
 
@@ -40,6 +51,9 @@ pub struct Policy {
     pub disk_budget: u64,
     /// Largest original the loader will download.
     pub max_download: u64,
+    /// Width in pixels screenshots are scaled down to.
+    pub screenshot_width: u32,
+    pub screenshot_budget: usize,
     /// Whether the focused tile plays animated covers at all.
     pub animate: bool,
     /// Frames beyond this many bytes leave a cover still.
@@ -61,6 +75,8 @@ impl Policy {
                 texture_budget: 24 << 20,
                 disk_budget: 50 << 20,
                 max_download: 2 << 20,
+                screenshot_width: 560,
+                screenshot_budget: 8 << 20,
                 animate: false,
                 animation_budget: 0,
             }
@@ -72,6 +88,8 @@ impl Policy {
                 texture_budget: 96 << 20,
                 disk_budget: 200 << 20,
                 max_download: 8 << 20,
+                screenshot_width: 1024,
+                screenshot_budget: 32 << 20,
                 animate: true,
                 animation_budget: 48 << 20,
             }
@@ -138,17 +156,100 @@ struct Slot {
     last_used: u64,
 }
 
-#[derive(Default)]
-struct Textures {
-    ready: HashMap<Key, Slot>,
-    failed: HashMap<Key, Instant>,
+/// Finished textures by `K`, with failures waiting to be tried again.
+struct Textures<K> {
+    ready: HashMap<K, Slot>,
+    /// When each failure may be tried again.
+    failed: HashMap<K, Instant>,
     used: usize,
+}
+
+impl<K> Default for Textures<K> {
+    fn default() -> Self {
+        Self {
+            ready: HashMap::new(),
+            failed: HashMap::new(),
+            used: 0,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone> Textures<K> {
+    /// The texture for `key` when it is ready, marked as drawn this frame.
+    fn get<Q>(&mut self, key: &Q, frame: u64) -> Option<TextureHandle>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let slot = self.ready.get_mut(key)?;
+        slot.last_used = frame;
+        Some(slot.handle.clone())
+    }
+
+    /// False while a failure for `key` has not waited out its retry.
+    fn should_load<Q>(&mut self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match self.failed.get(key) {
+            Some(retry_at) if Instant::now() < *retry_at => false,
+            Some(_) => {
+                self.failed.remove(key);
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn insert(&mut self, key: K, handle: TextureHandle, bytes: usize, frame: u64) {
+        self.used += bytes;
+        if let Some(old) = self.ready.insert(
+            key,
+            Slot {
+                handle,
+                bytes,
+                last_used: frame,
+            },
+        ) {
+            self.used -= old.bytes;
+        }
+    }
+
+    /// Drops the least recently drawn textures until `budget` holds.
+    fn evict(&mut self, budget: usize, frame: u64) {
+        if self.used <= budget {
+            return;
+        }
+        let mut by_age: Vec<(u64, K)> = self
+            .ready
+            .iter()
+            // Anything drawn this frame or the last stays: it is on screen.
+            .filter(|(_, slot)| slot.last_used + 2 < frame)
+            .map(|(key, slot)| (slot.last_used, key.clone()))
+            .collect();
+        by_age.sort_unstable_by_key(|(age, _)| *age);
+        for (_, key) in by_age {
+            if self.used <= budget {
+                break;
+            }
+            if let Some(slot) = self.ready.remove(&key) {
+                self.used -= slot.bytes;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Job {
     Texture(Key),
     Animation(String),
+    /// Scaled to the policy's screenshot width.
+    Screenshot(String),
 }
 
 struct Request {
@@ -207,7 +308,9 @@ impl Queue {
 }
 
 struct Inner {
-    textures: Mutex<Textures>,
+    textures: Mutex<Textures<Key>>,
+    /// By URL; all at the policy's screenshot width.
+    screenshots: Mutex<Textures<String>>,
     /// Only the focused tile animates, so this holds one finished
     /// animation at a time plus whatever is being decoded.
     animations: Mutex<HashMap<String, Entry<Animation>>>,
@@ -238,6 +341,7 @@ impl CoverLoader {
         let loader = Self {
             inner: Arc::new(Inner {
                 textures: Mutex::default(),
+                screenshots: Mutex::default(),
                 animations: Mutex::default(),
                 queue: Mutex::default(),
                 queued: Condvar::new(),
@@ -273,6 +377,13 @@ impl CoverLoader {
         let mut current = self.inner.policy.lock().unwrap_or_else(|p| p.into_inner());
         if *current != policy {
             log::info!("cover policy: {policy:?}");
+            if current.screenshot_width != policy.screenshot_width {
+                self.inner
+                    .screenshots
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clear();
+            }
             *current = policy;
         }
     }
@@ -316,18 +427,65 @@ impl CoverLoader {
             .textures
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if let Some(slot) = textures.ready.get_mut(&key) {
-            slot.last_used = frame;
-            return Some(slot.handle.clone());
+        if let Some(handle) = textures.get(&key, frame) {
+            return Some(handle);
         }
-        if let Some(failed_at) = textures.failed.get(&key) {
-            if failed_at.elapsed() < RETRY_AFTER {
-                return None;
-            }
-            textures.failed.remove(&key);
+        if !textures.should_load(&key) {
+            return None;
         }
         drop(textures);
         self.enqueue(Job::Texture(key), priority, frame, ctx);
+        None
+    }
+
+    /// A screenshot scaled to the policy's screenshot width, once loaded.
+    /// Asking starts the work, and asking again each frame keeps it wanted.
+    pub fn screenshot(&self, ctx: &egui::Context, url: &str) -> Option<TextureHandle> {
+        self.request_screenshot(ctx, url, Priority::Shown)
+    }
+
+    /// The size of each screenshot already loaded, without asking for any.
+    pub fn screenshot_sizes(&self, urls: &[String]) -> Vec<Option<egui::Vec2>> {
+        let screenshots = self
+            .inner
+            .screenshots
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        urls.iter()
+            .map(|url| {
+                screenshots
+                    .ready
+                    .get(url.as_str())
+                    .map(|slot| slot.handle.size_vec2())
+            })
+            .collect()
+    }
+
+    /// Loads a screenshot about to scroll into view, behind everything shown.
+    pub fn prefetch_screenshot(&self, ctx: &egui::Context, url: &str) {
+        self.request_screenshot(ctx, url, Priority::Soon);
+    }
+
+    fn request_screenshot(
+        &self,
+        ctx: &egui::Context,
+        url: &str,
+        priority: Priority,
+    ) -> Option<TextureHandle> {
+        let frame = self.inner.frame.load(Ordering::Relaxed);
+        let mut screenshots = self
+            .inner
+            .screenshots
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(handle) = screenshots.get(url, frame) {
+            return Some(handle);
+        }
+        if !screenshots.should_load(url) {
+            return None;
+        }
+        drop(screenshots);
+        self.enqueue(Job::Screenshot(url.to_string()), priority, frame, ctx);
         None
     }
 
@@ -336,31 +494,21 @@ impl CoverLoader {
     pub fn end_frame(&self) {
         let frame = self.inner.frame.fetch_add(1, Ordering::Relaxed) + 1;
         self.drop_unwanted(frame);
-        let budget = self.policy().texture_budget;
+        let policy = self.policy();
+        self.inner
+            .screenshots
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .evict(policy.screenshot_budget, frame);
         let mut textures = self
             .inner
             .textures
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if textures.used <= budget {
+        if textures.used <= policy.texture_budget {
             return;
         }
-        let mut by_age: Vec<(u64, Key)> = textures
-            .ready
-            .iter()
-            // Anything drawn this frame or the last stays: it is on screen.
-            .filter(|(_, slot)| slot.last_used + 2 < frame)
-            .map(|(key, slot)| (slot.last_used, key.clone()))
-            .collect();
-        by_age.sort_unstable();
-        for (_, key) in by_age {
-            if textures.used <= budget {
-                break;
-            }
-            if let Some(slot) = textures.ready.remove(&key) {
-                textures.used -= slot.bytes;
-            }
-        }
+        textures.evict(policy.texture_budget, frame);
         log::debug!(
             "covers: {} textures, {} MB",
             textures.ready.len(),
@@ -477,34 +625,28 @@ impl Inner {
                 {
                     return;
                 }
-                let outcome = self.variant(url, *width, &policy);
-                let mut textures = self.textures.lock().unwrap_or_else(|p| p.into_inner());
-                match outcome {
-                    Ok(image) => {
-                        let bytes = image.pixels.len() * 4;
-                        let handle = ctx.load_texture(
-                            format!("{url}@{width}"),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        textures.used += bytes;
-                        let frame = self.frame.load(Ordering::Relaxed);
-                        textures.ready.insert(
-                            key,
-                            Slot {
-                                handle,
-                                bytes,
-                                last_used: frame,
-                            },
-                        );
-                    }
-                    Err(error) => {
-                        log::debug!("cover {url}: {error}");
-                        textures.failed.insert(key, Instant::now());
-                    }
+                let name = format!("{url}@{width}");
+                let outcome = self
+                    .variant(url, *width, &policy)
+                    .map_err(|e| (e, RETRY_AFTER));
+                self.store(&self.textures, key, &name, outcome, &ctx);
+            }
+            Job::Screenshot(url) => {
+                if self
+                    .screenshots
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .ready
+                    .contains_key(&url)
+                {
+                    return;
                 }
-                drop(textures);
-                ctx.request_repaint();
+                let width = policy.screenshot_width;
+                let name = format!("{url}@{width}");
+                let outcome = self
+                    .fetch_still(&url, &policy)
+                    .map(|first| to_color_image(scale(&first, width)));
+                self.store(&self.screenshots, url, &name, outcome, &ctx);
             }
             Job::Animation(url) => {
                 let started = Instant::now();
@@ -532,6 +674,73 @@ impl Inner {
                     ctx.request_repaint();
                 }
             }
+        }
+    }
+
+    /// Uploads a finished image, or notes the failure with how long it
+    /// waits before being tried again.
+    fn store<K: Hash + Eq + Clone>(
+        &self,
+        textures: &Mutex<Textures<K>>,
+        key: K,
+        name: &str,
+        outcome: Result<ColorImage, (String, Duration)>,
+        ctx: &egui::Context,
+    ) {
+        let mut textures = textures.lock().unwrap_or_else(|p| p.into_inner());
+        match outcome {
+            Ok(image) => {
+                let bytes = image.pixels.len() * 4;
+                let handle = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                let frame = self.frame.load(Ordering::Relaxed);
+                textures.insert(key, handle, bytes, frame);
+            }
+            Err((error, wait)) => {
+                log::debug!("image {name}: {error}");
+                textures.failed.insert(key, Instant::now() + wait);
+            }
+        }
+        drop(textures);
+        ctx.request_repaint();
+    }
+
+    /// The first frame of `url`, downloaded without touching the disk. A
+    /// gif is read only as far as its first frame needs, so a large
+    /// animated screenshot costs about as much as a still one. Fails with
+    /// how long to wait before trying again.
+    fn fetch_still(
+        &self,
+        url: &str,
+        policy: &Policy,
+    ) -> Result<image::DynamicImage, (String, Duration)> {
+        use std::io::Read;
+        let retry = |e: String| (e, RETRY_AFTER);
+        let response = ureq::get(url).call().map_err(|e| retry(e.to_string()))?;
+        // One byte past the limit tells a file at the limit from one over it.
+        let cap = policy.max_download + 1;
+        let mut body = response.into_body().into_reader().take(cap);
+        let mut bytes = Vec::new();
+        let mut want = STILL_CHUNK.min(cap);
+        loop {
+            let before = bytes.len();
+            (&mut body)
+                .take(want - before as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|e| retry(e.to_string()))?;
+            if (bytes.len() as u64) < want {
+                return first_frame(&bytes).map_err(retry);
+            }
+            if bytes.starts_with(b"GIF8")
+                && let Ok(first) = first_frame(&bytes)
+            {
+                return Ok(first);
+            }
+            if bytes.len() as u64 >= cap {
+                // It will not get smaller; trying every minute only
+                // downloads it again.
+                return Err(("larger than the download limit".into(), TOO_LARGE_RETRY));
+            }
+            want = (want * 2).min(cap);
         }
     }
 

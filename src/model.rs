@@ -679,10 +679,13 @@ fn rom_system_name(system: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Library,
-    /// One game, with one of its buttons focused.
+    /// One game, with one of its buttons focused, or one of its
+    /// screenshots while `shot` is set. The button stays for coming back
+    /// up from the screenshots.
     Game {
         id: i64,
         button: usize,
+        shot: Option<usize>,
     },
     /// The types "Playable here" includes, with a row focused: 0 is
     /// Everything, then the types in [`playable_types`] order.
@@ -864,6 +867,10 @@ pub enum Action {
     ShowQr,
     /// Close the QR code.
     HideQr,
+    /// Open the game page's screenshot at this index full screen.
+    ViewScreenshot(usize),
+    /// Close the full screen screenshot.
+    CloseScreenshot,
     /// Leave the search box, keeping its text; focus goes to the results.
     SearchDone,
     ClearSearch,
