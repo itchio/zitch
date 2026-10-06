@@ -12,13 +12,14 @@ use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
-    Launched, Loadable, Mark, Page, Profile, Prompt, RatingFilter, Tab, UploadExt, UserExt,
-    human_duration_seconds, human_size, human_time_ago, known_playable_here, rfc3339_to_unix,
-    wrap_step,
+    Launched, Loadable, Mark, Page, Profile, Prompt, PromptOrigin, RatingFilter, Tab, UploadExt,
+    UserExt, human_duration_seconds, human_size, human_time_ago, known_playable_here,
+    rfc3339_to_unix, wrap_step,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
 use crate::report::{Rating, Report, Reports, Run, Runs, SavedReport, SavedRun};
+use crate::sample;
 use crate::self_update::{self, SelfUpdate};
 use crate::settings::Settings;
 use crate::ui;
@@ -97,7 +98,7 @@ pub struct App {
     progress: std::collections::HashMap<String, DownloadProgress>,
     /// Games the user asked to install that the queue has not listed yet,
     /// in the order asked.
-    pending_installs: Vec<i64>,
+    pending_installs: std::collections::HashMap<i64, Pending>,
     /// Downloads the user asked to discard that the queue still lists.
     discarding: std::collections::HashSet<String>,
     /// What the interface shows per game, rebuilt from the fields above.
@@ -129,9 +130,9 @@ pub struct App {
     playable_hidden: Vec<String>,
     /// Where Back goes from the Playable types page: the page it was
     /// opened over.
-    types_return: Page,
-    /// Where Back from the Settings page goes.
-    settings_return: Page,
+    /// Where Back goes from Settings and Playable types: the pages they
+    /// were opened over, innermost last.
+    page_stack: Vec<Page>,
     /// Rating and tried marks on the covers.
     cover_marks: bool,
     /// The toolbar's filter on the player's own ratings. Not saved: it is
@@ -386,8 +387,7 @@ impl App {
             downloads_row: (0, 0),
             playable_only: settings.playable_only,
             playable_hidden,
-            types_return: Page::Library,
-            settings_return: Page::Library,
+            page_stack: Vec::new(),
             cover_marks: settings.cover_marks,
             rating_filter: RatingFilter::Any,
             query: String::new(),
@@ -510,6 +510,53 @@ impl App {
         }
         if applied {
             ctx.request_repaint();
+        }
+    }
+
+    fn cave(&self, cave_id: &str) -> Option<&Cave> {
+        self.caves.iter().find(|c| c.id == cave_id)
+    }
+
+    fn open_menu(&mut self) {
+        self.raise_window();
+        self.menu = Some(0);
+    }
+
+    /// Both carousels follow their focused game on the next frame.
+    fn follow_rows(&mut self) {
+        self.rows.follow = true;
+        self.collection_rows.follow = true;
+    }
+
+    /// Rebuilds the rows of both carousel tabs.
+    fn rebuild_rows(&mut self) {
+        self.rebuild_sections();
+        self.rebuild_collection_sections();
+    }
+
+    /// What Confirm does on the Library page: the focused toolbar stop,
+    /// the focused game, or the focused Downloads button. A busy stop has
+    /// a name and nothing to do.
+    fn confirm_target(&self) -> Option<(&'static str, Option<Action>)> {
+        let (_, stops) = self.toolbar();
+        if let Some(index) = self.toolbar_focus_in(stops.len(), self.rows_empty()) {
+            let stop = stops.get(index)?;
+            return Some((stop.hint, (!stop.busy).then(|| stop.action.clone())));
+        }
+        match self.tab {
+            Tab::Library | Tab::Collections => {
+                let id = self
+                    .active_rows_ref()
+                    .and_then(|rows| rows.focused_game())
+                    .filter(|id| self.catalog.contains_key(id))?;
+                Some(("Open", Some(Action::Open(Page::game(id)))))
+            }
+            Tab::Downloads => {
+                let rows = self.download_rows();
+                let (row, button) = self.downloads_row_in(&rows);
+                let (label, action) = rows.get(row)?.buttons.get(button)?;
+                Some((label, Some(action.clone())))
+            }
         }
     }
 
@@ -719,105 +766,352 @@ impl App {
         }
     }
 
+    /// An action while a question is up: focus moves among its choices
+    /// and Confirm or Back answer it.
+    fn apply_in_prompt(&mut self, action: Action) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        match action {
+            Action::MoveFocus(direction) => {
+                let len = prompt.choices.len();
+                let last = len.saturating_sub(1);
+                match (prompt.stacked, direction) {
+                    (true, Direction::Up | Direction::Down)
+                    | (false, Direction::Left | Direction::Right) => {
+                        prompt.focus = wrap_step(prompt.focus, len, direction)
+                    }
+                    // A prompt's list is short; a page reaches its end.
+                    (_, Direction::Home | Direction::PageUp | Direction::Top) => prompt.focus = 0,
+                    (_, Direction::End | Direction::PageDown | Direction::Bottom) => {
+                        prompt.focus = last
+                    }
+                    _ => {}
+                }
+            }
+            Action::PromptFocus(index) if index < prompt.choices.len() => prompt.focus = index,
+            Action::Activate => {
+                let answer = Action::Answer {
+                    prompt: prompt.id,
+                    choice: Some(prompt.focus),
+                };
+                self.actions.push(answer);
+            }
+            Action::Back => {
+                let answer = Action::Answer {
+                    prompt: prompt.id,
+                    choice: None,
+                };
+                self.actions.push(answer);
+            }
+            Action::Answer { prompt: id, choice } if id == prompt.id => match prompt.origin {
+                PromptOrigin::SelfUpdate => self.answer_self_update(choice),
+                PromptOrigin::Options => {
+                    self.close_prompt();
+                    let options = std::mem::take(&mut self.prompt_options);
+                    if let Some(action) = choice.and_then(|c| options.into_iter().nth(c)) {
+                        self.actions.push(action);
+                    }
+                }
+                PromptOrigin::Sample => self.close_prompt(),
+                PromptOrigin::Backend => {
+                    self.close_prompt();
+                    self.backend.send(Command::Answer { prompt: id, choice });
+                }
+                PromptOrigin::UploadPicker { game_id, picks } => {
+                    self.close_prompt();
+                    self.backend.send(Command::Answer { prompt: id, choice });
+                    // Queued once an upload is picked; showing more or
+                    // backing out leaves nothing to show until butler says.
+                    let state = match choice {
+                        Some(c) if c < picks => Pending::Picked,
+                        _ => Pending::Starting,
+                    };
+                    if let Some(pending) = self.pending_installs.get_mut(&game_id) {
+                        *pending = state;
+                    }
+                    self.rebuild_installs();
+                }
+            },
+            Action::Menu => self.raise_window(),
+            _ => {}
+        }
+    }
+
+    /// An action while the compatibility report form is up.
+    fn apply_in_report(&mut self, action: Action) {
+        let Some(view) = self.report.as_mut() else {
+            return;
+        };
+        match action {
+            Action::MoveFocus(direction) => view.step(direction),
+            Action::ReportFocus(index) if index < view.rows() => view.focus = index,
+            Action::Activate => match view.focused() {
+                Some(ui::ReportRow::Rating(_)) => view.pick(),
+                Some(ui::ReportRow::Flag(flag)) => view.toggle(flag),
+                Some(ui::ReportRow::Send) => self.send_report(),
+                Some(ui::ReportRow::Cancel) | None => self.report = None,
+            },
+            // Start sends from either step, with the rating in focus.
+            Action::Menu => self.send_report(),
+            Action::Back if view.picked => view.unpick(),
+            Action::Back => self.report = None,
+            _ => {}
+        }
+    }
+
+    /// An action while a screenshot fills the screen.
+    fn apply_in_viewer(&mut self, action: Action) {
+        let Some(view) = self.viewer.as_mut() else {
+            return;
+        };
+        let last = view.urls.len().saturating_sub(1);
+        match action {
+            Action::MoveFocus(Direction::Left) => view.index = view.index.saturating_sub(1),
+            Action::MoveFocus(Direction::Right) => view.index = (view.index + 1).min(last),
+            Action::ViewScreenshot(index) if index <= last => view.index = index,
+            Action::Activate | Action::Back | Action::CloseScreenshot => self.viewer = None,
+            // As over the QR code: the menu comes up, here in its place.
+            Action::Menu => {
+                self.viewer = None;
+                self.open_menu();
+            }
+            _ => {}
+        }
+        // The page's focus follows, so closing lands on the same one.
+        if let Some(view) = &self.viewer
+            && let Page::Game { shot, .. } = &mut self.page
+            && shot.is_some()
+        {
+            *shot = Some(view.index);
+        }
+    }
+
+    /// An action while the menu drawer is open. Quit and Refresh library
+    /// are handled here too: Confirm on those rows keeps the drawer open
+    /// and sends them again.
+    fn apply_in_menu(&mut self, action: Action) {
+        let Some(focus) = self.menu else {
+            return;
+        };
+        let items = self.menu_items();
+        match action {
+            Action::MoveFocus(direction @ (Direction::Up | Direction::Down)) => {
+                self.menu = Some(wrap_step(focus, items.len(), direction))
+            }
+            Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
+            Action::Activate => {
+                if let Some(action) = items.into_iter().nth(focus).map(|item| item.action) {
+                    // Quit keeps the drawer in place under the overlay;
+                    // a refresh keeps it to show its progress, a
+                    // toggle its new state.
+                    if !matches!(action, Action::Quit | Action::RefreshLibrary) {
+                        self.menu = None;
+                    }
+                    self.actions.push(action);
+                }
+            }
+            Action::Back | Action::Menu => self.menu = None,
+            Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
+            Action::RefreshLibrary => self.refresh_library(),
+            _ => {}
+        }
+    }
+
+    /// An action while the QR code is up: nearly anything closes it.
+    fn apply_in_qr(&mut self, action: Action) {
+        match action {
+            Action::Back
+            | Action::Activate
+            | Action::Secondary
+            | Action::Search
+            | Action::HideQr => self.qr = None,
+            Action::Menu => {
+                self.open_menu();
+            }
+            _ => {}
+        }
+    }
+
+    /// An action on the sign-in page.
+    fn apply_in_login(&mut self, action: Action) {
+        let Some(login) = &mut self.login else {
+            return;
+        };
+        match action {
+            // Down onto the checkbox, up off it; nothing else to reach.
+            Action::MoveFocus(direction) if login.has_checkbox() => {
+                login.focused = matches!(
+                    direction,
+                    Direction::Down
+                        | Direction::Right
+                        | Direction::End
+                        | Direction::PageDown
+                        | Direction::Bottom
+                );
+            }
+            Action::Activate if login.focused && login.has_checkbox() => {
+                login.share_device_info = !login.share_device_info;
+                self.backend
+                    .send(Command::SetShareDeviceInfo(login.share_device_info));
+            }
+            Action::Activate => self.backend.send(Command::RetryLogin),
+            Action::SetShareDeviceInfo(on) => {
+                if login.share_device_info != on {
+                    login.share_device_info = on;
+                    self.backend.send(Command::SetShareDeviceInfo(on));
+                }
+            }
+            Action::Back | Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
+            Action::Menu => {
+                self.open_menu();
+            }
+            _ => {}
+        }
+    }
+
+    /// Focus moving on the Library page: among the toolbar stops, down
+    /// into the rows and within them.
+    fn move_focus_library(&mut self, direction: Direction) {
+        let stops = self.toolbar().1.len();
+        let rows_empty = self.rows_empty();
+        let at_first_row = match self.tab {
+            Tab::Library => self.rows.row == 0,
+            Tab::Collections => self.collection_rows.row == 0,
+            Tab::Downloads => self.downloads_row_in(&self.download_rows()).0 == 0,
+        };
+        let landing = step_toolbar_focus(
+            self.toolbar_focus_in(stops, rows_empty),
+            direction,
+            stops,
+            rows_empty,
+            at_first_row,
+        );
+        let slot = tab_slot(self.tab);
+        match landing {
+            Landing::Toolbar(index) => self.toolbar_focus[slot] = Some(index),
+            Landing::FirstRow => {
+                self.toolbar_focus[slot] = None;
+                match self.active_rows() {
+                    Some(rows) => {
+                        rows.row = 0;
+                        rows.settle_on_game();
+                        rows.follow = true;
+                    }
+                    None => self.downloads_row = (0, 0),
+                }
+            }
+            Landing::Rows => {
+                self.toolbar_focus[slot] = None;
+                match self.active_rows() {
+                    Some(rows) => rows.move_focus(direction),
+                    None => {
+                        let rows = self.download_rows();
+                        self.downloads_row =
+                            step_download_row(self.downloads_row_in(&rows), direction, &rows);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Focus moving on a game's page: along its buttons, down into the
+    /// screenshots and along them, and the page scrolling to follow.
+    fn move_focus_game(
+        &mut self,
+        id: i64,
+        button: usize,
+        shot: Option<usize>,
+        direction: Direction,
+    ) {
+        let Some(game) = self.game(id) else {
+            return;
+        };
+        let buttons = self.game_buttons(game).len().max(1);
+        let shots = self.screenshot_count(id);
+        let (button, shot) = match (shot.filter(|&i| i < shots), direction) {
+            (None, Direction::Left) => (button.saturating_sub(1), None),
+            (None, Direction::Right) => ((button + 1).min(buttons - 1), None),
+            (None, Direction::Down) if shots > 0 => {
+                self.detail_scroll = Some(ui::DetailScroll::Screenshots);
+                (button, Some(0))
+            }
+            // Nothing more to focus below: the page scrolls to
+            // show the rest.
+            (_, Direction::Down) => {
+                self.detail_scroll = Some(ui::DetailScroll::End);
+                (button, shot)
+            }
+            (_, Direction::Up) => {
+                self.detail_scroll = Some(ui::DetailScroll::Top);
+                (button, None)
+            }
+            (Some(i), Direction::Left | Direction::Right) => {
+                self.detail_scroll = Some(ui::DetailScroll::Shot);
+                let i = if direction == Direction::Left {
+                    i.saturating_sub(1)
+                } else {
+                    (i + 1).min(shots - 1)
+                };
+                (button, Some(i))
+            }
+            (shot, _) => (button, shot),
+        };
+        self.page = Page::Game { id, button, shot };
+    }
+
+    /// Stops a game's install: skips one still queueing or choosing its
+    /// download, or discards its download, asking first while it is live.
+    fn cancel_install(&mut self, game_id: i64) {
+        let Some(download) = self.download_for(game_id) else {
+            if self.pending_installs.remove(&game_id).is_some() {
+                self.backend.send(Command::SkipInstall { game_id });
+                // Close its picker so the queue behind it moves on.
+                // The skip is sent first so the worker reads the
+                // answer as a cancel, not a decline.
+                if let Some(prompt) = self.upload_picker_for(game_id) {
+                    let id = prompt.id;
+                    let choice = Some(prompt.choices.len().saturating_sub(1));
+                    self.close_prompt();
+                    self.backend.send(Command::Answer { prompt: id, choice });
+                }
+                self.rebuild_installs();
+            }
+            return;
+        };
+        let download_id = download.id.clone();
+        // A live download is worth a question; dismissing a failed
+        // one is not.
+        let confirm = download.finished_at.is_none().then(|| {
+            download
+                .game
+                .as_ref()
+                .map_or_else(|| "this game".to_string(), |g| g.title.clone())
+        });
+        if confirm.is_none() {
+            self.discarding.insert(download_id.clone());
+            self.rebuild_installs();
+        }
+        self.backend.send(Command::Discard {
+            download_id,
+            confirm,
+        });
+    }
+
     fn apply(&mut self, action: Action) {
         if self.quitting.is_some() {
             return;
         }
         if let (None, Action::Answer { prompt: 0, choice }) = (&self.prompt, &action) {
-            // The screenshot script's stand-in: a license, or with a count,
-            // a pick between that many downloads.
-            self.prompt = Some(match choice {
-                Some(count) => Prompt {
-                    id: 0,
-                    title: "Which download?".into(),
-                    body: format!("Sample has {count} downloads for this device."),
-                    choices: (1..=*count)
-                        .map(|i| format!("Sample - Linux - build {i}"))
-                        .collect(),
-                    focus: 0,
-                    primary: None,
-                    stacked: true,
-                    details: (1..=*count)
-                        .map(|i| crate::model::UploadDetail {
-                            platforms: vec![
-                                ("Linux ARM64".into(), i == 1),
-                                ("Linux x64".into(), false),
-                            ],
-                            notes: vec!["135.9 MB".into()],
-                        })
-                        .collect(),
-                    progress: None,
-                },
-                None => Prompt {
-                    id: 0,
-                    title: "License agreement".into(),
-                    body: "This is a sample license shown by the screenshot script. ".repeat(12),
-                    choices: vec!["Accept".into(), "Decline".into()],
-                    focus: 0,
-                    primary: Some(0),
-                    stacked: false,
-                    details: Vec::new(),
-                    progress: None,
-                },
-            });
+            self.prompt = Some(sample::prompt(*choice));
             return;
         }
-        if let Some(prompt) = self.prompt.as_mut() {
-            match action {
-                Action::MoveFocus(direction) => {
-                    let len = prompt.choices.len();
-                    let last = len.saturating_sub(1);
-                    match (prompt.stacked, direction) {
-                        (true, Direction::Up | Direction::Down)
-                        | (false, Direction::Left | Direction::Right) => {
-                            prompt.focus = wrap_step(prompt.focus, len, direction)
-                        }
-                        // A prompt's list is short; a page reaches its end.
-                        (_, Direction::Home | Direction::PageUp | Direction::Top) => {
-                            prompt.focus = 0
-                        }
-                        (_, Direction::End | Direction::PageDown | Direction::Bottom) => {
-                            prompt.focus = last
-                        }
-                        _ => {}
-                    }
-                }
-                Action::PromptFocus(index) if index < prompt.choices.len() => prompt.focus = index,
-                Action::Activate => {
-                    let answer = Action::Answer {
-                        prompt: prompt.id,
-                        choice: Some(prompt.focus),
-                    };
-                    self.actions.push(answer);
-                }
-                Action::Back => {
-                    let answer = Action::Answer {
-                        prompt: prompt.id,
-                        choice: None,
-                    };
-                    self.actions.push(answer);
-                }
-                Action::Answer { prompt: id, choice } if id == prompt.id => {
-                    if id == Self::SELF_UPDATE_PROMPT {
-                        self.answer_self_update(choice);
-                    } else if id == Self::OPTIONS_PROMPT {
-                        self.prompt = self.prompt_queue.pop_front();
-                        let options = std::mem::take(&mut self.prompt_options);
-                        if let Some(action) = choice.and_then(|c| options.into_iter().nth(c)) {
-                            self.actions.push(action);
-                        }
-                    } else {
-                        self.prompt = self.prompt_queue.pop_front();
-                        self.backend.send(Command::Answer { prompt: id, choice });
-                    }
-                }
-                Action::Menu => self.raise_window(),
-                _ => {}
-            }
+        if self.prompt.is_some() {
+            self.apply_in_prompt(action);
             return;
         }
-        // QuitGame cancels a launch butler is still setting up as well.
         if let Some((cave_id, _)) = self.handed_off() {
+            // QuitGame cancels a launch butler is still setting up as well.
             if matches!(action, Action::Back) {
                 self.backend.send(Command::QuitGame {
                     cave_id: cave_id.to_string(),
@@ -825,208 +1119,35 @@ impl App {
             }
             return;
         }
-        if let Some(view) = self.report.as_mut() {
-            match action {
-                Action::MoveFocus(direction) => view.step(direction),
-                Action::ReportFocus(index) if index < view.rows() => view.focus = index,
-                Action::Activate => match view.focused() {
-                    Some(ui::ReportRow::Rating(_)) => view.pick(),
-                    Some(ui::ReportRow::Flag(flag)) => view.toggle(flag),
-                    Some(ui::ReportRow::Send) => self.send_report(),
-                    Some(ui::ReportRow::Cancel) | None => self.report = None,
-                },
-                // Start sends from either step, with the rating in focus.
-                Action::Menu => self.send_report(),
-                Action::Back if view.picked => view.unpick(),
-                Action::Back => self.report = None,
-                _ => {}
-            }
+        if self.report.is_some() {
+            self.apply_in_report(action);
             return;
         }
         // Only over a game's page; anything that leaves it closes the viewer.
         if !matches!(self.page, Page::Game { .. }) {
             self.viewer = None;
         }
-        if let Some(view) = self.viewer.as_mut() {
-            let last = view.urls.len().saturating_sub(1);
-            match action {
-                Action::MoveFocus(Direction::Left) => view.index = view.index.saturating_sub(1),
-                Action::MoveFocus(Direction::Right) => view.index = (view.index + 1).min(last),
-                Action::ViewScreenshot(index) if index <= last => view.index = index,
-                Action::Activate | Action::Back | Action::CloseScreenshot => self.viewer = None,
-                // As over the QR code: the menu comes up, here in its place.
-                Action::Menu => {
-                    self.viewer = None;
-                    self.raise_window();
-                    self.menu = Some(0);
-                }
-                _ => {}
-            }
-            // The page's focus follows, so closing lands on the same one.
-            if let Some(view) = &self.viewer
-                && let Page::Game { shot, .. } = &mut self.page
-                && shot.is_some()
-            {
-                *shot = Some(view.index);
-            }
+        if self.viewer.is_some() {
+            self.apply_in_viewer(action);
             return;
         }
-        if let Some(focus) = self.menu {
-            let items = self.menu_items();
-            match action {
-                Action::MoveFocus(direction @ (Direction::Up | Direction::Down)) => {
-                    self.menu = Some(wrap_step(focus, items.len(), direction))
-                }
-                Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
-                Action::Activate => {
-                    if let Some(action) = items.into_iter().nth(focus).map(|item| item.action) {
-                        // Quit keeps the drawer in place under the overlay;
-                        // a refresh keeps it to show its progress, a
-                        // toggle its new state.
-                        if !matches!(action, Action::Quit | Action::RefreshLibrary) {
-                            self.menu = None;
-                        }
-                        self.actions.push(action);
-                    }
-                }
-                Action::Back | Action::Menu => self.menu = None,
-                Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
-                Action::RefreshLibrary => self.refresh_library(),
-                _ => {}
-            }
+        if self.menu.is_some() {
+            self.apply_in_menu(action);
             return;
         }
         if self.qr_shown() {
-            match action {
-                Action::Back
-                | Action::Activate
-                | Action::Secondary
-                | Action::Search
-                | Action::HideQr => self.qr = None,
-                Action::Menu => {
-                    self.raise_window();
-                    self.menu = Some(0);
-                }
-                _ => {}
-            }
+            self.apply_in_qr(action);
             return;
         }
-        if let Some(login) = &mut self.login {
-            match action {
-                // Down onto the checkbox, up off it; nothing else to reach.
-                Action::MoveFocus(direction) if login.has_checkbox() => {
-                    login.focused = matches!(
-                        direction,
-                        Direction::Down
-                            | Direction::Right
-                            | Direction::End
-                            | Direction::PageDown
-                            | Direction::Bottom
-                    );
-                }
-                Action::Activate if login.focused && login.has_checkbox() => {
-                    login.share_device_info = !login.share_device_info;
-                    self.backend
-                        .send(Command::SetShareDeviceInfo(login.share_device_info));
-                }
-                Action::Activate => self.backend.send(Command::RetryLogin),
-                Action::SetShareDeviceInfo(on) => {
-                    if login.share_device_info != on {
-                        login.share_device_info = on;
-                        self.backend.send(Command::SetShareDeviceInfo(on));
-                    }
-                }
-                Action::Back | Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
-                Action::Menu => {
-                    self.raise_window();
-                    self.menu = Some(0);
-                }
-                _ => {}
-            }
+        if self.login.is_some() {
+            self.apply_in_login(action);
             return;
         }
         match action {
-            Action::MoveFocus(direction) => match self.page.clone() {
-                Page::Library => {
-                    let stops = self.toolbar().1.len();
-                    let rows_empty = self.rows_empty();
-                    let at_first_row = match self.tab {
-                        Tab::Library => self.rows.row == 0,
-                        Tab::Collections => self.collection_rows.row == 0,
-                        Tab::Downloads => self.downloads_row_in(&self.download_rows()).0 == 0,
-                    };
-                    let landing = step_toolbar_focus(
-                        self.toolbar_focus_in(stops, rows_empty),
-                        direction,
-                        stops,
-                        rows_empty,
-                        at_first_row,
-                    );
-                    let slot = tab_slot(self.tab);
-                    match landing {
-                        Landing::Toolbar(index) => self.toolbar_focus[slot] = Some(index),
-                        Landing::FirstRow => {
-                            self.toolbar_focus[slot] = None;
-                            match self.active_rows() {
-                                Some(rows) => {
-                                    rows.row = 0;
-                                    rows.settle_on_game();
-                                    rows.follow = true;
-                                }
-                                None => self.downloads_row = (0, 0),
-                            }
-                        }
-                        Landing::Rows => {
-                            self.toolbar_focus[slot] = None;
-                            match self.active_rows() {
-                                Some(rows) => rows.move_focus(direction),
-                                None => {
-                                    let rows = self.download_rows();
-                                    self.downloads_row = step_download_row(
-                                        self.downloads_row_in(&rows),
-                                        direction,
-                                        &rows,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+            Action::MoveFocus(direction) => match self.page {
+                Page::Library => self.move_focus_library(direction),
                 Page::Game { id, button, shot } => {
-                    let Some(game) = self.game(id) else {
-                        return;
-                    };
-                    let buttons = self.game_buttons(game).len().max(1);
-                    let shots = self.screenshot_count(id);
-                    let (button, shot) = match (shot.filter(|&i| i < shots), direction) {
-                        (None, Direction::Left) => (button.saturating_sub(1), None),
-                        (None, Direction::Right) => ((button + 1).min(buttons - 1), None),
-                        (None, Direction::Down) if shots > 0 => {
-                            self.detail_scroll = Some(ui::DetailScroll::Screenshots);
-                            (button, Some(0))
-                        }
-                        // Nothing more to focus below: the page scrolls to
-                        // show the rest.
-                        (_, Direction::Down) => {
-                            self.detail_scroll = Some(ui::DetailScroll::End);
-                            (button, shot)
-                        }
-                        (_, Direction::Up) => {
-                            self.detail_scroll = Some(ui::DetailScroll::Top);
-                            (button, None)
-                        }
-                        (Some(i), Direction::Left | Direction::Right) => {
-                            self.detail_scroll = Some(ui::DetailScroll::Shot);
-                            let i = if direction == Direction::Left {
-                                i.saturating_sub(1)
-                            } else {
-                                (i + 1).min(shots - 1)
-                            };
-                            (button, Some(i))
-                        }
-                        (shot, _) => (button, shot),
-                    };
-                    self.page = Page::Game { id, button, shot };
+                    self.move_focus_game(id, button, shot, direction)
                 }
                 Page::PlayableTypes { row } => {
                     // Everything, then each type.
@@ -1081,36 +1202,10 @@ impl App {
                     };
                 }
             }
-            Action::Activate => match self.page.clone() {
+            Action::Activate => match self.page {
                 Page::Library => {
-                    let (_, stops) = self.toolbar();
-                    if let Some(index) = self.toolbar_focus_in(stops.len(), self.rows_empty()) {
-                        if let Some(stop) = stops.get(index)
-                            && !stop.busy
-                        {
-                            self.actions.push(stop.action.clone());
-                        }
-                        return;
-                    }
-                    match self.tab {
-                        Tab::Library | Tab::Collections => {
-                            if let Some(id) = self
-                                .active_rows()
-                                .and_then(|rows| rows.focused_game())
-                                .filter(|id| self.catalog.contains_key(id))
-                            {
-                                self.actions.push(Action::Open(Page::game(id)));
-                            }
-                        }
-                        Tab::Downloads => {
-                            let rows = self.download_rows();
-                            let (row, button) = self.downloads_row_in(&rows);
-                            if let Some((_, action)) =
-                                rows.get(row).and_then(|r| r.buttons.get(button))
-                            {
-                                self.actions.push(action.clone());
-                            }
-                        }
+                    if let Some((_, Some(action))) = self.confirm_target() {
+                        self.actions.push(action);
                     }
                 }
                 Page::Game {
@@ -1187,10 +1282,8 @@ impl App {
             Action::SetRatingFilter(filter) => {
                 if self.rating_filter != filter {
                     self.rating_filter = filter;
-                    self.rebuild_sections();
-                    self.rebuild_collection_sections();
-                    self.rows.follow = true;
-                    self.collection_rows.follow = true;
+                    self.rebuild_rows();
+                    self.follow_rows();
                 }
             }
             Action::FocusSettingsRow(row) => {
@@ -1227,8 +1320,7 @@ impl App {
                 }
             }
             Action::Menu => {
-                self.raise_window();
-                self.menu = Some(0);
+                self.open_menu();
             }
             Action::BackToGame => {
                 if !self.running.is_empty() {
@@ -1264,8 +1356,7 @@ impl App {
                 if self.page.is_library() {
                     self.tab = tab;
                     self.blur_search = true;
-                    self.rows.follow = true;
-                    self.collection_rows.follow = true;
+                    self.follow_rows();
                 }
             }
             Action::CycleTab(step) => match self.page {
@@ -1361,25 +1452,20 @@ impl App {
                     }
                     self.page = Page::Library;
                 }
-                Page::PlayableTypes { .. } => {
-                    self.page = std::mem::replace(&mut self.types_return, Page::Library);
-                }
-                Page::Settings { .. } => {
-                    self.page = std::mem::replace(&mut self.settings_return, Page::Library);
+                Page::PlayableTypes { .. } | Page::Settings { .. } => {
+                    self.page = self.page_stack.pop().unwrap_or(Page::Library);
                 }
             },
             Action::MenuFocus(_) => {}
             Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
             Action::Open(page) => {
-                if matches!(page, Page::PlayableTypes { .. })
-                    && !matches!(self.page, Page::PlayableTypes { .. })
+                // A list page remembers what it opened over; moving focus
+                // within one reopens the same page.
+                let list =
+                    |p: Page| matches!(p, Page::PlayableTypes { .. } | Page::Settings { .. });
+                if list(page) && std::mem::discriminant(&page) != std::mem::discriminant(&self.page)
                 {
-                    self.types_return = self.page.clone();
-                }
-                if matches!(page, Page::Settings { .. })
-                    && !matches!(self.page, Page::Settings { .. })
-                {
-                    self.settings_return = self.page.clone();
+                    self.page_stack.push(self.page);
                 }
                 if matches!(page, Page::Game { .. }) {
                     self.detail_visit += 1;
@@ -1424,53 +1510,14 @@ impl App {
                 if self.installs.contains_key(&game_id) {
                     return;
                 }
-                // Shown as installing from this instant; the queue listing
-                // that follows replaces it.
-                self.pending_installs.push(game_id);
+                self.pending_installs.insert(game_id, Pending::Starting);
                 self.install_failures.remove(&game_id);
                 self.backend.send(Command::Install {
                     game: Box::new(game),
                 });
                 self.rebuild_installs();
             }
-            Action::CancelInstall { game_id } => {
-                let Some(download) = self.download_for(game_id) else {
-                    if self.pending_installs.contains(&game_id) {
-                        self.pending_installs.retain(|id| *id != game_id);
-                        self.backend.send(Command::SkipInstall { game_id });
-                        // Close its picker so the queue behind it moves on.
-                        // The skip is sent first so the worker reads the
-                        // answer as a cancel, not a decline.
-                        let title = self.game(game_id).map(|g| g.title.clone());
-                        if let Some(prompt) = title.and_then(|title| self.upload_picker_for(&title))
-                        {
-                            let id = prompt.id;
-                            let choice = Some(prompt.choices.len().saturating_sub(1));
-                            self.prompt = self.prompt_queue.pop_front();
-                            self.backend.send(Command::Answer { prompt: id, choice });
-                        }
-                        self.rebuild_installs();
-                    }
-                    return;
-                };
-                let download_id = download.id.clone();
-                // A live download is worth a question; dismissing a failed
-                // one is not.
-                let confirm = download.finished_at.is_none().then(|| {
-                    download
-                        .game
-                        .as_ref()
-                        .map_or_else(|| "this game".to_string(), |g| g.title.clone())
-                });
-                if confirm.is_none() {
-                    self.discarding.insert(download_id.clone());
-                    self.rebuild_installs();
-                }
-                self.backend.send(Command::Discard {
-                    download_id,
-                    confirm,
-                });
-            }
+            Action::CancelInstall { game_id } => self.cancel_install(game_id),
             Action::RetryInstall { game_id } => {
                 let Some(download_id) = self.download_for(game_id).map(|d| d.id.clone()) else {
                     return;
@@ -1640,10 +1687,8 @@ impl App {
     fn playable_filter_changed(&mut self) {
         self.save_settings();
         self.request_collection_filtered(None);
-        self.rebuild_sections();
-        self.rebuild_collection_sections();
-        self.rows.follow = true;
-        self.collection_rows.follow = true;
+        self.rebuild_rows();
+        self.follow_rows();
     }
 
     /// How many of the device's types "Playable here" includes.
@@ -1732,10 +1777,16 @@ impl App {
 
     /// Prompts carry no game id, so the picker is matched by the title in
     /// its body.
-    fn upload_picker_for(&self, title: &str) -> Option<&Prompt> {
-        self.prompt
-            .as_ref()
-            .filter(|p| p.title == crate::backend::UPLOAD_PICKER && p.body.starts_with(title))
+    /// The open question of which of the game's uploads to install.
+    fn upload_picker_for(&self, game_id: i64) -> Option<&Prompt> {
+        self.prompt.as_ref().filter(
+            |p| matches!(p.origin, PromptOrigin::UploadPicker { game_id: g, .. } if g == game_id),
+        )
+    }
+
+    /// Closes the open prompt and shows the next one waiting, if any.
+    fn close_prompt(&mut self) {
+        self.prompt = self.prompt_queue.pop_front();
     }
 
     fn download_for(&self, game_id: i64) -> Option<&Download> {
@@ -1961,7 +2012,12 @@ impl App {
                 },
             );
         }
-        for game_id in &self.pending_installs {
+        // Queued once an upload is picked; before that butler has said nothing.
+        for (game_id, _) in self
+            .pending_installs
+            .iter()
+            .filter(|(_, p)| **p == Pending::Picked)
+        {
             installs.entry(*game_id).or_insert_with(|| InstallState {
                 stage: "Queueing".into(),
                 ..Default::default()
@@ -2023,23 +2079,8 @@ impl App {
                     self.rebuild_sections();
                 }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
-                Step::Report => {
-                    self.report = Some(ui::ReportView::new(
-                        "Sample game".into(),
-                        Report {
-                            game_id: 0,
-                            upload_id: 0,
-                            build_id: None,
-                            rating: Rating::Perfect,
-                            flags: Vec::new(),
-                            run: Run::default(),
-                        },
-                    ))
-                }
-                Step::Notice => self.notify(
-                    "Couldn't check for updates: a sample failure from the screenshot script"
-                        .into(),
-                ),
+                Step::Report => self.report = Some(sample::report()),
+                Step::Notice => self.notify(sample::NOTICE.into()),
                 Step::Capture => {
                     shot.capture_pending = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
@@ -2244,15 +2285,14 @@ impl App {
                         self.collection_filtered = None;
                         self.request_collection_filtered(None);
                     }
-                    self.rebuild_sections();
-                    self.rebuild_collection_sections();
+                    self.rebuild_rows();
                 }
                 Event::Downloads(downloads) => {
                     let listed: std::collections::HashSet<String> =
                         downloads.iter().map(|d| d.id.clone()).collect();
                     self.progress.retain(|id, _| listed.contains(id));
                     self.discarding.retain(|id| listed.contains(id));
-                    self.pending_installs.retain(|id| {
+                    self.pending_installs.retain(|id, _| {
                         !downloads
                             .iter()
                             .any(|d| d.game.as_ref().is_some_and(|g| g.id == *id))
@@ -2358,6 +2398,10 @@ impl App {
                     }
                 },
                 Event::Prompt(prompt) => {
+                    if let PromptOrigin::UploadPicker { game_id, .. } = prompt.origin {
+                        self.pending_installs.insert(game_id, Pending::Choosing);
+                        self.rebuild_installs();
+                    }
                     if self.prompt.is_some() {
                         self.prompt_queue.push_back(prompt);
                     } else {
@@ -2367,8 +2411,9 @@ impl App {
                 Event::PromptClosed(id) => {
                     self.prompt_queue.retain(|p| p.id != id);
                     if self.prompt.as_ref().is_some_and(|p| p.id == id) {
-                        self.prompt = self.prompt_queue.pop_front();
+                        self.close_prompt();
                     }
+                    self.rebuild_installs();
                 }
                 Event::UninstallFinished { result } => {
                     if let Err(error) = result {
@@ -2386,11 +2431,11 @@ impl App {
                     }
                 }
                 Event::InstallDeclined { game_id } => {
-                    self.pending_installs.retain(|id| *id != game_id);
+                    self.pending_installs.remove(&game_id);
                     self.rebuild_installs();
                 }
                 Event::InstallFailed { game_id, error } => {
-                    self.pending_installs.retain(|id| *id != game_id);
+                    self.pending_installs.remove(&game_id);
                     self.rebuild_installs();
                     self.install_failed(game_id, error);
                 }
@@ -2403,10 +2448,11 @@ impl App {
                     self.rebuild_installs();
                     self.notify(format!("Couldn't cancel: {error}"));
                 }
+                Event::UpdateCheckFailed(error) => {
+                    self.checking_updates = false;
+                    self.notify(format!("Couldn't check for updates: {error}"));
+                }
                 Event::Error(message) => {
-                    if message.starts_with("Couldn't check for updates") {
-                        self.checking_updates = false;
-                    }
                     if self.owned.get().is_none() && self.login.is_none() {
                         self.owned = Loadable::Failed(message);
                     } else {
@@ -2543,17 +2589,17 @@ impl App {
                 buttons,
             });
         }
-        for game_id in &self.pending_installs {
+        for (game_id, pending) in &self.pending_installs {
             if self.download_for(*game_id).is_some() {
                 continue;
             }
+            let detail = match pending {
+                Pending::Starting => continue,
+                Pending::Choosing => "Choose a download",
+                Pending::Picked => "Queueing",
+            };
             let game = self.game(*game_id);
             let title = game.map_or_else(|| "Game".to_string(), |g| g.title.clone());
-            let detail = if self.upload_picker_for(&title).is_some() {
-                "Choose a download"
-            } else {
-                "Queueing"
-            };
             rows.push(ui::DownloadRow {
                 game,
                 title,
@@ -2631,7 +2677,7 @@ impl App {
 
     /// Keeps a cave's last run, on disk too, for a report filed later.
     fn save_run(&mut self, cave_id: &str, run: Run) {
-        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+        let Some(cave) = self.cave(cave_id) else {
             return;
         };
         let Some(upload) = &cave.upload else {
@@ -2679,8 +2725,7 @@ impl App {
     /// Rebuilds the marks and, when a filter reads them, the rows too.
     fn refresh_marks(&mut self) {
         if self.rebuild_marks() && (self.rating_filter != RatingFilter::Any || self.playable_only) {
-            self.rebuild_sections();
-            self.rebuild_collection_sections();
+            self.rebuild_rows();
         }
     }
 
@@ -2717,7 +2762,8 @@ impl App {
             })
             .collect();
         let prompt = Prompt {
-            id: Self::OPTIONS_PROMPT,
+            id: 0,
+            origin: PromptOrigin::Options,
             title: "Your rating".to_string(),
             body: String::new(),
             choices,
@@ -2752,7 +2798,7 @@ impl App {
     /// Asks how the game in `cave_id` runs. The cave's last run goes with
     /// the answer while it was of the build installed now.
     fn open_report(&mut self, cave_id: &str) {
-        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+        let Some(cave) = self.cave(cave_id) else {
             return;
         };
         let (Some(game), Some(upload)) = (&cave.game, &cave.upload) else {
@@ -2799,11 +2845,10 @@ impl App {
         let Some(view) = self.report.take() else {
             return;
         };
-        let report = view.finish();
-        if report.game_id == 0 {
-            // The screenshot script's sample.
+        if view.sample {
             return;
         }
+        let report = view.finish();
         let sent_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
@@ -2846,14 +2891,10 @@ impl App {
         self.notice = Some((message, Instant::now()));
     }
 
-    /// The backend counts its prompt ids up from 1.
-    const SELF_UPDATE_PROMPT: u64 = u64::MAX;
-    const OPTIONS_PROMPT: u64 = u64::MAX - 1;
-
     /// The game page's More button: what else there is to do with the
     /// installed game, as a list.
     fn open_game_options(&mut self, cave_id: &str) {
-        let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
+        let Some(cave) = self.cave(cave_id) else {
             return;
         };
         let mut options = Vec::new();
@@ -2884,7 +2925,8 @@ impl App {
             .map_or("Game", |g| g.title.as_str())
             .to_string();
         self.prompt = Some(Prompt {
-            id: Self::OPTIONS_PROMPT,
+            id: 0,
+            origin: PromptOrigin::Options,
             title,
             body: String::new(),
             choices: options.iter().map(|(label, _)| label.to_string()).collect(),
@@ -2966,7 +3008,8 @@ impl App {
                 ),
             };
         Some(Prompt {
-            id: Self::SELF_UPDATE_PROMPT,
+            id: 0,
+            origin: PromptOrigin::SelfUpdate,
             title,
             body,
             focus: focus.min(choices.len() - 1),
@@ -2992,7 +3035,7 @@ impl App {
             (State::Ready(_), Some(0)) => self.quitting = Some(Self::QUIT_FRAMES),
             _ => update.dismiss(),
         }
-        self.prompt = self.prompt_queue.pop_front();
+        self.close_prompt();
     }
 
     fn poll_self_update(&mut self) {
@@ -3003,7 +3046,7 @@ impl App {
         let open = self
             .prompt
             .as_ref()
-            .filter(|p| p.id == Self::SELF_UPDATE_PROMPT)
+            .filter(|p| p.origin == PromptOrigin::SelfUpdate)
             .map(|p| (p.focus, p.choices.len()));
         match open {
             Some((focus, choices)) => {
@@ -3050,8 +3093,7 @@ impl App {
         self.collection_rows = ui::Rows::default();
         self.catalog.clear();
         self.catalog_sources.clear();
-        self.rebuild_sections();
-        self.rebuild_collection_sections();
+        self.rebuild_rows();
     }
 
     /// What the menu drawer offers, top to bottom.
@@ -3204,30 +3246,14 @@ impl App {
             return hints;
         }
         // The tab strip already shows the bumpers, so no hint repeats them.
-        match self.page.clone() {
+        match self.page {
             Page::Library => {
                 let (_, stops) = self.toolbar();
                 let rows_empty = self.rows_empty();
-                let on_toolbar = self
-                    .toolbar_focus_in(stops.len(), rows_empty)
-                    .and_then(|index| stops.get(index))
-                    .map(|stop| stop.hint);
+                let on_toolbar = self.toolbar_focus_in(stops.len(), rows_empty).is_some();
                 let mut hints = Vec::new();
                 // Confirm names what the focused control does.
-                let confirm = match self.tab {
-                    _ if on_toolbar.is_some() => on_toolbar,
-                    Tab::Library | Tab::Collections => self
-                        .active_rows_ref()
-                        .and_then(|rows| rows.focused_game())
-                        .map(|_| "Open"),
-                    Tab::Downloads => {
-                        let rows = self.download_rows();
-                        let (row, button) = self.downloads_row_in(&rows);
-                        rows.get(row)
-                            .and_then(|r| r.buttons.get(button))
-                            .map(|(label, _)| *label)
-                    }
-                };
+                let confirm = self.confirm_target().map(|(label, _)| label);
                 if !rows_empty || stops.len() > 1 {
                     hints.push((vec![Glyph::Navigate], "Browse".to_string()));
                 }
@@ -3235,7 +3261,7 @@ impl App {
                     hints.push((vec![Glyph::Confirm], label.to_string()));
                 }
                 if self.input_mode == InputMode::Gamepad && self.tab != Tab::Downloads {
-                    let label = if on_toolbar.is_none() {
+                    let label = if !on_toolbar {
                         Some("Filters")
                     } else {
                         (!rows_empty).then_some("Games")
@@ -3582,7 +3608,7 @@ impl App {
                     ui::login(ui, &m, login, &mut self.actions);
                     return;
                 }
-                match (&self.owned, self.page.clone()) {
+                match (&self.owned, self.page) {
                     // These pages stand on their own, whatever the library's state.
                     (_, Page::PlayableTypes { row }) => ui::playable_types(
                         ui,
@@ -3654,13 +3680,11 @@ impl App {
                         Tab::Downloads => {
                             let rows = self.download_rows();
                             let (row, button) = self.downloads_row_in(&rows);
-                            let focus = match self
-                                .toolbar_focus_in(self.toolbar().1.len(), rows.is_empty())
-                            {
+                            let (controls, stops) = self.toolbar();
+                            let focus = match self.toolbar_focus_in(stops.len(), rows.is_empty()) {
                                 Some(index) => ui::DownloadFocus::Toolbar(index),
                                 None => ui::DownloadFocus::Row { row, button },
                             };
-                            let (controls, stops) = self.toolbar();
                             let mut actions = Vec::new();
                             let response = ui::downloads(
                                 ui,
@@ -3834,6 +3858,18 @@ fn capitalize(text: &str) -> String {
 }
 
 /// A button on a tab's toolbar and what pressing it does.
+/// Where an install the user asked for stands before butler lists it in
+/// the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// Asked; butler has said nothing yet.
+    Starting,
+    /// butler is asking which upload.
+    Choosing,
+    /// An upload is picked; the queue listing follows.
+    Picked,
+}
+
 struct ToolbarStop {
     /// What the footer says Confirm does.
     hint: &'static str,

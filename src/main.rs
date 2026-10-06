@@ -14,6 +14,7 @@ mod muos;
 mod page_info;
 mod qr;
 mod report;
+mod sample;
 mod self_update;
 mod settings;
 mod ui;

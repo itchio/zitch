@@ -34,8 +34,8 @@ use crate::butlerd::types::{
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
-    GameUpdate, LaunchFailure, Launched, Profile, Prompt, UploadDetail, UploadExt, UserExt,
-    scans_decide, upload_detail, upload_platform_names, upload_runs_here,
+    GameUpdate, LaunchFailure, Launched, Profile, Prompt, PromptOrigin, UploadDetail, UploadExt,
+    UserExt, scans_decide, upload_detail, upload_platform_names, upload_runs_here,
 };
 use crate::report::{Report, Run};
 
@@ -224,6 +224,8 @@ pub enum Event {
         outcome: Launched,
         run: Option<Run>,
     },
+    /// The update check the user asked for did not finish.
+    UpdateCheckFailed(String),
     /// A compatibility report reached itch.io, or why it did not.
     ReportSent {
         game_id: i64,
@@ -831,7 +833,7 @@ fn session(
                     "update-check".into(),
                     Arc::clone(link),
                     emit.clone(),
-                    |error| Event::Error(format!("Couldn't check for updates: {error:#}")),
+                    |error| Event::UpdateCheckFailed(format!("{error:#}")),
                     move |client, emit| check_updates(client, emit).map(|_| ()),
                 );
             }
@@ -1000,8 +1002,9 @@ struct Prompts {
     waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Option<usize>>>>>,
 }
 
-/// How a prompt lays out its choices.
+/// How a prompt lays out its choices, and who is asking.
 struct Look {
+    origin: PromptOrigin,
     /// The choice drawn as the main one.
     primary: Option<usize>,
     /// A column rather than a row.
@@ -1016,6 +1019,7 @@ impl Prompts {
     /// interface went away.
     fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
         let look = Look {
+            origin: PromptOrigin::Backend,
             primary: Some(0),
             stacked: false,
             details: Vec::new(),
@@ -1026,6 +1030,7 @@ impl Prompts {
     /// Shows a pick between equals: a column, none drawn as primary.
     fn pick(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
         let look = Look {
+            origin: PromptOrigin::Backend,
             primary: None,
             stacked: true,
             details: Vec::new(),
@@ -1037,12 +1042,14 @@ impl Prompts {
     fn pick_detailed(
         &self,
         emit: &Emitter,
+        origin: PromptOrigin,
         title: &str,
         body: &str,
         choices: &[&str],
         details: Vec<UploadDetail>,
     ) -> Option<usize> {
         let look = Look {
+            origin,
             primary: None,
             stacked: true,
             details,
@@ -1059,6 +1066,7 @@ impl Prompts {
         look: Look,
     ) -> Option<usize> {
         let Look {
+            origin,
             primary,
             stacked,
             details,
@@ -1071,6 +1079,7 @@ impl Prompts {
             .insert(id, tx);
         emit.send(Event::Prompt(Prompt {
             id,
+            origin,
             title: title.to_string(),
             body: body.to_string(),
             choices: choices.iter().map(|c| c.to_string()).collect(),
@@ -1994,7 +2003,7 @@ fn queue_install(
 }
 
 /// The upload picker's title; the Downloads tab recognises it by this.
-pub const UPLOAD_PICKER: &str = "Which download?";
+const UPLOAD_PICKER: &str = "Which download?";
 
 fn downloads_here(title: &str, count: usize) -> String {
     if count == 1 {
@@ -2026,7 +2035,11 @@ fn pick_upload(
         choices.push("Cancel");
         let body = downloads_here(title, likely);
         let shown = details[..likely].to_vec();
-        let picked = prompts.pick_detailed(emit, UPLOAD_PICKER, &body, &choices, shown)?;
+        let origin = PromptOrigin::UploadPicker {
+            game_id: game.id,
+            picks: likely,
+        };
+        let picked = prompts.pick_detailed(emit, origin, UPLOAD_PICKER, &body, &choices, shown)?;
         if picked != likely {
             return (picked < likely).then_some(picked);
         }
@@ -2042,7 +2055,11 @@ fn pick_upload(
     } else {
         format!("{title}: the last {others} downloads were not recognised for this device.")
     };
-    let picked = prompts.pick_detailed(emit, UPLOAD_PICKER, &body, &choices, details)?;
+    let origin = PromptOrigin::UploadPicker {
+        game_id: game.id,
+        picks: labels.len(),
+    };
+    let picked = prompts.pick_detailed(emit, origin, UPLOAD_PICKER, &body, &choices, details)?;
     (picked < labels.len()).then_some(picked)
 }
 

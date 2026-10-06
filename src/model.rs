@@ -208,9 +208,29 @@ pub enum Launched {
 
 /// A question the backend needs answered before a call can go on, shown as
 /// a modal. The backend maps the chosen index back to the typed reply.
+/// Who asked a question, which decides who gets its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOrigin {
+    /// The backend, which gets the answer back by the prompt's id.
+    Backend,
+    /// The backend asking which of a game's uploads to install. The first
+    /// `picks` choices are uploads; the rest show more or cancel.
+    UploadPicker {
+        game_id: i64,
+        picks: usize,
+    },
+    /// The app's own list of actions, such as a game's More menu.
+    Options,
+    SelfUpdate,
+    /// The screenshot script's stand-in, answered by closing it.
+    Sample,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
+    /// The backend counts its ids up from 1; the app's own prompts are 0.
     pub id: u64,
+    pub origin: PromptOrigin,
     pub title: String,
     pub body: String,
     pub choices: Vec<String>,
@@ -792,7 +812,7 @@ fn rom_system_name(system: &str) -> String {
     name.to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Library,
     /// One game, with one of its buttons focused, or one of its

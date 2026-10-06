@@ -2881,6 +2881,8 @@ pub fn prompt(
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReportView {
     pub game: String,
+    /// The screenshot script's stand-in, which is never sent.
+    pub sample: bool,
     /// The report as it will be sent; its rating follows focus until one
     /// is picked.
     pub draft: Report,
@@ -2909,6 +2911,7 @@ impl ReportView {
             .unwrap_or(0);
         Self {
             game,
+            sample: false,
             draft,
             picked: false,
             focus,
