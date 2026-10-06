@@ -203,6 +203,71 @@ static void unknown_entry(void)
     abort();
 }
 
+static void *(*real_get_proc)(const char *name);
+static void (*real_shader_source)(unsigned shader, int count, const char *const *strings,
+                                  const int *lengths);
+
+#define DRAW_BUFFERS "#extension GL_EXT_draw_buffers : require\n"
+
+/* Whether the shader writes to a color target past the first. */
+static int writes_more_targets(const char *source)
+{
+    static const char FRAG_DATA[] = "gl_FragData[";
+    for (const char *at = source; (at = strstr(at, FRAG_DATA));) {
+        at += sizeof(FRAG_DATA) - 1;
+        if (*at >= '1' && *at <= '9') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* GLSL ES 1.00 has one color target unless the shader asks for the
+   draw buffers extension. Shader translators for desktop games leave
+   that out, and strict drivers then refuse the shader. */
+static void shader_source(unsigned shader, int count, const char *const *strings,
+                          const int *lengths)
+{
+    size_t total = 0;
+    for (int i = 0; i < count; i++) {
+        total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+    }
+    char *source = malloc(total + sizeof(DRAW_BUFFERS));
+    if (!source) {
+        real_shader_source(shader, count, strings, lengths);
+        return;
+    }
+    size_t used = 0;
+    for (int i = 0; i < count; i++) {
+        size_t len = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+        memcpy(source + used, strings[i], len);
+        used += len;
+    }
+    source[used] = '\0';
+    char *line_end = strchr(source, '\n');
+    if (strncmp(source, "#version 100", 12) == 0 && line_end && writes_more_targets(source)
+        && !strstr(source, "GL_EXT_draw_buffers")) {
+        char *rest = line_end + 1;
+        memmove(rest + sizeof(DRAW_BUFFERS) - 1, rest, strlen(rest) + 1);
+        memcpy(rest, DRAW_BUFFERS, sizeof(DRAW_BUFFERS) - 1);
+        const char *one = source;
+        real_shader_source(shader, 1, &one, NULL);
+    } else {
+        real_shader_source(shader, count, strings, lengths);
+    }
+    free(source);
+}
+
+static void *get_proc(const char *name)
+{
+    void *fn = real_get_proc(name);
+    if (fn && strcmp(name, "glShaderSource") == 0) {
+        real_shader_source = fn;
+        return (void *)shader_source;
+    }
+    return fn;
+}
+
 static void free_names(const char **names, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++) {
@@ -251,6 +316,10 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
             mapped++;
         } else if (name) {
             fprintf(stderr, "sdl-dynapi: %s has no %s\n", path, name);
+        }
+        if (fn && strcmp(name, "SDL_GL_GetProcAddress") == 0) {
+            real_get_proc = fn;
+            fn = (void *)get_proc;
         }
         slots[i] = fn ? fn : (void *)unknown_entry;
     }
