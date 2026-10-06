@@ -3553,12 +3553,12 @@ fn link_row(
         FontId::proportional(m.body),
         TEXT,
     );
-    ui.painter().text(
-        pos2(rect.right() - m.space(10.0), rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        "›",
-        FontId::proportional(m.body),
-        DIM,
+    chevron(
+        ui.painter(),
+        pos2(rect.right() - m.space(14.0), rect.center().y),
+        m.space(5.0),
+        1.0,
+        Stroke::new(m.space(2.0).max(1.5), DIM),
     );
     response
 }
@@ -3901,6 +3901,18 @@ pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A chevron centered on `c`, `arm` tall above and below it, pointing
+/// left for a negative `direction`, right for a positive one.
+fn chevron(painter: &egui::Painter, c: egui::Pos2, arm: f32, direction: f32, stroke: Stroke) {
+    let back = -direction.signum() * arm * 0.5;
+    let points = vec![
+        pos2(c.x + back, c.y - arm),
+        pos2(c.x - back, c.y),
+        pos2(c.x + back, c.y + arm),
+    ];
+    painter.add(egui::Shape::line(points, stroke));
+}
+
 /// A round button filling `rect` with a chevron pointing left for a
 /// negative `direction`, right for a positive one.
 fn round_chevron(ui: &Ui, m: &Metrics, rect: Rect, hovered: bool, direction: f32) {
@@ -3915,16 +3927,13 @@ fn round_chevron(ui: &Ui, m: &Metrics, rect: Rect, hovered: bool, direction: f32
         fill,
         Stroke::new(m.space(1.25).max(1.0), edge),
     );
-    let c = rect.center();
-    let arm = m.space(7.0);
-    let back = -direction.signum() * arm * 0.5;
-    let points = [
-        pos2(c.x + back, c.y - arm),
-        pos2(c.x - back, c.y),
-        pos2(c.x + back, c.y + arm),
-    ];
-    ui.painter()
-        .add(egui::Shape::line(points.to_vec(), Stroke::new(3.0, TEXT)));
+    chevron(
+        ui.painter(),
+        rect.center(),
+        m.space(7.0),
+        direction,
+        Stroke::new(3.0, TEXT),
+    );
 }
 
 /// One segmented group from the itch app's filter bar. Returns the index
