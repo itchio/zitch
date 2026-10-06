@@ -170,6 +170,7 @@ pub struct App {
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
     shot: Option<Shot>,
+    intro: crate::intro::Intro,
     /// Where choices are saved; none for a screenshot run, which reads
     /// them but leaves them as they were.
     settings_path: Option<PathBuf>,
@@ -407,6 +408,7 @@ impl App {
             actions: Vec::new(),
             rows: ui::Rows::default(),
             settings_path: shot.is_none().then_some(settings_path),
+            intro: crate::intro::Intro::new(shot.is_none()),
             shot,
             emulate,
             low_spec,
@@ -3215,6 +3217,7 @@ impl App {
         }
         if pad.pressed || keys || touches {
             self.input_seen = true;
+            self.intro.skip();
         }
         self.drive_shot(ctx);
         // Before drawing, so the frame that reads a press already shows it.
@@ -3304,7 +3307,8 @@ impl App {
                 let row = egui::vec2(ui.available_width(), ui::tab_strip_height(ui, &m));
                 let centered = egui::Layout::left_to_right(egui::Align::Center);
                 ui.allocate_ui_with_layout(row, centered, |ui| {
-                    ui::logo(ui, &m, &self.glyphs);
+                    let home = ui::logo(ui, &m, &self.glyphs, !self.intro.running());
+                    self.intro.set_home(home);
                     if self.login.is_some() {
                         ui.allocate_exact_size(
                             egui::vec2(0.0, ui::tab_strip_height(ui, &m)),
@@ -3639,6 +3643,7 @@ impl App {
                 &format!("Launching {title}\u{2026}"),
             );
         }
+        self.intro.draw(ui.ctx(), ui.max_rect(), self.glyphs.logo());
         if let Some(frames) = self.quitting {
             ui::curtain(ui.ctx(), &m, ui.max_rect(), "Quitting\u{2026}");
             if frames == 0 {

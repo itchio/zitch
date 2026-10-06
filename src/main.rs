@@ -8,6 +8,7 @@ mod glyphs;
 #[cfg(feature = "sdl-host")]
 mod host_sdl;
 mod images;
+mod intro;
 mod model;
 mod muos;
 mod page_info;

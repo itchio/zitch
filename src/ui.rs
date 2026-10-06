@@ -4077,17 +4077,24 @@ fn funnel_icon(ui: &Ui, rect: Rect, color: Color32) {
     ));
 }
 
-/// The itch logo at the head of the page.
-pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs) {
-    if let Some(texture) = glyphs.logo() {
-        let height = m.icon(24.0);
-        let size = texture.size_vec2();
+/// The itch logo at the head of the page, and where it sits. Its place
+/// is kept empty while the intro still carries the logo there.
+pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs, shown: bool) -> Option<Rect> {
+    let texture = glyphs.logo()?;
+    let height = m.icon(24.0);
+    let size = texture.size_vec2();
+    let size = vec2(height * size.x / size.y, height);
+    let rect = if shown {
         ui.add(
             egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                .fit_to_exact_size(vec2(height * size.x / size.y, height)),
-        );
-        ui.add_space(m.strip_gap);
-    }
+                .fit_to_exact_size(size),
+        )
+        .rect
+    } else {
+        ui.allocate_exact_size(size, Sense::hover()).0
+    };
+    ui.add_space(m.strip_gap);
+    Some(rect)
 }
 
 /// The strip's height, for the page that hides it.
