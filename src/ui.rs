@@ -7,7 +7,7 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
-pub use crate::model::human_size;
+use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Mark, Page,
     PlayableType, Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here,
@@ -235,7 +235,7 @@ pub struct Metrics {
     /// heading rows, the footer. Tiles and text grow with `scale`, but the
     /// chrome grows slower, so a big screen spends its height on covers
     /// rather than on bars that were already big enough.
-    pub chrome: f32,
+    chrome: f32,
     /// Space between the page edge and content.
     pub margin: f32,
     /// Space above the header.
@@ -257,7 +257,7 @@ pub struct Metrics {
     pub header_height: f32,
     /// Height of the hint bar, for things painted over the whole screen
     /// that must stop short of it.
-    pub footer_height: f32,
+    footer_height: f32,
     pub section_gap: f32,
     pub heading: f32,
     pub title: f32,
@@ -365,8 +365,8 @@ struct Swipe {
     travel: egui::Vec2,
 }
 
-/// Off for comparison against egui's own drag-to-scroll; flip to try the
-/// axis-locked swipe again.
+/// The axis-locked swipe on touch screens. Off, egui's own drag-to-scroll
+/// takes over, for comparison.
 const CUSTOM_SWIPE: bool = true;
 const SWIPE_LOCK: f32 = 8.0;
 const FLING_FRICTION: f32 = 1000.0;
@@ -514,7 +514,7 @@ impl Rows {
         self.visible().count().max(1)
     }
 
-    pub fn col(&self) -> usize {
+    fn col(&self) -> usize {
         self.cols.get(self.row).copied().unwrap_or(0)
     }
 
@@ -543,7 +543,6 @@ impl Rows {
         }
     }
 
-    /// Focuses a game by id, preferring the current row.
     /// Moves focus off a row with no games, such as a note, to the nearest
     /// one that has some, looking below first.
     pub fn settle_on_game(&mut self) {
@@ -561,6 +560,7 @@ impl Rows {
         }
     }
 
+    /// Focuses a game by id, preferring the current row.
     pub fn focus_game(&mut self, id: i64) {
         let in_current = self
             .sections
@@ -1041,7 +1041,7 @@ struct Tile<'a> {
     mark: Option<Mark>,
 }
 
-pub fn rating_color(rating: Rating) -> Color32 {
+fn rating_color(rating: Rating) -> Color32 {
     match rating {
         Rating::Perfect => GREEN,
         Rating::Playable => AMBER,
@@ -2124,16 +2124,13 @@ fn page_info(
         );
         ui.add_space(m.space(10.0) - m.ring);
         heading = Some(label.rect.top());
-        screenshot_strip(
-            ui,
-            m,
-            &info.screenshots,
+        let strip = Strip {
+            urls: &info.screenshots,
             covers,
-            focused_shot,
+            focused: focused_shot,
             scroll,
-            page,
-            actions,
-        );
+        };
+        screenshot_strip(ui, m, strip, page, actions);
         ui.add_space(m.space(10.0) - m.ring);
     }
     if !info.tags.is_empty() {
@@ -2189,18 +2186,29 @@ fn screenshot_height(m: &Metrics) -> f32 {
     m.space(196.0)
 }
 
+/// What the screenshot strip shows and which one has focus.
+struct Strip<'a> {
+    urls: &'a [String],
+    covers: &'a CoverLoader,
+    focused: Option<usize>,
+    scroll: Option<DetailScroll>,
+}
+
 /// The game's screenshots in a row that scrolls sideways. Only those in
 /// view, and the next one along, are loaded.
 fn screenshot_strip(
     ui: &mut Ui,
     m: &Metrics,
-    urls: &[String],
-    covers: &CoverLoader,
-    focused: Option<usize>,
-    scroll: Option<DetailScroll>,
+    strip: Strip<'_>,
     page: &mut PageScroll,
     actions: &mut Vec<Action>,
 ) {
+    let Strip {
+        urls,
+        covers,
+        focused,
+        scroll,
+    } = strip;
     let height = screenshot_height(m);
     let gap = m.space(12.0);
     let ring = m.ring;
@@ -2809,7 +2817,7 @@ pub fn human_time_ago(unix: i64) -> String {
     }
 }
 
-pub fn human_duration(seconds: i64) -> String {
+fn human_duration(seconds: i64) -> String {
     let minutes = seconds / 60;
     if minutes < 60 {
         format!("{minutes} min")
@@ -2833,11 +2841,8 @@ impl Page {
     }
 }
 
-/// A modal question over the whole window. Keyboard and controller focus
-/// go to it while it is up; the mouse can also pick a button.
-/// Draws the modal over `screen`, which is the whole window unless a
-/// smaller display is being emulated.
-/// A modal question. It dims the whole `screen` and centers itself in
+/// A modal question. Keyboard and controller focus go to it while it is
+/// up; the mouse can also pick a button. It dims the whole `screen` and centers itself in
 /// `page`, the part above the footer, whose hints are drawn over the dim.
 pub fn prompt(
     ctx: &egui::Context,
@@ -3937,8 +3942,6 @@ fn round_chevron(ui: &Ui, m: &Metrics, rect: Rect, hovered: bool, direction: f32
     );
 }
 
-/// One segmented group from the itch app's filter bar. Returns the index
-/// of an option the pointer picked.
 /// What the pointer did to a group of toolbar controls this frame.
 pub struct ToolbarResponse {
     pub clicked: Option<usize>,

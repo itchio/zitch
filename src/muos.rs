@@ -611,7 +611,7 @@ fn parse_assign(json: &str) -> HashMap<String, String> {
             .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
             .collect(),
         Err(error) => {
-            log::warn!("{ASSIGN_DIR}/assign.json: {error}");
+            log::warn!("assign.json: {error}");
             HashMap::new()
         }
     }

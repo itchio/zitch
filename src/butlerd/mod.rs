@@ -28,8 +28,11 @@ pub trait Request: Serialize {
     type Result: DeserializeOwned;
 }
 
-/// A message the daemon sends on its own, with no reply expected.
+/// A message the daemon sends on its own, with no reply expected. The
+/// generated impls name each method; decoding goes by the name on the
+/// wire, so the constant is for callers that want it.
 pub trait Notification: DeserializeOwned {
+    #[allow(dead_code)]
     const METHOD: &'static str;
 }
 
@@ -46,7 +49,7 @@ pub struct Daemon {
 }
 
 /// butlerd's code for a request that failed for want of a network.
-pub const CODE_NETWORK_DISCONNECTED: i64 = 9000;
+const CODE_NETWORK_DISCONNECTED: i64 = 9000;
 
 /// Whether a call failed because butler could not reach itch.io.
 pub fn is_offline(error: &anyhow::Error) -> bool {
@@ -169,7 +172,7 @@ impl Drop for Daemon {
 
 /// An error returned by butlerd for a request.
 #[derive(Debug, Clone, Deserialize)]
-pub struct RpcError {
+struct RpcError {
     pub code: i64,
     pub message: String,
     #[serde(default)]
@@ -330,11 +333,7 @@ impl Client {
     }
 
     /// [`Self::call`] for a method these bindings do not know.
-    pub fn call_raw<P: Serialize, R: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: P,
-    ) -> Result<R> {
+    fn call_raw<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
         let redact = method.starts_with("Profile.Login");
         self.call_inner(method, params, redact, |incoming| self.refuse(incoming))
     }

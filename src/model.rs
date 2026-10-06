@@ -81,8 +81,6 @@ pub struct InstallState {
     pub error: Option<String>,
 }
 
-/// A question the backend needs answered before a call can go on, shown as
-/// a modal. The backend maps the chosen index back to the typed reply.
 /// Why a launch did not run, with the tail of what the game printed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchFailure {
@@ -90,6 +88,8 @@ pub struct LaunchFailure {
     pub log: Vec<String>,
 }
 
+/// A question the backend needs answered before a call can go on, shown as
+/// a modal. The backend maps the chosen index back to the typed reply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
     pub id: u64,
@@ -110,7 +110,6 @@ pub struct Prompt {
     pub progress: Option<(String, f32)>,
 }
 
-/// Which part of the library the main row shows.
 /// What kind of thing a library entry is, one row each on the Library tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -212,8 +211,6 @@ impl CollectionFilter {
 }
 
 /// What this device runs, in the words of a game's scanned platforms.
-/// The handheld profile is itch.io's check for an arm64 Linux build the
-/// SDL shim can put on screen.
 /// Worked out once: the filter asks this of every game in the library.
 pub fn device_platforms() -> &'static [String] {
     static PLATFORMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
@@ -322,7 +319,7 @@ fn any_runs_here(
 /// Whether an upload is built for this device: on muOS something the
 /// firmware or the SDL shim can run, going by itch.io's scan of its files
 /// when it has one and its name otherwise; elsewhere an upload tagged for
-/// the OS. With `scans_decide` ([`scans_decide`]), an unscanned upload
+/// the OS. With `scans_decide`, an unscanned upload
 /// does not count.
 pub fn upload_runs_here(upload: &Upload, scans_decide: bool) -> bool {
     if crate::muos::available() {

@@ -145,7 +145,7 @@ impl Animation {
 enum Entry<T> {
     Pending,
     Ready(Arc<T>),
-    Failed(String),
+    Failed,
 }
 
 type Key = (String, u32);
@@ -532,7 +532,7 @@ impl CoverLoader {
         animations.retain(|key, entry| key == url || matches!(entry, Entry::Pending));
         match animations.get(url) {
             Some(Entry::Ready(animation)) => return Some(Arc::clone(animation)),
-            Some(Entry::Failed(_)) => return None,
+            Some(Entry::Failed) => return None,
             // Asked again below, so it stays wanted while focused.
             Some(Entry::Pending) => {}
             None => {
@@ -664,7 +664,7 @@ impl Inner {
                     }
                     Err(error) => {
                         log::debug!("animated cover {url}: {error}");
-                        Entry::Failed(error)
+                        Entry::Failed
                     }
                 };
                 let mut animations = self.animations.lock().unwrap_or_else(|p| p.into_inner());

@@ -94,6 +94,7 @@ impl Gamepad {
 
     /// A gamepad fed by the host: whatever it sends arrives at the next
     /// [`Self::poll`].
+    #[cfg(feature = "sdl-host")]
     pub fn external() -> (Self, PadSender) {
         let (tx, rx) = mpsc::channel();
         (Self { events: Some(rx) }, PadSender(tx))

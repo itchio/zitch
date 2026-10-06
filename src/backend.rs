@@ -23,7 +23,7 @@ use crate::butlerd::types::{
     DownloadsDiscardParams, DownloadsDriveCancelParams, DownloadsDriveParams, DownloadsListParams,
     DownloadsRetryParams, FetchCaveParams, FetchCavesParams, FetchCollectionGamesParams,
     FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
-    HTMLLaunchResult, InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
+    InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
     LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
     PrereqsFailedResult, ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithDeviceCancelParams, ProfileLoginWithDeviceParams,
@@ -213,13 +213,10 @@ pub enum Event {
         error: String,
     },
     UninstallFinished {
-        cave_id: String,
         result: Result<(), String>,
     },
     /// The game process is up.
-    LaunchRunning {
-        cave_id: String,
-    },
+    LaunchRunning,
     /// The `Launch` call returned; the game has exited or never started.
     /// `run` is what was seen of the game, when it was launched.
     LaunchFinished {
@@ -655,12 +652,8 @@ fn session(
                     format!("uninstall-{cave_id}"),
                     Arc::clone(link),
                     emit.clone(),
-                    {
-                        let cave_id = cave_id.clone();
-                        move |error| Event::UninstallFinished {
-                            cave_id: cave_id.clone(),
-                            result: Err(format!("{error:#}")),
-                        }
+                    |error| Event::UninstallFinished {
+                        result: Err(format!("{error:#}")),
                     },
                     move |client, emit| {
                         // Cancel comes first so a reflex press keeps the game.
@@ -677,10 +670,7 @@ fn session(
                             cave_id: cave_id.clone(),
                             hard: None,
                         })?;
-                        emit.send(Event::UninstallFinished {
-                            cave_id,
-                            result: Ok(()),
-                        });
+                        emit.send(Event::UninstallFinished { result: Ok(()) });
                         refresh_caves(client, emit);
                         Ok(())
                     },
@@ -978,17 +968,37 @@ struct Prompts {
     waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Option<usize>>>>>,
 }
 
+/// How a prompt lays out its choices.
+struct Look {
+    /// The choice drawn as the main one.
+    primary: Option<usize>,
+    /// A column rather than a row.
+    stacked: bool,
+    /// Detail under the first choices, one each.
+    details: Vec<UploadDetail>,
+}
+
 impl Prompts {
     /// Shows a question and waits for the answer: a row of choices with
     /// the first as the primary one. `None` means dismissed, or the
     /// interface went away.
     fn ask(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, Vec::new(), Some(0), false)
+        let look = Look {
+            primary: Some(0),
+            stacked: false,
+            details: Vec::new(),
+        };
+        self.show(emit, title, body, choices, look)
     }
 
     /// Shows a pick between equals: a column, none drawn as primary.
     fn pick(&self, emit: &Emitter, title: &str, body: &str, choices: &[&str]) -> Option<usize> {
-        self.show(emit, title, body, choices, Vec::new(), None, true)
+        let look = Look {
+            primary: None,
+            stacked: true,
+            details: Vec::new(),
+        };
+        self.show(emit, title, body, choices, look)
     }
 
     /// A pick with detail under the first choices, one each.
@@ -1000,7 +1010,12 @@ impl Prompts {
         choices: &[&str],
         details: Vec<UploadDetail>,
     ) -> Option<usize> {
-        self.show(emit, title, body, choices, details, None, true)
+        let look = Look {
+            primary: None,
+            stacked: true,
+            details,
+        };
+        self.show(emit, title, body, choices, look)
     }
 
     fn show(
@@ -1009,10 +1024,13 @@ impl Prompts {
         title: &str,
         body: &str,
         choices: &[&str],
-        details: Vec<UploadDetail>,
-        primary: Option<usize>,
-        stacked: bool,
+        look: Look,
     ) -> Option<usize> {
+        let Look {
+            primary,
+            stacked,
+            details,
+        } = look;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel();
         self.waiting
@@ -1390,9 +1408,7 @@ fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String
                         run.borrow_mut().strategy = Some("native".into());
                         crate::muos::foreground(pid);
                     }
-                    emit.send(Event::LaunchRunning {
-                        cave_id: cave_id.to_string(),
-                    });
+                    emit.send(Event::LaunchRunning);
                 }
                 Ok(AnyNotification::LaunchExited(_)) => log::info!("game exited"),
                 Ok(AnyNotification::PrereqsStarted(n)) => {
@@ -1504,7 +1520,6 @@ fn answer_launch_request(
         AnyServerRequest::HTMLLaunch(_) => {
             // TODO: serve the folder and open a window for it.
             emit.send(Event::Error("HTML games are not supported yet".into()));
-            let _: Option<HTMLLaunchResult> = None;
             client.reply_error(id, 501, "HTML games are not supported yet")
         }
         AnyServerRequest::AllowSandboxSetup(_) => {
@@ -1526,8 +1541,6 @@ fn answer_launch_request(
     }
 }
 
-/// Runs a butlerd call on its own connection and thread, so the main loop
-/// keeps turning while it works.
 /// The background work: a fresh owned list, the update check, and the
 /// collections. Runs at startup and again whenever the network comes
 /// back, and is what decides whether we are online. The butler calls run
@@ -1687,6 +1700,8 @@ fn check_updates(client: &Client, emit: &Emitter) -> Result<Vec<GameUpdate>> {
     Ok(updates)
 }
 
+/// Runs a butlerd call on its own connection and thread, so the main loop
+/// keeps turning while it works.
 fn spawn_op<F, E>(name: String, link: Link, emit: Emitter, fail: E, op: F)
 where
     F: FnOnce(&Client, &Emitter) -> Result<()> + Send + 'static,
@@ -1990,10 +2005,8 @@ fn pick_upload(
     (picked < labels.len()).then_some(picked)
 }
 
-/// Asks which of an indirect update's uploads to install. `None` when the
-/// user backs out.
 /// Asks which of an indirect update's uploads to install, showing what is
-/// installed now beside what is offered.
+/// installed now beside what is offered. `None` when the user backs out.
 fn pick_update(
     client: &Client,
     prompts: &Prompts,

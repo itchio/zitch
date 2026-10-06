@@ -83,7 +83,7 @@ pub struct App {
     /// Collections with a page request in flight.
     collection_loading: std::collections::HashSet<i64>,
     /// The Collections tab's carousels, one per collection.
-    pub collection_rows: ui::Rows,
+    collection_rows: ui::Rows,
     /// Every game the screen can show, owned or installed, by id. Added to
     /// as lists arrive rather than rebuilt, since a big account has
     /// thousands; cleared at sign-out.
@@ -101,7 +101,6 @@ pub struct App {
     discarding: std::collections::HashSet<String>,
     /// What the interface shows per game, rebuilt from the fields above.
     pub installs: std::collections::HashMap<i64, InstallState>,
-    /// Caves with a Launch call in flight.
     /// Games in flight, by cave id, with when they were launched.
     running: std::collections::HashMap<String, Instant>,
     /// Why the last launch of a cave failed, until it is launched again.
@@ -118,7 +117,6 @@ pub struct App {
     /// Whether butler can reach itch.io; installs and updates need it.
     online: bool,
     tab: Tab,
-    /// Row and button with focus on the Downloads tab.
     /// Per tab, the toolbar stop with controller focus, or none while
     /// focus is in the list below.
     toolbar_focus: [Option<usize>; Tab::ALL.len()],
@@ -169,7 +167,7 @@ pub struct App {
     /// The cover marks by game, from the caves, runs and reports.
     marks: std::collections::HashMap<i64, Mark>,
     reports_path: Option<PathBuf>,
-    /// Something the user just did, shown in the header.
+    /// What the frame's input and widgets asked for, applied in order.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
     shot: Option<Shot>,
@@ -207,12 +205,12 @@ pub struct App {
 /// A debugging capture: write the window to a PNG once the library has
 /// settled, or after a deadline, then quit.
 pub struct Shot {
-    pub path: PathBuf,
-    pub deadline: Instant,
+    path: PathBuf,
+    deadline: Instant,
     /// When the library finished loading; covers get a moment after that.
-    pub settled_at: Option<Instant>,
+    settled_at: Option<Instant>,
     /// Scripted steps to play once the library is loaded, one per frame.
-    pub script: std::collections::VecDeque<Step>,
+    script: std::collections::VecDeque<Step>,
     wait_until: Option<Instant>,
     /// A screenshot was requested and its pixels have not arrived yet.
     capture_pending: bool,
@@ -279,9 +277,9 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "y" => Ok(Step::Act(Action::Secondary)),
             "types" => Ok(Step::Act(Action::Open(Page::PlayableTypes { row: 0 }))),
             "settings" => Ok(Step::Act(Action::Open(Page::Settings { row: 0 }))),
+            "guide" => Ok(Step::Act(Action::Menu)),
             // A stand-in question, to look at the modal without a game that
             // asks one.
-            "guide" => Ok(Step::Act(Action::Menu)),
             "prompt" => Ok(Step::Act(Action::Answer {
                 prompt: 0,
                 choice: None,
@@ -555,9 +553,6 @@ impl App {
         Some((cave_id, title))
     }
 
-    /// Owned games first, so their fresher records win over the copy each
-    /// cave carries; then installed games with no key.
-    /// The carousel rows the current tab shows, if it has any.
     /// Brings the window to the front. Wayland compositors that refuse
     /// ignore the request.
     fn raise_window(&self) {
@@ -573,6 +568,7 @@ impl App {
             .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 
+    /// The carousel rows the current tab shows, if it has any.
     fn active_rows(&mut self) -> Option<&mut ui::Rows> {
         match self.tab {
             Tab::Library => Some(&mut self.rows),
@@ -1495,7 +1491,6 @@ impl App {
         }
     }
 
-    /// Games with an update waiting, for the grid's badges.
     /// Games with a direct update: the installed upload has a newer
     /// version. Indirect updates are guesses, mentioned only on the game
     /// page.
@@ -1545,9 +1540,6 @@ impl App {
             .find_map(|cave| self.updates.get(&cave.id))
     }
 
-    /// Whether the game's page shows it running. Under a handoff it never
-    /// does: the page sits behind the curtain, as the user will find it
-    /// when the game exits.
     /// The QR code is up, over the page of the game it was opened for.
     fn qr_shown(&self) -> bool {
         match (&self.qr, &self.page) {
@@ -1556,6 +1548,9 @@ impl App {
         }
     }
 
+    /// Whether the game's page shows it running. Under a handoff it never
+    /// does: the page sits behind the curtain, as the user will find it
+    /// when the game exits.
     fn is_running(&self, game_id: i64) -> bool {
         !self.handoff
             && self
@@ -1748,7 +1743,6 @@ impl App {
             .find(|d| d.game.as_ref().is_some_and(|g| g.id == game_id))
     }
 
-    /// Derives what each game's tile and page show from the queue.
     /// One row per collection. With the installed filter on, collections
     /// with nothing installed sink to the bottom and say so.
     fn rebuild_collection_sections(&mut self) {
@@ -1934,6 +1928,7 @@ impl App {
         }
     }
 
+    /// Derives what each game's tile and page show from the queue.
     fn rebuild_installs(&mut self) {
         let mut installs = std::collections::HashMap::new();
         for download in &self.downloads {
@@ -2296,7 +2291,7 @@ impl App {
                         self.notify(format!("Install of {title} failed: {error}"));
                     }
                 }
-                Event::LaunchRunning { .. } => {
+                Event::LaunchRunning => {
                     if self.handoff || self.minimize_while_playing {
                         self.hide_window();
                     }
@@ -2353,7 +2348,7 @@ impl App {
                         self.prompt = self.prompt_queue.pop_front();
                     }
                 }
-                Event::UninstallFinished { result, .. } => {
+                Event::UninstallFinished { result } => {
                     if let Err(error) = result {
                         self.notify(format!("Uninstall failed: {error}"));
                     }
@@ -2402,9 +2397,6 @@ impl App {
 }
 
 impl App {
-    /// What the footer offers on the current page, in reading order.
-    /// The stored focus, clamped to rows that still exist. The queue changes
-    /// underneath the focus, so every reader clamps rather than trusting it.
     /// The remembered Downloads focus, clamped to the rows there are: they
     /// come and go as butler works.
     fn downloads_row_in(&self, rows: &[ui::DownloadRow<'_>]) -> (usize, usize) {
@@ -2502,7 +2494,7 @@ impl App {
                         "{prefix}{}, {:.0}%, {}/s, {} left",
                         capitalize(&p.stage),
                         p.progress * 100.0,
-                        ui::human_size(p.bps as i64),
+                        human_size(p.bps as i64),
                         ui::human_duration_seconds(p.eta as i64),
                     ),
                     Some(p.progress as f32),
@@ -2615,7 +2607,6 @@ impl App {
         self.install_failures.insert(game_id, error);
     }
 
-    /// Something failed that has no page to show it on.
     /// Keeps a cave's last run, on disk too, for a report filed later.
     fn save_run(&mut self, cave_id: &str, run: Run) {
         let Some(cave) = self.caves.iter().find(|c| c.id == cave_id) else {
@@ -2809,6 +2800,7 @@ impl App {
         self.backend.send(Command::Report(Box::new(report)));
     }
 
+    /// Something failed that has no page to show it on.
     fn notify(&mut self, message: String) {
         log::warn!("{message}");
         self.notice = Some((message, Instant::now()));
@@ -3089,6 +3081,7 @@ impl App {
         about
     }
 
+    /// What the footer offers on the current page, in reading order.
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
         if let Some(focus) = self.menu {
             let items = self.menu_items();
