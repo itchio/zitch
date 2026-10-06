@@ -3452,16 +3452,7 @@ pub fn playable_types(
                     && group != Some(kind.group)
                 {
                     group = Some(kind.group);
-                    ui.add_space(m.space(10.0));
-                    ui.horizontal(|ui| {
-                        ui.add_space(m.ring + m.space(8.0));
-                        ui.label(
-                            egui::RichText::new(kind.group.label())
-                                .font(bold(m.caption))
-                                .color(DIM),
-                        );
-                    });
-                    ui.add_space(m.space(4.0));
+                    group_heading(ui, m, kind.group.label());
                 }
                 let response = check_row(ui, m, ("type", index), label, checked, index == row);
                 if response.hovered() && pointer_moved {
@@ -3476,16 +3467,24 @@ pub fn playable_types(
         });
 }
 
-/// A checkbox and its label on a row that takes focus, scrolled into
-/// view when focused. Leaves room for the focus ring on either side.
-fn check_row(
+/// A small heading above a group of rows on a list page.
+fn group_heading(ui: &mut Ui, m: &Metrics, label: &str) {
+    ui.add_space(m.space(10.0));
+    ui.horizontal(|ui| {
+        ui.add_space(m.ring + m.space(8.0));
+        ui.label(egui::RichText::new(label).font(bold(m.caption)).color(DIM));
+    });
+    ui.add_space(m.space(4.0));
+}
+
+/// A row on a list page that takes focus, scrolled into view when
+/// focused. Leaves room for the focus ring on either side.
+fn list_row(
     ui: &mut Ui,
     m: &Metrics,
     id: impl std::hash::Hash + std::fmt::Debug,
-    label: &str,
-    checked: bool,
     focused: bool,
-) -> egui::Response {
+) -> (Rect, egui::Response) {
     let width = ui.available_width() - 2.0 * m.ring;
     let height = m.space(32.0);
     let (outer, _) = ui.allocate_exact_size(
@@ -3504,6 +3503,19 @@ fn check_row(
         focus_ring(ui, rect, [m.space(6.0); 4], m);
         ui.scroll_to_rect(rect.expand(m.ring), None);
     }
+    (rect, response)
+}
+
+/// A checkbox and its label on a [`list_row`].
+fn check_row(
+    ui: &mut Ui,
+    m: &Metrics,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    checked: bool,
+    focused: bool,
+) -> egui::Response {
+    let (rect, response) = list_row(ui, m, id, focused);
     let icon = m.icon(14.0);
     let icon_rect = Rect::from_min_size(
         pos2(rect.left() + m.space(8.0), rect.center().y - icon / 2.0),
@@ -3522,6 +3534,122 @@ fn check_row(
         if checked { TEXT } else { DIM },
     );
     response
+}
+
+/// A label with a chevron on a [`list_row`], for a row that opens
+/// another page.
+fn link_row(
+    ui: &mut Ui,
+    m: &Metrics,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    focused: bool,
+) -> egui::Response {
+    let (rect, response) = list_row(ui, m, id, focused);
+    ui.painter().text(
+        pos2(rect.left() + m.space(8.0), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(m.body),
+        TEXT,
+    );
+    ui.painter().text(
+        pos2(rect.right() - m.space(10.0), rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "›",
+        FontId::proportional(m.body),
+        DIM,
+    );
+    response
+}
+
+/// One row of the Settings page.
+pub struct SettingRow {
+    pub group: &'static str,
+    pub label: &'static str,
+    pub kind: SettingKind,
+}
+
+pub enum SettingKind {
+    /// On or off; A sends `action`.
+    Toggle { on: bool, action: Action },
+    /// Opens another page.
+    Link(Page),
+}
+
+/// The Settings page: the rows under their group headings, then the
+/// About lines. `row` is the focused row.
+pub fn settings(
+    ui: &mut Ui,
+    m: &Metrics,
+    rows: &[SettingRow],
+    about: &[(&str, String)],
+    row: usize,
+    actions: &mut Vec<Action>,
+) {
+    ui.label(
+        egui::RichText::new("Settings")
+            .font(bold(m.heading))
+            .color(TEXT),
+    );
+    ui.add_space(m.space(10.0));
+    let rect = ui.available_rect_before_wrap().expand2(vec2(m.ring, 0.0));
+    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(scroll_bar(ui, false))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(m.ring);
+            let mut group = None;
+            for (index, setting) in rows.iter().enumerate() {
+                if group != Some(setting.group) {
+                    group = Some(setting.group);
+                    group_heading(ui, m, setting.group);
+                }
+                let focused = index == row;
+                let id = ("setting", index);
+                let response = match &setting.kind {
+                    SettingKind::Toggle { on, .. } => {
+                        check_row(ui, m, id, setting.label, *on, focused)
+                    }
+                    SettingKind::Link(_) => link_row(ui, m, id, setting.label, focused),
+                };
+                if response.hovered() && pointer_moved {
+                    actions.push(Action::FocusSettingsRow(index));
+                }
+                if response.clicked() {
+                    actions.push(Action::FocusSettingsRow(index));
+                    actions.push(Action::Activate);
+                }
+            }
+            if !about.is_empty() {
+                group_heading(ui, m, "About");
+                for (label, value) in about {
+                    let (rect, _) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), m.space(28.0)),
+                        Sense::hover(),
+                    );
+                    let left = rect.left() + m.ring + m.space(8.0);
+                    ui.painter().text(
+                        pos2(left, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(m.body),
+                        DIM,
+                    );
+                    ui.painter().text(
+                        pos2(left + m.space(72.0), rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        value,
+                        FontId::proportional(m.body),
+                        TEXT,
+                    );
+                }
+            }
+            ui.add_space(m.ring);
+        });
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.

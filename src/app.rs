@@ -130,6 +130,10 @@ pub struct App {
     /// Where Back goes from the Playable types page: the page it was
     /// opened over.
     types_return: Page,
+    /// Where Back from the Settings page goes.
+    settings_return: Page,
+    /// Rating and tried marks on the covers.
+    cover_marks: bool,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
     focus_search: bool,
@@ -268,6 +272,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "qr" => Ok(Step::Act(Action::ShowQr)),
             "y" => Ok(Step::Act(Action::Secondary)),
             "types" => Ok(Step::Act(Action::Open(Page::PlayableTypes { row: 0 }))),
+            "settings" => Ok(Step::Act(Action::Open(Page::Settings { row: 0 }))),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "guide" => Ok(Step::Act(Action::Menu)),
@@ -323,11 +328,6 @@ impl App {
         let runs_path = settings_path.with_file_name("runs.json");
         let reports_path = settings_path.with_file_name("reports.json");
         let reports: Reports = crate::report::load(&reports_path);
-        // Nothing is installed until butler says, so every report is current.
-        let marks = reports
-            .iter()
-            .map(|(id, saved)| (*id, ui::Mark::Rated(saved.rating, true)))
-            .collect();
         // Hiding every type this device has counts as hiding none, as the
         // filter treats it, so the page shows them all on.
         let mut playable_hidden = settings.playable_hidden;
@@ -340,7 +340,7 @@ impl App {
         ui::install_fonts(ctx);
         ctx.set_visuals(ui::visuals());
         ctx.set_zoom_factor(zoom);
-        Self {
+        let mut app = Self {
             backend,
             covers,
             page_info: PageInfoLoader::new(),
@@ -382,6 +382,8 @@ impl App {
             playable_only: settings.playable_only,
             playable_hidden,
             types_return: Page::Library,
+            settings_return: Page::Library,
+            cover_marks: settings.cover_marks,
             query: String::new(),
             focus_search: false,
             blur_search: false,
@@ -397,7 +399,7 @@ impl App {
             runs: crate::report::load(&runs_path),
             runs_path: shot.is_none().then_some(runs_path),
             reports,
-            marks,
+            marks: Default::default(),
             reports_path: shot.is_none().then_some(reports_path),
             menu: None,
             quitting: None,
@@ -418,7 +420,9 @@ impl App {
             minimize_while_playing,
             handoff,
             ctx: ctx.clone(),
-        }
+        };
+        app.rebuild_marks();
+        app
     }
 
     fn search_id() -> egui::Id {
@@ -1024,6 +1028,17 @@ impl App {
                     };
                     self.page = Page::PlayableTypes { row };
                 }
+                Page::Settings { row } => {
+                    let last = self.settings_rows().len().saturating_sub(1);
+                    let row = match direction {
+                        Direction::Up => row.saturating_sub(1),
+                        Direction::Down => (row + 1).min(last),
+                        Direction::PageUp | Direction::Top | Direction::Home => 0,
+                        Direction::PageDown | Direction::Bottom | Direction::End => last,
+                        Direction::Left | Direction::Right => row,
+                    };
+                    self.page = Page::Settings { row };
+                }
             },
             Action::FocusIndex(index) => {
                 if let Some(game) = self.owned.get().and_then(|games| games.get(index)) {
@@ -1103,6 +1118,14 @@ impl App {
                     };
                     self.actions.push(action);
                 }
+                Page::Settings { row } => {
+                    if let Some(setting) = self.settings_rows().into_iter().nth(row) {
+                        self.actions.push(match setting.kind {
+                            ui::SettingKind::Toggle { action, .. } => action,
+                            ui::SettingKind::Link(page) => Action::Open(page),
+                        });
+                    }
+                }
             },
             Action::SetPlayableOnly(on) => {
                 if self.playable_only != on {
@@ -1138,6 +1161,18 @@ impl App {
             Action::FocusTypeRow(row) => {
                 if let Page::PlayableTypes { .. } = self.page {
                     self.page = Page::PlayableTypes { row };
+                }
+            }
+            Action::SetCoverMarks(on) => {
+                if self.cover_marks != on {
+                    self.cover_marks = on;
+                    self.rebuild_marks();
+                    self.save_settings();
+                }
+            }
+            Action::FocusSettingsRow(row) => {
+                if let Page::Settings { .. } = self.page {
+                    self.page = Page::Settings { row };
                 }
             }
             Action::ClearFinished => self.backend.send(Command::ClearFinished),
@@ -1221,13 +1256,13 @@ impl App {
                         self.actions.push(Action::Open(Page::game(next)));
                     }
                 }
-                Page::PlayableTypes { .. } => {}
+                Page::PlayableTypes { .. } | Page::Settings { .. } => {}
             },
             Action::Search => match self.page {
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
-                Page::Library | Page::PlayableTypes { .. } => {}
+                Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
             },
             Action::Secondary => match self.page {
@@ -1254,6 +1289,7 @@ impl App {
                         self.actions.push(Action::OnlyPlayableType(t.id.clone()));
                     }
                 }
+                Page::Settings { .. } => {}
             },
             Action::ShowQr => {
                 if let Page::Game { id, .. } = self.page
@@ -1305,6 +1341,9 @@ impl App {
                 Page::PlayableTypes { .. } => {
                     self.page = std::mem::replace(&mut self.types_return, Page::Library);
                 }
+                Page::Settings { .. } => {
+                    self.page = std::mem::replace(&mut self.settings_return, Page::Library);
+                }
             },
             Action::MenuFocus(_) => {}
             Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
@@ -1313,6 +1352,11 @@ impl App {
                     && !matches!(self.page, Page::PlayableTypes { .. })
                 {
                     self.types_return = self.page.clone();
+                }
+                if matches!(page, Page::Settings { .. })
+                    && !matches!(self.page, Page::Settings { .. })
+                {
+                    self.settings_return = self.page.clone();
                 }
                 if matches!(page, Page::Game { .. }) {
                     self.detail_visit += 1;
@@ -1737,6 +1781,7 @@ impl App {
     fn save_settings(&self) {
         if let Some(path) = &self.settings_path {
             Settings {
+                cover_marks: self.cover_marks,
                 playable_only: self.playable_only,
                 collections_installed_only: self.collections_installed_only,
                 playable_hidden: self.playable_hidden.clone(),
@@ -2544,6 +2589,10 @@ impl App {
     /// else whether the installed game was tried. Called whenever the
     /// installs, runs, launch failures or reports change.
     fn rebuild_marks(&mut self) {
+        if !self.cover_marks {
+            self.marks.clear();
+            return;
+        }
         let mut marks: std::collections::HashMap<i64, ui::Mark> = self
             .caves
             .iter()
@@ -2590,6 +2639,7 @@ impl App {
             .get(&game.id)
             .filter(|saved| saved.upload_id == upload.id && saved.build_id == build_id);
         let (rating, flags) = match earlier {
+            _ if self.launch_failures.contains_key(cave_id) => (Rating::WontRun, Vec::new()),
             Some(saved) => (
                 saved.rating,
                 saved
@@ -2599,7 +2649,6 @@ impl App {
                     .map(|f| f.id)
                     .collect(),
             ),
-            None if self.launch_failures.contains_key(cave_id) => (Rating::WontRun, Vec::new()),
             None => (Rating::Perfect, Vec::new()),
         };
         let draft = Report {
@@ -2658,9 +2707,9 @@ impl App {
         };
         let mut options = Vec::new();
         if self.reportable(cave) {
-            let reported = cave
-                .game_id()
-                .is_some_and(|id| self.reports.contains_key(&id));
+            let reported = cave.game_id().is_some_and(|id| {
+                reported(&self.reports, &self.caves, id).is_some_and(|(_, current)| current)
+            });
             options.push((
                 if reported {
                     "Update compatibility report"
@@ -2879,19 +2928,46 @@ impl App {
                 busy: matches!(update.state(), self_update::State::Downloading { .. }),
             });
         }
-        if crate::muos::available() {
-            items.push(ui::MenuItem {
-                label: "Playable types".into(),
-                action: Action::Open(Page::PlayableTypes { row: 0 }),
-                busy: false,
-            });
-        }
+        items.push(ui::MenuItem {
+            label: "Settings".into(),
+            action: Action::Open(Page::Settings { row: 0 }),
+            busy: false,
+        });
         items.push(ui::MenuItem {
             label: "Quit".into(),
             action: Action::Quit,
             busy: false,
         });
         items
+    }
+
+    /// The Settings page's rows, top to bottom.
+    fn settings_rows(&self) -> Vec<ui::SettingRow> {
+        let mut rows = vec![ui::SettingRow {
+            group: "Library",
+            label: "Show compatibility marks on covers",
+            kind: ui::SettingKind::Toggle {
+                on: self.cover_marks,
+                action: Action::SetCoverMarks(!self.cover_marks),
+            },
+        }];
+        if crate::muos::available() {
+            rows.push(ui::SettingRow {
+                group: "Library",
+                label: "Playable types",
+                kind: ui::SettingKind::Link(Page::PlayableTypes { row: 0 }),
+            });
+        }
+        rows
+    }
+
+    /// The version lines at the bottom of the Settings page.
+    fn about_rows(&self) -> Vec<(&'static str, String)> {
+        let mut about = vec![("zitch", env!("ZITCH_VERSION").to_string())];
+        if let Some(version) = &self.butler_version {
+            about.push(("butler", version.clone()));
+        }
+        about
     }
 
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
@@ -3076,6 +3152,19 @@ impl App {
                 hints.push((vec![Glyph::Back], "Back".to_string()));
                 hints
             }
+            Page::Settings { row } => {
+                let mut hints = vec![(vec![Glyph::NavigateVertical], "Choose".to_string())];
+                if let Some(setting) = self.settings_rows().get(row) {
+                    let label = match &setting.kind {
+                        ui::SettingKind::Toggle { on: true, .. } => "Turn off",
+                        ui::SettingKind::Toggle { on: false, .. } => "Turn on",
+                        ui::SettingKind::Link(_) => "Open",
+                    };
+                    hints.push((vec![Glyph::Confirm], label.to_string()));
+                }
+                hints.push((vec![Glyph::Back], "Back".to_string()));
+                hints
+            }
         }
     }
 }
@@ -3249,7 +3338,9 @@ impl App {
                             Page::Game { id, .. } => {
                                 self.game(id).is_some_and(|g| !g.url.is_empty())
                             }
-                            Page::Library | Page::PlayableTypes { .. } => false,
+                            Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => {
+                                false
+                            }
                         };
                         if has_url && ui::qr_button(ui, &m).clicked() {
                             self.actions.push(Action::ShowQr);
@@ -3337,6 +3428,20 @@ impl App {
                     return;
                 }
                 match (&self.owned, self.page.clone()) {
+                    // These pages stand on their own, whatever the library's state.
+                    (_, Page::PlayableTypes { row }) => ui::playable_types(
+                        ui,
+                        &m,
+                        crate::model::playable_types(),
+                        &self.playable_hidden,
+                        row,
+                        &mut self.actions,
+                    ),
+                    (_, Page::Settings { row }) => {
+                        let rows = self.settings_rows();
+                        let about = self.about_rows();
+                        ui::settings(ui, &m, &rows, &about, row, &mut self.actions)
+                    }
                     (Loadable::NotLoaded | Loadable::Loading, _) => {
                         ui::loading(ui, &m, &self.status)
                     }
@@ -3481,14 +3586,6 @@ impl App {
                             None => self.actions.push(Action::Back),
                         }
                     }
-                    (Loadable::Loaded(_), Page::PlayableTypes { row }) => ui::playable_types(
-                        ui,
-                        &m,
-                        crate::model::playable_types(),
-                        &self.playable_hidden,
-                        row,
-                        &mut self.actions,
-                    ),
                 }
             })
             .response

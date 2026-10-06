@@ -692,6 +692,10 @@ pub enum Page {
     PlayableTypes {
         row: usize,
     },
+    /// The Settings page, with a row focused.
+    Settings {
+        row: usize,
+    },
 }
 
 /// A collection with the games butler has for it.
@@ -850,6 +854,10 @@ pub enum Action {
     AllPlayableTypes,
     /// Focus a row on the Playable types page; the pointer is already there.
     FocusTypeRow(usize),
+    /// Show or hide the rating and tried marks on covers.
+    SetCoverMarks(bool),
+    /// Focus a row on the Settings page; the pointer is already there.
+    FocusSettingsRow(usize),
     SetTab(Tab),
     /// Narrow the Collections tab to installed games, or show everything.
     SetCollectionsInstalledOnly(bool),

@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 
 /// Missing or unknown fields fall back to defaults, so files written by
 /// other versions still load.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Rating and tried marks on the covers.
+    pub cover_marks: bool,
     /// The "Playable here" filter.
     pub playable_only: bool,
     /// The Collections tab's "Installed" toggle.
@@ -17,6 +19,17 @@ pub struct Settings {
     /// Types "Playable here" leaves out, by scanned platform id. Kept as
     /// what is off so a type the device gains later starts out on.
     pub playable_hidden: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            cover_marks: true,
+            playable_only: false,
+            collections_installed_only: false,
+            playable_hidden: Vec::new(),
+        }
+    }
 }
 
 impl Settings {
@@ -66,6 +79,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zitch-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
         let settings = Settings {
+            cover_marks: false,
             playable_only: true,
             collections_installed_only: true,
             playable_hidden: vec!["rom:snes".to_string()],
@@ -80,6 +94,7 @@ mod tests {
         let parsed: Settings =
             serde_json::from_str(r#"{"playable_only": true, "from_the_future": 1}"#).unwrap();
         assert!(parsed.playable_only);
+        assert!(parsed.cover_marks);
         assert!(!parsed.collections_installed_only);
         assert!(parsed.playable_hidden.is_empty());
     }
