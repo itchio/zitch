@@ -13,6 +13,7 @@ use crate::model::{
     Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
     Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
+    wrap_step,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
@@ -748,13 +749,12 @@ impl App {
         if let Some(prompt) = self.prompt.as_mut() {
             match action {
                 Action::MoveFocus(direction) => {
-                    let last = prompt.choices.len().saturating_sub(1);
+                    let len = prompt.choices.len();
+                    let last = len.saturating_sub(1);
                     match (prompt.stacked, direction) {
-                        (true, Direction::Up) | (false, Direction::Left) => {
-                            prompt.focus = prompt.focus.saturating_sub(1)
-                        }
-                        (true, Direction::Down) | (false, Direction::Right) => {
-                            prompt.focus = (prompt.focus + 1).min(last)
+                        (true, Direction::Up | Direction::Down)
+                        | (false, Direction::Left | Direction::Right) => {
+                            prompt.focus = wrap_step(prompt.focus, len, direction)
                         }
                         // A prompt's list is short; a page reaches its end.
                         (_, Direction::Home | Direction::PageUp | Direction::Top) => {
@@ -858,9 +858,8 @@ impl App {
         if let Some(focus) = self.menu {
             let items = self.menu_items();
             match action {
-                Action::MoveFocus(Direction::Up) => self.menu = Some(focus.saturating_sub(1)),
-                Action::MoveFocus(Direction::Down) => {
-                    self.menu = Some((focus + 1).min(items.len().saturating_sub(1)))
+                Action::MoveFocus(direction @ (Direction::Up | Direction::Down)) => {
+                    self.menu = Some(wrap_step(focus, items.len(), direction))
                 }
                 Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
                 Action::Activate => {
@@ -1018,8 +1017,7 @@ impl App {
                     let last = crate::model::playable_types().len();
                     let page = 6;
                     let row = match direction {
-                        Direction::Up => row.saturating_sub(1),
-                        Direction::Down => (row + 1).min(last),
+                        Direction::Up | Direction::Down => wrap_step(row, last + 1, direction),
                         Direction::PageUp => row.saturating_sub(page),
                         Direction::PageDown => (row + page).min(last),
                         Direction::Top | Direction::Home => 0,
@@ -1029,10 +1027,10 @@ impl App {
                     self.page = Page::PlayableTypes { row };
                 }
                 Page::Settings { row } => {
-                    let last = self.settings_rows().len().saturating_sub(1);
+                    let len = self.settings_rows().len();
+                    let last = len.saturating_sub(1);
                     let row = match direction {
-                        Direction::Up => row.saturating_sub(1),
-                        Direction::Down => (row + 1).min(last),
+                        Direction::Up | Direction::Down => wrap_step(row, len, direction),
                         Direction::PageUp | Direction::Top | Direction::Home => 0,
                         Direction::PageDown | Direction::Bottom | Direction::End => last,
                         Direction::Left | Direction::Right => row,
@@ -3764,8 +3762,7 @@ fn step_download_row(
 ) -> (usize, usize) {
     let last = rows.len().saturating_sub(1);
     let row = match direction {
-        Direction::Up => row.saturating_sub(1),
-        Direction::Down => (row + 1).min(last),
+        Direction::Up | Direction::Down => wrap_step(row, rows.len(), direction),
         // The list is short; a page reaches its end.
         Direction::Home | Direction::PageUp | Direction::Top => 0,
         Direction::End | Direction::PageDown | Direction::Bottom => last,
@@ -3843,8 +3840,9 @@ mod tests {
         assert_eq!(step((0, 0), Direction::Right), (0, 1));
         assert_eq!(step((0, 1), Direction::Right), (0, 1));
         assert_eq!(step((0, 1), Direction::Down), (1, 1));
-        assert_eq!(step((1, 1), Direction::Down), (1, 1));
+        assert_eq!(step((1, 1), Direction::Down), (0, 1));
         assert_eq!(step((1, 0), Direction::Up), (0, 0));
+        assert_eq!(step((0, 0), Direction::Up), (1, 0));
         assert_eq!(step((1, 0), Direction::Home), (0, 0));
     }
 }

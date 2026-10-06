@@ -11,6 +11,7 @@ pub use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, PlayableType,
     Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here, scanned_platform_words,
+    wrap_step,
 };
 use crate::page_info::PageInfo;
 use crate::qr::QrCode;
@@ -3048,8 +3049,7 @@ impl ReportView {
         let flags = self.flag_rows();
         let group_of = |i: usize| report::flags().nth(i).map(|(g, _)| g);
         self.focus = match direction {
-            Direction::Up => self.focus.saturating_sub(1),
-            Direction::Down => (self.focus + 1).min(last),
+            Direction::Up | Direction::Down => wrap_step(self.focus, last + 1, direction),
             Direction::Left | Direction::Right if self.picked && self.focus < flags => {
                 let group = group_of(self.focus).unwrap_or(0);
                 let target = if direction == Direction::Right {

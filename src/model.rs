@@ -762,6 +762,20 @@ impl<T> Loadable<T> {
     }
 }
 
+/// One step through a list of `len` rows that wraps at both ends: up or
+/// left from the first row lands on the last, down or right from the
+/// last on the first. Other directions leave `index` as it is.
+pub fn wrap_step(index: usize, len: usize, direction: Direction) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    match direction {
+        Direction::Up | Direction::Left => (index + len - 1) % len,
+        Direction::Down | Direction::Right => (index + 1) % len,
+        _ => index,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
@@ -918,6 +932,16 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_wrap_at_both_ends() {
+        assert_eq!(wrap_step(0, 3, Direction::Up), 2);
+        assert_eq!(wrap_step(2, 3, Direction::Down), 0);
+        assert_eq!(wrap_step(1, 3, Direction::Down), 2);
+        assert_eq!(wrap_step(0, 1, Direction::Left), 0);
+        assert_eq!(wrap_step(1, 3, Direction::Home), 1);
+        assert_eq!(wrap_step(4, 0, Direction::Down), 0);
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
