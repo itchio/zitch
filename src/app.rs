@@ -56,10 +56,10 @@ pub struct App {
     input_seen: bool,
     /// The focused item while the menu drawer is open.
     menu: Option<usize>,
-    /// Frames of the "Quitting" overlay left to show before the window is
-    /// asked to close. The backend join that follows the close blocks the
-    /// last frame on screen, so it must be one that already says Quitting;
-    /// a few frames also let a pending screenshot read back first.
+    /// Frames of black left to show, once the screen has powered off,
+    /// before the window is asked to close. The backend join that follows
+    /// the close blocks the last frame on screen, so it must be a black
+    /// one; a few frames also let a pending screenshot read back first.
     quitting: Option<u32>,
     /// The backend's latest progress line, shown while the library loads.
     status: String,
@@ -171,6 +171,7 @@ pub struct App {
     pub rows: ui::Rows,
     shot: Option<Shot>,
     intro: crate::intro::Intro,
+    power_off: crate::intro::PowerOff,
     /// Where choices are saved; none for a screenshot run, which reads
     /// them but leaves them as they were.
     settings_path: Option<PathBuf>,
@@ -305,7 +306,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
 }
 
 impl App {
-    /// Frames the "Quitting" overlay is held before the window closes.
+    /// Frames the powered-off screen is held before the window closes.
     /// Long enough to paint and to finish a screenshot readback.
     const QUIT_FRAMES: u32 = 3;
 
@@ -409,6 +410,7 @@ impl App {
             rows: ui::Rows::default(),
             settings_path: shot.is_none().then_some(settings_path),
             intro: crate::intro::Intro::new(shot.is_none()),
+            power_off: crate::intro::PowerOff::new(shot.is_none()),
             shot,
             emulate,
             low_spec,
@@ -3266,6 +3268,7 @@ impl App {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
+        self.intro.tick(ui.ctx());
         // Pixels: an emulated screen is laid out at 1x, a real one may not be.
         let pixels = if self.emulate.is_some() {
             screen.size()
@@ -3645,11 +3648,13 @@ impl App {
         }
         self.intro.draw(ui.ctx(), ui.max_rect(), self.glyphs.logo());
         if let Some(frames) = self.quitting {
-            ui::curtain(ui.ctx(), &m, ui.max_rect(), "Quitting\u{2026}");
-            if frames == 0 {
+            let black = self.power_off.draw(ui.ctx(), ui.max_rect());
+            if black && frames == 0 {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
-                self.quitting = Some(frames - 1);
+                if black {
+                    self.quitting = Some(frames - 1);
+                }
                 ui.ctx().request_repaint();
             }
         }

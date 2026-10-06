@@ -897,7 +897,13 @@ pub fn library(
                         updatable: updatable.contains(&game.id),
                         mark: marks.get(&game.id).copied(),
                     };
-                    draw_tile(ui, m, covers, rect, cover_height, tile, animation);
+                    // Tiles rise into place one after another as the intro ends.
+                    let delay = 60.0 + 70.0 * row.min(3) as f32 + 35.0 * (col - first) as f32;
+                    let entered = crate::intro::entered(ui.ctx(), delay, 220.0);
+                    let mut rising = ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()));
+                    rising.set_opacity(entered);
+                    let rect = rect.translate(vec2(0.0, (1.0 - entered) * m.space(26.0)));
+                    draw_tile(&rising, m, covers, rect, cover_height, tile, animation);
                 }
             });
             // The strip lives in a child ui; move the parent's cursor past it.
@@ -3826,15 +3832,18 @@ pub fn footer(
         )
         .show_separator_line(false)
         .show(ui, |ui| {
+            let rect = ui.available_rect_before_wrap();
+            // The hints slide up from under the screen as the intro ends.
+            let entered = crate::intro::entered(ui.ctx(), 120.0, 220.0);
+            let drop = vec2(0.0, (1.0 - entered) * m.space(44.0));
+            let mut builder = egui::UiBuilder::new().max_rect(rect.translate(drop));
             if raised {
                 let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("footer-hints"));
-                let rect = ui.available_rect_before_wrap();
-                let mut child = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(rect));
-                footer_hints(&mut child, m, glyphs, mode, hints, drawer);
-                ui.allocate_rect(child.min_rect(), Sense::hover());
-            } else {
-                footer_hints(ui, m, glyphs, mode, hints, false);
+                builder = builder.layer_id(layer);
             }
+            let mut child = ui.new_child(builder);
+            footer_hints(&mut child, m, glyphs, mode, hints, raised && drawer);
+            ui.allocate_rect(child.min_rect().translate(-drop), Sense::hover());
         });
 }
 
@@ -4187,9 +4196,10 @@ pub fn tab_strip(
                         .galley(pill.center() - count.size() / 2.0, count, BG);
                 }
                 if selected {
-                    let line = Rect::from_min_max(
-                        pos2(rect.left(), rect.bottom() - m.space(3.0)),
-                        rect.right_bottom(),
+                    let grown = crate::intro::entered(ui.ctx(), 200.0, 220.0);
+                    let line = Rect::from_center_size(
+                        pos2(rect.center().x, rect.bottom() - m.space(1.5)),
+                        vec2(rect.width() * grown, m.space(3.0)),
                     );
                     ui.painter()
                         .rect_filled(line, CornerRadius::same(2), ACCENT);
