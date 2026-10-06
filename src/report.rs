@@ -151,13 +151,24 @@ pub fn flags() -> impl Iterator<Item = (usize, &'static Flag)> {
 pub const STDERR_TAIL: usize = 4096;
 const LAUNCH_TARGET_MAX: usize = 512;
 
+/// What ran the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Strategy {
+    /// butler ran the game's own build.
+    Native,
+    /// Our LÖVE runtime.
+    Love,
+    /// The firmware's RetroArch.
+    Retroarch,
+}
+
 /// What zitch saw of one run, without asking the player. Unknown fields
 /// stay out of the report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Run {
-    /// `native`, `love` or `retroarch`.
-    pub strategy: Option<String>,
+    pub strategy: Option<Strategy>,
     /// The RetroArch core.
     pub core: Option<String>,
     pub exit_code: Option<i32>,
@@ -436,7 +447,7 @@ mod tests {
             rating: Rating::Perfect,
             flags: Vec::new(),
             run: Run {
-                strategy: Some("retroarch".into()),
+                strategy: Some(Strategy::Retroarch),
                 core: Some("mgba_libretro.so".into()),
                 seconds: Some(95),
                 launch_target: Some("rom:gba Game.gba".into()),

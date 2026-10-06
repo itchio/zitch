@@ -22,8 +22,10 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::butlerd::types::{Arch, Candidate, Engine, EngineInfo, Flavor, LinuxInfo};
-use crate::report::{Run, STDERR_TAIL};
+use crate::butlerd::types::{
+    Arch, Candidate, Engine, EngineInfo, Flavor, LaunchStrategy, LaunchTarget, LinuxInfo,
+};
+use crate::report::{Run, STDERR_TAIL, Strategy};
 
 const LAUNCH_SCRIPT: &str = "/opt/muos/script/mux/launch.sh";
 /// Where Andromeda keeps the launch handoff files; Jacaranda uses /tmp.
@@ -291,6 +293,73 @@ pub fn content_for(candidate: &Candidate, path: PathBuf) -> Result<Content, Stri
         Some(system) => Ok(Content::Rom { path, system }),
         None => Err(format!("no emulator for {id} on this device")),
     }
+}
+
+/// Something `Launch.GetTargets` listed that this device can run: the
+/// name `Launch` matches a target by (the action's path, relative to the
+/// install folder) and what to call it in a pick.
+pub struct LaunchChoice {
+    pub target: String,
+    pub label: String,
+}
+
+/// Sorts butler's launch targets into what runs here, in the order to
+/// offer them, and why the rest do not. A native build is the developer's
+/// own runtime for the game, which beats ours: a PICO-8 export carries
+/// the real player, where the firmware's fake-08 gets some carts wrong. A
+/// fused LÖVE exe is listed once as a native build and once as the
+/// payload inside; the path tells them apart.
+pub fn launch_choices(targets: &[LaunchTarget]) -> (Vec<LaunchChoice>, Vec<String>) {
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(path)
+            .to_string()
+    };
+    let mut natives = Vec::new();
+    let mut payloads: Vec<(String, LaunchChoice)> = Vec::new();
+    let mut unrunnable = Vec::new();
+    for target in targets {
+        let Some(strategy) = target.strategy.as_ref() else {
+            continue;
+        };
+        let Some(candidate) = strategy.candidate.as_ref() else {
+            continue;
+        };
+        let path = strategy.full_target_path.clone();
+        let action_path = target
+            .action
+            .as_ref()
+            .map_or(candidate.path.clone(), |a| a.path.clone());
+        match strategy.strategy {
+            LaunchStrategy::Runtime => match content_for(candidate, PathBuf::from(&path)) {
+                Ok(content) => {
+                    if !payloads.iter().any(|(p, _)| *p == path) {
+                        let choice = LaunchChoice {
+                            label: format!("{} ({})", file_name(&path), content.label()),
+                            target: action_path,
+                        };
+                        payloads.push((path, choice));
+                    }
+                }
+                Err(reason) => unrunnable.push(reason),
+            },
+            LaunchStrategy::Native => {
+                let blocked = candidate.linux_info.as_ref().and_then(native_blocker);
+                match blocked {
+                    Some(reason) => unrunnable.push(format!("{} {reason}", file_name(&path))),
+                    None => natives.push(LaunchChoice {
+                        label: format!("{} (Linux build)", file_name(&path)),
+                        target: action_path,
+                    }),
+                }
+            }
+            _ => {}
+        }
+    }
+    natives.extend(payloads.into_iter().map(|(_, choice)| choice));
+    (natives, unrunnable)
 }
 
 /// Why a Linux build cannot run here, from what butler read out of its
@@ -838,13 +907,13 @@ pub fn launch(
             if !args.is_empty() {
                 log::warn!("ignoring manifest arguments {args:?} for a ROM");
             }
-            run.strategy = Some("retroarch".into());
+            run.strategy = Some(Strategy::Retroarch);
             run.core = Some(system.core.clone());
             run.launch_target = Some(format!("rom:{} {file}", system.id));
             launch_rom(name, system, path, env)
         }
         Content::Love { path } => {
-            run.strategy = Some("love".into());
+            run.strategy = Some(Strategy::Love);
             run.launch_target = Some(match love_version() {
                 Some(version) => format!("love:{version} {file}"),
                 None => format!("love {file}"),

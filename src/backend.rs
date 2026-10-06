@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,7 @@ use crate::model::{
     GameUpdate, LaunchFailure, Launched, Profile, Prompt, PromptOrigin, UploadDetail, UploadExt,
     UserExt, scans_decide, upload_detail, upload_platform_names, upload_runs_here,
 };
-use crate::report::{Report, Run};
+use crate::report::{Report, Run, Strategy};
 
 pub struct Config {
     pub butler: PathBuf,
@@ -360,15 +360,21 @@ fn butler_version_label(version: &VersionGetResult) -> String {
     }
 }
 
+impl Config {
+    fn spawn_daemon(&self) -> Result<Daemon> {
+        Daemon::spawn(
+            &self.butler,
+            &self.dbpath,
+            &self.api_url,
+            &self.game_env,
+            self.low_power,
+        )
+    }
+}
+
 fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Result<()> {
     emit.status("Starting butler");
-    let link: Link = Arc::new(Mutex::new(Arc::new(Daemon::spawn(
-        &config.butler,
-        &config.dbpath,
-        &config.api_url,
-        &config.game_env,
-        config.low_power,
-    )?)));
+    let link: Link = Arc::new(Mutex::new(Arc::new(config.spawn_daemon()?)));
     let mut client = connect(&link)?;
     emit.status(format!(
         "Connected to butlerd at {}",
@@ -440,7 +446,6 @@ fn session(
     let stopping = Arc::new(AtomicBool::new(false));
     let driver = spawn_driver(Arc::clone(link), emit.clone(), Arc::clone(&stopping));
     let prompts = Prompts::default();
-    let launches = Launches::default();
     let installer = spawn_installer(
         Arc::clone(link),
         emit.clone(),
@@ -460,428 +465,500 @@ fn session(
         retry: Arc::new(AtomicBool::new(false)),
     };
     sync.spawn(link, emit);
-    let mut next_probe = Instant::now() + PROBE_EVERY;
-    let mut next_update_check = Instant::now() + UPDATE_EVERY;
-
-    let end = loop {
-        // Anything can take butler down: the kernel's memory killer on a
-        // small device, a crash, a firmware reaping background processes.
-        if !current(link).alive() {
-            emit.status("butler exited; restarting");
-            match Daemon::spawn(
-                &config.butler,
-                &config.dbpath,
-                &config.api_url,
-                &config.game_env,
-                config.low_power,
-            ) {
-                Ok(daemon) => {
-                    *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
-                    *client = match connect(link) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            emit.send(Event::Error(format!("reconnecting to butler: {error:#}")));
-                            if wait_to_retry(commands) {
-                                break SessionEnd::Shutdown;
-                            }
-                            continue;
-                        }
-                    };
-                    if let Err(error) = client.call(ProfileUseSavedLoginParams {
-                        profile_id: profile.id,
-                    }) {
-                        log::warn!("signing in again: {error:#}");
-                    }
-                    emit.status("butler restarted");
-                    refresh_caves(client, emit);
-                    refresh_downloads(client, emit);
-                    // Whatever the old daemon was checking died with it.
-                    sync.spawn(link, emit);
-                }
-                Err(error) => {
-                    emit.send(Event::Error(format!("restarting butler: {error:#}")));
-                    if wait_to_retry(commands) {
-                        break SessionEnd::Shutdown;
-                    }
-                    continue;
-                }
-            }
-        }
-        let due = !sync.online.load(Ordering::Relaxed) || sync.retry.load(Ordering::Relaxed);
-        if due && Instant::now() >= next_probe {
-            sync.spawn(link, emit);
-            next_probe = Instant::now() + PROBE_EVERY;
-        }
-        if Instant::now() >= next_update_check {
-            next_update_check = Instant::now() + UPDATE_EVERY;
-            // The sync pass checks on its own once the network is back.
-            if sync.online.load(Ordering::Relaxed) {
-                spawn_op(
-                    "update-check".into(),
-                    Arc::clone(link),
-                    emit.clone(),
-                    |error| Event::SyncFailed(format!("{error:#}")),
-                    |client, emit| check_updates(client, emit).map(|_| ()),
-                );
-            }
-        }
-        match commands.recv_timeout(IDLE_TICK) {
-            Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break SessionEnd::Shutdown;
-            }
-            Ok(Command::ChangeUser) => {
-                emit.status("Signing out");
-                if let Err(error) = client.call(ProfileForgetParams {
-                    profile_id: profile.id,
-                }) {
-                    log::warn!("forgetting profile {}: {error:#}", profile.id);
-                }
-                break SessionEnd::ChangeUser;
-            }
-            Ok(Command::Install { game }) => installer.push(game),
-            Ok(Command::SkipInstall { game_id }) => installer.skip(game_id),
-            Ok(Command::CollectionPage {
-                collection_id,
-                cursor,
-            }) => {
-                let profile_id = profile.id;
-                spawn_op(
-                    format!("collection-{collection_id}"),
-                    Arc::clone(link),
-                    emit.clone(),
-                    move |error| Event::CollectionPageFailed {
-                        collection_id,
-                        error: format!("{error:#}"),
-                    },
-                    move |client, emit| {
-                        let page =
-                            collection_page(client, profile_id, collection_id, Some(cursor), None)?;
-                        emit.send(Event::CollectionPage {
-                            collection_id,
-                            games: page.0,
-                            next_cursor: page.1,
-                        });
-                        Ok(())
-                    },
-                );
-            }
-            Ok(Command::CollectionsFiltered {
-                filter,
-                ask,
-                collection_ids,
-            }) => {
-                let profile_id = profile.id;
-                // Not reaching butler at all fails every collection asked.
-                let all = collection_ids.clone();
-                let failed_filter = filter.clone();
-                spawn_op(
-                    "collections-filtered".into(),
-                    Arc::clone(link),
-                    emit.clone(),
-                    move |error| {
-                        log::warn!("filtering collections: {error:#}");
-                        Event::CollectionsFilterFailed {
-                            filter: failed_filter.clone(),
-                            ask,
-                            collection_ids: all.clone(),
-                        }
-                    },
-                    move |client, emit| {
-                        let query = filter.to_butler();
-                        for collection_id in collection_ids {
-                            match filtered_games(client, profile_id, collection_id, &query) {
-                                Ok(games) => emit.send(Event::CollectionFiltered {
-                                    filter: filter.clone(),
-                                    ask,
-                                    collection_id,
-                                    games,
-                                }),
-                                Err(error) => {
-                                    log::warn!("filtering collection {collection_id}: {error:#}");
-                                    emit.send(Event::CollectionsFilterFailed {
-                                        filter: filter.clone(),
-                                        ask,
-                                        collection_ids: vec![collection_id],
-                                    });
-                                }
-                            }
-                        }
-                        Ok(())
-                    },
-                );
-            }
-            Ok(Command::Discard {
-                download_id,
-                confirm: None,
-            }) => discard(client, emit, download_id),
-            Ok(Command::Discard {
-                download_id,
-                confirm: Some(title),
-            }) => {
-                let prompts = prompts.clone();
-                spawn_op(
-                    format!("discard-{download_id}"),
-                    Arc::clone(link),
-                    emit.clone(),
-                    {
-                        let download_id = download_id.clone();
-                        move |error| Event::DiscardFailed {
-                            download_id: download_id.clone(),
-                            error: format!("{error:#}"),
-                        }
-                    },
-                    move |client, emit| {
-                        // Keep comes first so a reflex press keeps the download.
-                        let confirmed = prompts.ask(
-                            emit,
-                            &format!("Cancel downloading {title}?"),
-                            "What has downloaded so far is thrown away.",
-                            &["Keep downloading", "Cancel download"],
-                        ) == Some(1);
-                        if confirmed {
-                            emit.send(Event::Discarding {
-                                download_id: download_id.clone(),
-                            });
-                            discard(client, emit, download_id);
-                        }
-                        Ok(())
-                    },
-                );
-            }
-            Ok(Command::Retry { download_id }) => {
-                if let Err(error) = client.call(DownloadsRetryParams { download_id }) {
-                    emit.send(Event::Error(format!(
-                        "Couldn't retry the download: {error:#}"
-                    )));
-                }
-                refresh_downloads(client, emit);
-            }
-            Ok(Command::ClearFinished) => {
-                if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
-                    emit.send(Event::Error(format!(
-                        "Couldn't clear finished downloads: {error:#}"
-                    )));
-                }
-                refresh_downloads(client, emit);
-            }
-            Ok(Command::Uninstall { cave_id, title }) => {
-                let prompts = prompts.clone();
-                spawn_op(
-                    format!("uninstall-{cave_id}"),
-                    Arc::clone(link),
-                    emit.clone(),
-                    |error| Event::UninstallFinished {
-                        result: Err(format!("{error:#}")),
-                    },
-                    move |client, emit| {
-                        // Cancel comes first so a reflex press keeps the game.
-                        let confirmed = prompts.ask(
-                            emit,
-                            &format!("Uninstall {title}?"),
-                            "Removes the installed files. Anything the game saved elsewhere stays.",
-                            &["Cancel", "Uninstall"],
-                        ) == Some(1);
-                        if !confirmed {
-                            return Ok(());
-                        }
-                        client.call(UninstallPerformParams {
-                            cave_id: cave_id.clone(),
-                            hard: None,
-                        })?;
-                        emit.send(Event::UninstallFinished { result: Ok(()) });
-                        refresh_caves(client, emit);
-                        Ok(())
-                    },
-                );
-            }
-            Ok(Command::Launch { cave_id }) => {
-                if launches.any() {
-                    emit.send(Event::LaunchFinished {
-                        cave_id,
-                        outcome: Launched::Failed(LaunchFailure {
-                            message: "another game is still running".into(),
-                            log: Vec::new(),
-                        }),
-                        run: None,
-                    });
-                    continue;
-                }
-                crate::muos::begin();
-                launches.begin(&cave_id);
-                let config = Arc::clone(config);
-                let prompts = prompts.clone();
-                let launches = launches.clone();
-                let profile_id = profile.id;
-                spawn_op(
-                    format!("launch-{cave_id}"),
-                    Arc::clone(link),
-                    emit.clone(),
-                    {
-                        let cave_id = cave_id.clone();
-                        move |error| Event::LaunchFinished {
-                            cave_id: cave_id.clone(),
-                            outcome: Launched::Failed(LaunchFailure {
-                                // The innermost error is butler's own words.
-                                message: error.root_cause().to_string(),
-                                log: Vec::new(),
-                            }),
-                            run: None,
-                        }
-                    },
-                    move |client, emit| {
-                        // Every way out undoes what starting did.
-                        let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
-                            launches.forget(&cave_id);
-                            crate::muos::foreground_back();
-                            emit.send(Event::LaunchFinished {
-                                cave_id: cave_id.clone(),
-                                outcome,
-                                run,
-                            });
-                        };
-                        let (target, name) = match plan_launch(client, &prompts, &cave_id, emit) {
-                            Ok(Plan::Launch { target, name }) => (target, name),
-                            Ok(Plan::Cancelled) => {
-                                finish(emit, Launched::Cancelled, None);
-                                return Ok(());
-                            }
-                            Err(failure) => {
-                                finish(emit, Launched::Failed(failure), None);
-                                return Ok(());
-                            }
-                        };
-                        let quit = launches.track(&cave_id, client)?;
-                        let (result, run) = launch(
-                            client,
-                            &config,
-                            &prompts,
-                            profile_id,
-                            &cave_id,
-                            target.as_deref(),
-                            &name,
-                            emit,
-                        );
-                        // Play time and last-played change with every run.
-                        refresh_caves(client, emit);
-                        // Ending the connection is how the user quits; the
-                        // call's failure is then the expected outcome.
-                        let outcome = match result {
-                            Err(failure) if !quit.load(Ordering::Relaxed) => {
-                                log::warn!("launch failed: {}", failure.message);
-                                for line in &failure.log {
-                                    log::warn!("  {line}");
-                                }
-                                Launched::Failed(failure)
-                            }
-                            _ => Launched::Ran,
-                        };
-                        finish(emit, outcome, Some(run));
-                        Ok(())
-                    },
-                );
-            }
-            Ok(Command::Report(report)) => {
-                let config = Arc::clone(config);
-                let profile_id = profile.id;
-                let game_id = report.game_id;
-                let thread_emit = emit.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("report".into())
-                    .spawn(move || {
-                        let emit = thread_emit;
-                        let key = match &config.api_key {
-                            Some(key) => Ok(key.clone()),
-                            None => crate::report::saved_api_key(&config.dbpath, profile_id),
-                        };
-                        let sent =
-                            key.and_then(|key| crate::report::send(&config.api_url, &key, &report));
-                        if let Err(error) = &sent {
-                            log::warn!("compatibility report not sent: {error:#}");
-                        }
-                        emit.send(Event::ReportSent {
-                            game_id: report.game_id,
-                            result: sent.map_err(|e| format!("{e:#}")),
-                        });
-                    });
-                if let Err(error) = spawned {
-                    emit.send(Event::ReportSent {
-                        game_id,
-                        result: Err(format!("starting the report thread: {error}")),
-                    });
-                }
-            }
-            Ok(Command::QuitGame { cave_id }) => {
-                launches.quit(&cave_id);
-                // A payload the firmware runs is our own child, not butler's.
-                crate::muos::stop();
-            }
-            Ok(Command::CollectionsWanted(ids)) => {
-                *sync
-                    .collections_wanted
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = ids;
-            }
-            Ok(Command::RefreshLibrary) => {
-                sync.collections_forced.store(true, Ordering::Relaxed);
-                next_update_check = Instant::now() + UPDATE_EVERY;
-                emit.status("Refreshing library");
-                sync.spawn(link, emit);
-            }
-            Ok(Command::CheckUpdates) => {
-                next_update_check = Instant::now() + UPDATE_EVERY;
-                spawn_op(
-                    "update-check".into(),
-                    Arc::clone(link),
-                    emit.clone(),
-                    |error| Event::UpdateCheckFailed(format!("{error:#}")),
-                    move |client, emit| check_updates(client, emit).map(|_| ()),
-                );
-            }
-            Ok(Command::Update { update }) => {
-                if update.direct {
-                    if let Err(error) = queue_update(client, &update, 0) {
-                        log::error!("{error:#}");
-                        emit.send(Event::Error(format!("{error:#}")));
-                    }
-                    refresh_downloads(client, emit);
-                } else {
-                    // Indirect updates are butler's guesses, so the user
-                    // picks. Asking blocks on the answer, which arrives
-                    // through this loop.
-                    let prompts = prompts.clone();
-                    spawn_op(
-                        format!("update-{}", update.cave_id),
-                        Arc::clone(link),
-                        emit.clone(),
-                        |error| Event::Error(format!("{error:#}")),
-                        move |client, emit| {
-                            if let Some(choice) = pick_update(client, &prompts, emit, &update) {
-                                queue_update(client, &update, choice)?;
-                                refresh_downloads(client, emit);
-                            }
-                            Ok(())
-                        },
-                    );
-                }
-            }
-            Ok(Command::Answer { prompt, choice }) => prompts.answer(prompt, choice),
-            // Only the sign-in page sends these, and that page is gone.
-            Ok(Command::RetryLogin | Command::SetShareDeviceInfo(_)) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        for incoming in client.poll() {
-            log_incoming(client, incoming);
-        }
+    let mut session = Session {
+        config,
+        link,
+        client,
+        emit,
+        commands,
+        profile,
+        prompts,
+        launches: Launches::default(),
+        installer,
+        sync,
+        next_probe: Instant::now() + PROBE_EVERY,
+        next_update_check: Instant::now() + UPDATE_EVERY,
     };
+    let end = session.run();
 
     // An op thread waiting on a question has no one left to answer it.
-    prompts.close_all();
+    session.prompts.close_all();
     stopping.store(true, Ordering::Relaxed);
-    if let Err(error) = client.call(DownloadsDriveCancelParams {}) {
+    if let Err(error) = session.client.call(DownloadsDriveCancelParams {}) {
         log::debug!("stopping the download driver: {error:#}");
     }
     let _ = driver.join();
     Ok(end)
+}
+
+/// What one signed-in profile's loop shares with the work it starts.
+struct Session<'a> {
+    config: &'a Arc<Config>,
+    link: &'a Link,
+    client: &'a mut Client,
+    emit: &'a Emitter,
+    commands: &'a mpsc::Receiver<Command>,
+    profile: Profile,
+    prompts: Prompts,
+    launches: Launches,
+    installer: Installer,
+    sync: Sync,
+    next_probe: Instant,
+    next_update_check: Instant,
+}
+
+impl Session<'_> {
+    /// Takes commands until the app shuts down or the user signs out,
+    /// bringing butler back whenever it dies.
+    fn run(&mut self) -> SessionEnd {
+        loop {
+            if let Some(end) = self.revive_butler() {
+                return end;
+            }
+            self.tick();
+            match self.commands.recv_timeout(IDLE_TICK) {
+                Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return SessionEnd::Shutdown;
+                }
+                Ok(Command::ChangeUser) => {
+                    self.sign_out();
+                    return SessionEnd::ChangeUser;
+                }
+                Ok(command) => self.handle(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            for incoming in self.client.poll() {
+                log_incoming(self.client, incoming);
+            }
+        }
+    }
+
+    /// Runs a butlerd call on its own connection and thread; see
+    /// [`spawn_op`].
+    fn op<F, E>(&self, name: String, fail: E, op: F)
+    where
+        F: FnOnce(&Client, &Emitter) -> Result<()> + Send + 'static,
+        E: Fn(anyhow::Error) -> Event + Send + std::marker::Sync + 'static,
+    {
+        spawn_op(name, Arc::clone(self.link), self.emit.clone(), fail, op);
+    }
+
+    /// Anything can take butler down: the kernel's memory killer on a
+    /// small device, a crash, a firmware reaping background processes.
+    /// Brings it back when it has gone, pausing between tries. Returns
+    /// how the session ends when shutdown comes while waiting.
+    fn revive_butler(&mut self) -> Option<SessionEnd> {
+        if current(self.link).alive() {
+            return None;
+        }
+        self.emit.status("butler exited; restarting");
+        // Until a fresh daemon is up and connected; a daemon that came up
+        // but could not be reached is replaced along with the old client.
+        loop {
+            let daemon = match self.config.spawn_daemon() {
+                Ok(daemon) => daemon,
+                Err(error) => {
+                    self.emit
+                        .send(Event::Error(format!("restarting butler: {error:#}")));
+                    if wait_to_retry(self.commands) {
+                        return Some(SessionEnd::Shutdown);
+                    }
+                    continue;
+                }
+            };
+            *self.link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
+            match connect(self.link) {
+                Ok(client) => {
+                    *self.client = client;
+                    break;
+                }
+                Err(error) => {
+                    self.emit
+                        .send(Event::Error(format!("reconnecting to butler: {error:#}")));
+                    if wait_to_retry(self.commands) {
+                        return Some(SessionEnd::Shutdown);
+                    }
+                }
+            }
+        }
+        if let Err(error) = self.client.call(ProfileUseSavedLoginParams {
+            profile_id: self.profile.id,
+        }) {
+            log::warn!("signing in again: {error:#}");
+        }
+        self.emit.status("butler restarted");
+        refresh_caves(self.client, self.emit);
+        refresh_downloads(self.client, self.emit);
+        // Whatever the old daemon was checking died with it.
+        self.sync.spawn(self.link, self.emit);
+        None
+    }
+
+    /// The timed work: probing for the network while offline, and the
+    /// periodic update check.
+    fn tick(&mut self) {
+        let sync = &self.sync;
+        let due = !sync.online.load(Ordering::Relaxed) || sync.retry.load(Ordering::Relaxed);
+        if due && Instant::now() >= self.next_probe {
+            sync.spawn(self.link, self.emit);
+            self.next_probe = Instant::now() + PROBE_EVERY;
+        }
+        if Instant::now() >= self.next_update_check {
+            self.next_update_check = Instant::now() + UPDATE_EVERY;
+            // The sync pass checks on its own once the network is back.
+            if sync.online.load(Ordering::Relaxed) {
+                self.check_updates(|error| Event::SyncFailed(format!("{error:#}")));
+            }
+        }
+    }
+
+    fn sign_out(&mut self) {
+        self.emit.status("Signing out");
+        if let Err(error) = self.client.call(ProfileForgetParams {
+            profile_id: self.profile.id,
+        }) {
+            log::warn!("forgetting profile {}: {error:#}", self.profile.id);
+        }
+    }
+
+    fn handle(&mut self, command: Command) {
+        match command {
+            Command::Shutdown | Command::ChangeUser => {}
+            Command::Install { game } => self.installer.push(game),
+            Command::SkipInstall { game_id } => self.installer.skip(game_id),
+            Command::CollectionPage {
+                collection_id,
+                cursor,
+            } => self.collection_page(collection_id, cursor),
+            Command::CollectionsFiltered {
+                filter,
+                ask,
+                collection_ids,
+            } => self.collections_filtered(filter, ask, collection_ids),
+            Command::Discard {
+                download_id,
+                confirm: None,
+            } => discard(self.client, self.emit, download_id),
+            Command::Discard {
+                download_id,
+                confirm: Some(title),
+            } => self.discard_after_asking(download_id, title),
+            Command::Retry { download_id } => {
+                if let Err(error) = self.client.call(DownloadsRetryParams { download_id }) {
+                    self.emit.send(Event::Error(format!(
+                        "Couldn't retry the download: {error:#}"
+                    )));
+                }
+                refresh_downloads(self.client, self.emit);
+            }
+            Command::ClearFinished => {
+                if let Err(error) = self.client.call(DownloadsClearFinishedParams {}) {
+                    self.emit.send(Event::Error(format!(
+                        "Couldn't clear finished downloads: {error:#}"
+                    )));
+                }
+                refresh_downloads(self.client, self.emit);
+            }
+            Command::Uninstall { cave_id, title } => self.uninstall(cave_id, title),
+            Command::Launch { cave_id } => self.launch(cave_id),
+            Command::Report(report) => self.report(*report),
+            Command::QuitGame { cave_id } => {
+                self.launches.quit(&cave_id);
+                // A payload the firmware runs is our own child, not butler's.
+                crate::muos::stop();
+            }
+            Command::CollectionsWanted(ids) => {
+                *self
+                    .sync
+                    .collections_wanted
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = ids;
+            }
+            Command::RefreshLibrary => {
+                self.sync.collections_forced.store(true, Ordering::Relaxed);
+                self.next_update_check = Instant::now() + UPDATE_EVERY;
+                self.emit.status("Refreshing library");
+                self.sync.spawn(self.link, self.emit);
+            }
+            Command::CheckUpdates => {
+                self.next_update_check = Instant::now() + UPDATE_EVERY;
+                self.check_updates(|error| Event::UpdateCheckFailed(format!("{error:#}")));
+            }
+            Command::Update { update } => self.update(*update),
+            Command::Answer { prompt, choice } => self.prompts.answer(prompt, choice),
+            // Only the sign-in page sends these, and that page is gone.
+            Command::RetryLogin | Command::SetShareDeviceInfo(_) => {}
+        }
+    }
+
+    fn collection_page(&self, collection_id: i64, cursor: String) {
+        let profile_id = self.profile.id;
+        self.op(
+            format!("collection-{collection_id}"),
+            move |error| Event::CollectionPageFailed {
+                collection_id,
+                error: format!("{error:#}"),
+            },
+            move |client, emit| {
+                let page = collection_page(client, profile_id, collection_id, Some(cursor), None)?;
+                emit.send(Event::CollectionPage {
+                    collection_id,
+                    games: page.0,
+                    next_cursor: page.1,
+                });
+                Ok(())
+            },
+        );
+    }
+
+    fn collections_filtered(&self, filter: CollectionFilter, ask: u64, collection_ids: Vec<i64>) {
+        let profile_id = self.profile.id;
+        // Not reaching butler at all fails every collection asked.
+        let all = collection_ids.clone();
+        let failed_filter = filter.clone();
+        self.op(
+            "collections-filtered".into(),
+            move |error| {
+                log::warn!("filtering collections: {error:#}");
+                Event::CollectionsFilterFailed {
+                    filter: failed_filter.clone(),
+                    ask,
+                    collection_ids: all.clone(),
+                }
+            },
+            move |client, emit| {
+                let query = filter.to_butler();
+                for collection_id in collection_ids {
+                    match filtered_games(client, profile_id, collection_id, &query) {
+                        Ok(games) => emit.send(Event::CollectionFiltered {
+                            filter: filter.clone(),
+                            ask,
+                            collection_id,
+                            games,
+                        }),
+                        Err(error) => {
+                            log::warn!("filtering collection {collection_id}: {error:#}");
+                            emit.send(Event::CollectionsFilterFailed {
+                                filter: filter.clone(),
+                                ask,
+                                collection_ids: vec![collection_id],
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            },
+        );
+    }
+
+    fn discard_after_asking(&self, download_id: String, title: String) {
+        let prompts = self.prompts.clone();
+        self.op(
+            format!("discard-{download_id}"),
+            {
+                let download_id = download_id.clone();
+                move |error| Event::DiscardFailed {
+                    download_id: download_id.clone(),
+                    error: format!("{error:#}"),
+                }
+            },
+            move |client, emit| {
+                // Keep comes first so a reflex press keeps the download.
+                let confirmed = prompts.ask(
+                    emit,
+                    &format!("Cancel downloading {title}?"),
+                    "What has downloaded so far is thrown away.",
+                    &["Keep downloading", "Cancel download"],
+                ) == Some(1);
+                if confirmed {
+                    emit.send(Event::Discarding {
+                        download_id: download_id.clone(),
+                    });
+                    discard(client, emit, download_id);
+                }
+                Ok(())
+            },
+        );
+    }
+
+    fn uninstall(&self, cave_id: String, title: String) {
+        let prompts = self.prompts.clone();
+        self.op(
+            format!("uninstall-{cave_id}"),
+            |error| Event::UninstallFinished {
+                result: Err(format!("{error:#}")),
+            },
+            move |client, emit| {
+                // Cancel comes first so a reflex press keeps the game.
+                let confirmed = prompts.ask(
+                    emit,
+                    &format!("Uninstall {title}?"),
+                    "Removes the installed files. Anything the game saved elsewhere stays.",
+                    &["Cancel", "Uninstall"],
+                ) == Some(1);
+                if !confirmed {
+                    return Ok(());
+                }
+                client.call(UninstallPerformParams {
+                    cave_id: cave_id.clone(),
+                    hard: None,
+                })?;
+                emit.send(Event::UninstallFinished { result: Ok(()) });
+                refresh_caves(client, emit);
+                Ok(())
+            },
+        );
+    }
+
+    fn launch(&self, cave_id: String) {
+        if self.launches.any() {
+            self.emit.send(Event::LaunchFinished {
+                cave_id,
+                outcome: Launched::Failed(LaunchFailure {
+                    message: "another game is still running".into(),
+                    log: Vec::new(),
+                }),
+                run: None,
+            });
+            return;
+        }
+        crate::muos::begin();
+        self.launches.begin(&cave_id);
+        let config = Arc::clone(self.config);
+        let prompts = self.prompts.clone();
+        let launches = self.launches.clone();
+        let profile_id = self.profile.id;
+        self.op(
+            format!("launch-{cave_id}"),
+            {
+                let cave_id = cave_id.clone();
+                move |error| Event::LaunchFinished {
+                    cave_id: cave_id.clone(),
+                    outcome: Launched::Failed(launch_failure(&error)),
+                    run: None,
+                }
+            },
+            move |client, emit| {
+                // Every way out undoes what starting did.
+                let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
+                    launches.forget(&cave_id);
+                    crate::muos::foreground_back();
+                    emit.send(Event::LaunchFinished {
+                        cave_id: cave_id.clone(),
+                        outcome,
+                        run,
+                    });
+                };
+                let (target, name) = match plan_launch(client, &prompts, &cave_id, emit) {
+                    Ok(Plan::Launch { target, name }) => (target, name),
+                    Ok(Plan::Cancelled) => {
+                        finish(emit, Launched::Cancelled, None);
+                        return Ok(());
+                    }
+                    Err(failure) => {
+                        finish(emit, Launched::Failed(failure), None);
+                        return Ok(());
+                    }
+                };
+                let quit = launches.track(&cave_id, client)?;
+                let (result, run) = launch(
+                    client,
+                    &config,
+                    &prompts,
+                    profile_id,
+                    &cave_id,
+                    target.as_deref(),
+                    &name,
+                    emit,
+                );
+                // Play time and last-played change with every run.
+                refresh_caves(client, emit);
+                // Ending the connection is how the user quits; the call's
+                // failure is then the expected outcome.
+                let outcome = match result {
+                    Err(failure) if !quit.load(Ordering::Relaxed) => {
+                        log::warn!("launch failed: {}", failure.message);
+                        for line in &failure.log {
+                            log::warn!("  {line}");
+                        }
+                        Launched::Failed(failure)
+                    }
+                    _ => Launched::Ran,
+                };
+                finish(emit, outcome, Some(run));
+                Ok(())
+            },
+        );
+    }
+
+    /// Sends a compatibility report on its own thread; it talks to
+    /// itch.io, not butler.
+    fn report(&self, report: Report) {
+        let config = Arc::clone(self.config);
+        let profile_id = self.profile.id;
+        let game_id = report.game_id;
+        let thread_emit = self.emit.clone();
+        let spawned = std::thread::Builder::new()
+            .name("report".into())
+            .spawn(move || {
+                let emit = thread_emit;
+                let key = match &config.api_key {
+                    Some(key) => Ok(key.clone()),
+                    None => crate::report::saved_api_key(&config.dbpath, profile_id),
+                };
+                let sent = key.and_then(|key| crate::report::send(&config.api_url, &key, &report));
+                if let Err(error) = &sent {
+                    log::warn!("compatibility report not sent: {error:#}");
+                }
+                emit.send(Event::ReportSent {
+                    game_id,
+                    result: sent.map_err(|e| format!("{e:#}")),
+                });
+            });
+        if let Err(error) = spawned {
+            self.emit.send(Event::ReportSent {
+                game_id,
+                result: Err(format!("starting the report thread: {error}")),
+            });
+        }
+    }
+
+    /// Checks for updates on its own connection; `fail` says how a
+    /// failure is reported, since a timed check and one the user asked
+    /// for read differently.
+    fn check_updates<E>(&self, fail: E)
+    where
+        E: Fn(anyhow::Error) -> Event + Send + std::marker::Sync + 'static,
+    {
+        self.op("update-check".into(), fail, |client, emit| {
+            check_updates(client, emit).map(|_| ())
+        });
+    }
+
+    fn update(&mut self, update: GameUpdate) {
+        if update.direct {
+            if let Err(error) = queue_update(self.client, &update, 0) {
+                log::error!("{error:#}");
+                self.emit.send(Event::Error(format!("{error:#}")));
+            }
+            refresh_downloads(self.client, self.emit);
+        } else {
+            // Indirect updates are butler's guesses, so the user picks.
+            // Asking blocks on the answer, which arrives through the loop.
+            let prompts = self.prompts.clone();
+            self.op(
+                format!("update-{}", update.cave_id),
+                |error| Event::Error(format!("{error:#}")),
+                move |client, emit| {
+                    if let Some(choice) = pick_update(client, &prompts, emit, &update) {
+                        queue_update(client, &update, choice)?;
+                        refresh_downloads(client, emit);
+                    }
+                    Ok(())
+                },
+            );
+        }
+    }
 }
 
 /// Pauses before another go at bringing butler back. True when the app is
@@ -933,11 +1010,7 @@ fn drive_incoming(client: &Client, emit: &Emitter, incoming: Incoming) {
     let (method, params) = match incoming {
         Incoming::Notification { method, params } => (method, params),
         Incoming::Request { id, method, params } => {
-            match AnyServerRequest::decode(&method, params) {
-                Ok(request) => log::warn!("download driver asked {request:?}; not supported yet"),
-                Err(error) => log::warn!("bad {method} request: {error}"),
-            }
-            let _ = client.reply_error(&id, -32601, "not supported by this client");
+            refuse_request(client, &id, &method, params);
             return;
         }
     };
@@ -969,29 +1042,42 @@ fn drive_incoming(client: &Client, emit: &Emitter, incoming: Incoming) {
             // user clears them.
             refresh_downloads(client, emit);
         }
+        other => log_notification(&method, other),
+    }
+}
+
+/// Logs a message from butler that nothing acts on, and refuses any
+/// request: only a launch call answers those.
+fn log_incoming(client: &Client, incoming: Incoming) {
+    match incoming {
+        Incoming::Notification { method, params } => {
+            log_notification(&method, AnyNotification::decode(&method, params));
+        }
+        Incoming::Request { id, method, params } => refuse_request(client, &id, &method, params),
+    }
+}
+
+/// butler's own log lines at debug; any other notification as a line.
+fn log_notification(method: &str, decoded: Result<AnyNotification, serde_json::Error>) {
+    match decoded {
         Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
         Ok(other) => log::debug!("{other:?}"),
         Err(error) => log::warn!("bad {method} notification: {error}"),
     }
 }
 
-fn log_incoming(client: &Client, incoming: Incoming) {
-    match incoming {
-        Incoming::Notification { method, params } => {
-            match AnyNotification::decode(&method, params) {
-                Ok(AnyNotification::Log(log)) => log::debug!("butler: {}", log.message),
-                Ok(notification) => log::debug!("{notification:?}"),
-                Err(error) => log::warn!("bad {method} notification: {error}"),
-            }
-        }
-        Incoming::Request { id, method, params } => {
-            match AnyServerRequest::decode(&method, params) {
-                Ok(request) => log::warn!("unhandled server request {request:?}"),
-                Err(error) => log::warn!("bad {method} request: {error}"),
-            }
-            let _ = client.reply_error(&id, -32601, "not supported by this client");
-        }
+/// Turns down a request from butler that this connection does not answer.
+fn refuse_request(
+    client: &Client,
+    id: &serde_json::Value,
+    method: &str,
+    params: serde_json::Value,
+) {
+    match AnyServerRequest::decode(method, params) {
+        Ok(request) => log::warn!("unhandled server request {request:?}"),
+        Err(error) => log::warn!("bad {method} request: {error}"),
     }
+    let _ = client.reply_error(id, -32601, "not supported by this client");
 }
 
 /// Questions in flight between an op thread and the interface. The op
@@ -1235,7 +1321,7 @@ fn plan_launch(
             cave_id: cave_id.to_string(),
             profile_id: None,
         })
-        .map_err(|error| failure(error.root_cause().to_string()))?
+        .map_err(|error| launch_failure(&error))?
         .cave
         .ok_or_else(|| failure("the game is no longer installed".into()))?;
     let name = cave
@@ -1249,77 +1335,10 @@ fn plan_launch(
             runtimes: Some(crate::muos::runtimes()),
             deep_probe: Some(true),
         })
-        .map_err(|error| failure(error.root_cause().to_string()))?
+        .map_err(|error| launch_failure(&error))?
         .targets;
 
-    // Something we can run: its path, the name `Launch` matches a target
-    // by (the action's path, relative to the install folder), and what to
-    // call it. A fused LÖVE exe is listed once as a native build and once
-    // as the payload inside; the path tells them apart.
-    struct Choice {
-        path: String,
-        target: String,
-        label: String,
-    }
-    let file_name = |path: &str| {
-        Path::new(path)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(path)
-            .to_string()
-    };
-    let mut natives: Vec<Choice> = Vec::new();
-    let mut payloads: Vec<Choice> = Vec::new();
-    let mut unrunnable = Vec::new();
-    for target in &targets {
-        let Some(strategy) = target.strategy.as_ref() else {
-            continue;
-        };
-        let Some(candidate) = strategy.candidate.as_ref() else {
-            continue;
-        };
-        let path = strategy.full_target_path.clone();
-        let action_path = target
-            .action
-            .as_ref()
-            .map_or(candidate.path.clone(), |a| a.path.clone());
-        match strategy.strategy {
-            LaunchStrategy::Runtime => {
-                match crate::muos::content_for(candidate, PathBuf::from(&path)) {
-                    Ok(content) => {
-                        if !payloads.iter().any(|c| c.path == path) {
-                            payloads.push(Choice {
-                                label: format!("{} ({})", file_name(&path), content.label()),
-                                target: action_path,
-                                path,
-                            });
-                        }
-                    }
-                    Err(reason) => unrunnable.push(reason),
-                }
-            }
-            LaunchStrategy::Native => {
-                let blocked = candidate
-                    .linux_info
-                    .as_ref()
-                    .and_then(crate::muos::native_blocker);
-                match blocked {
-                    Some(reason) => unrunnable.push(format!("{} {reason}", file_name(&path))),
-                    None => natives.push(Choice {
-                        label: format!("{} (Linux build)", file_name(&path)),
-                        target: action_path,
-                        path,
-                    }),
-                }
-            }
-            _ => {}
-        }
-    }
-    // A native build is the developer's own runtime for the game, which
-    // beats ours: a PICO-8 export carries the real player, where the
-    // firmware's fake-08 gets some carts wrong.
-    let mut choices = natives;
-    choices.extend(payloads);
+    let (mut choices, unrunnable) = crate::muos::launch_choices(&targets);
     if choices.is_empty() {
         return match unrunnable.into_iter().next() {
             Some(reason) => Err(failure(reason)),
@@ -1374,7 +1393,7 @@ fn launch(
         run: &run,
         started: &started,
     };
-    let result = launch_inner(&launching, |line| {
+    let result = launching.run(|line| {
         if errors.len() == LAUNCH_LOG_TAIL {
             errors.pop_front();
         }
@@ -1382,7 +1401,7 @@ fn launch(
     });
     let mut run = run.into_inner();
     run.seconds = started.get().map(|at: Instant| at.elapsed().as_secs());
-    if run.strategy.as_deref() == Some("native") {
+    if run.strategy == Some(Strategy::Native) {
         run.launch_target = target.map(|t| format!("native {t}"));
         // butler logs a native game's stderr at error level.
         let lines: Vec<&str> = errors.iter().map(String::as_str).collect();
@@ -1390,22 +1409,30 @@ fn launch(
             crate::report::tail(&lines.join("\n"), crate::report::STDERR_TAIL).to_string();
     }
     let result = result.map_err(|error| LaunchFailure {
-        // Our own reply to a RuntimeLaunch comes back wrapped as a
-        // remote error; the words are ours already.
+        log: errors
+            .into_iter()
+            .filter(|l| !l.starts_with("Relaying launch failure") && !l.starts_with("Had error"))
+            .collect(),
+        ..launch_failure(&error)
+    });
+    (result, run)
+}
+
+/// A launch failure in butler's own words: the innermost error, less the
+/// wrapping our own reply to a RuntimeLaunch comes back in.
+fn launch_failure(error: &anyhow::Error) -> LaunchFailure {
+    LaunchFailure {
         message: error
             .root_cause()
             .to_string()
             .trim_start_matches("json-rpc2: error 500: ")
             .to_string(),
-        log: errors
-            .into_iter()
-            .filter(|l| !l.starts_with("Relaying launch failure") && !l.starts_with("Had error"))
-            .collect(),
-    });
-    (result, run)
+        log: Vec::new(),
+    }
 }
 
 /// One launch's particulars, shared by the call and its request handlers.
+#[derive(Clone, Copy)]
 struct LaunchCall<'a> {
     client: &'a Client,
     config: &'a Config,
@@ -1421,172 +1448,176 @@ struct LaunchCall<'a> {
     started: &'a std::cell::Cell<Option<Instant>>,
 }
 
-fn launch_inner(launching: &LaunchCall<'_>, mut on_error_line: impl FnMut(String)) -> Result<()> {
-    let LaunchCall {
-        client,
-        config,
-        prompts,
-        profile_id,
-        cave_id,
-        target,
-        name,
-        emit,
-        run,
-        started,
-    } = *launching;
-    std::fs::create_dir_all(&config.prereqs_dir)
-        .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
-    let muos = crate::muos::available();
-    let params = LaunchParams {
-        cave_id: cave_id.to_string(),
-        prereqs_dir: Some(config.prereqs_dir.to_string_lossy().into_owned()),
-        profile_id: Some(profile_id),
-        target: target.map(str::to_string),
-        // The firmware's payloads come back to us to run; nothing else
-        // but a Linux build has a way onto its screen.
-        runtimes: muos.then(crate::muos::runtimes),
-        allowed_strategies: muos.then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
-        ..Default::default()
-    };
-    client.call_streaming(params, |incoming| match incoming {
-        Incoming::Notification { method, params } => {
-            match AnyNotification::decode(&method, params) {
-                Ok(AnyNotification::LaunchRunning(n)) => {
-                    started.set(Some(Instant::now()));
-                    // Only a game butler runs itself has a pid.
-                    if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
-                        run.borrow_mut().strategy = Some("native".into());
-                        crate::muos::foreground(pid);
-                    }
-                    emit.send(Event::LaunchRunning);
-                }
-                Ok(AnyNotification::LaunchExited(_)) => log::info!("game exited"),
-                Ok(AnyNotification::PrereqsStarted(n)) => {
-                    emit.status(format!("Installing {} prerequisites", n.tasks.len()))
-                }
-                Ok(AnyNotification::PrereqsTaskState(n)) => emit.status(format!(
-                    "{}: {:?} {:.0}%",
-                    n.name,
-                    n.status,
-                    n.progress * 100.0
-                )),
-                Ok(AnyNotification::Log(log)) => {
-                    log::debug!("butler: {}", log.message);
-                    match log.level {
-                        LogLevel::Error => on_error_line(log.message),
-                        // butler's run lock: another launch of this
-                        // install has to finish first.
-                        LogLevel::Info if log.message.starts_with("Waiting for") => {
-                            emit.status(log.message)
+impl LaunchCall<'_> {
+    /// Makes the `Launch` call and stays in it until the game exits,
+    /// handing each error line butler logs to `on_error_line`.
+    fn run(&self, mut on_error_line: impl FnMut(String)) -> Result<()> {
+        let LaunchCall {
+            client,
+            config,
+            profile_id,
+            cave_id,
+            target,
+            emit,
+            run,
+            started,
+            ..
+        } = *self;
+        std::fs::create_dir_all(&config.prereqs_dir)
+            .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
+        let muos = crate::muos::available();
+        let params = LaunchParams {
+            cave_id: cave_id.to_string(),
+            prereqs_dir: Some(config.prereqs_dir.to_string_lossy().into_owned()),
+            profile_id: Some(profile_id),
+            target: target.map(str::to_string),
+            // The firmware's payloads come back to us to run; nothing else
+            // but a Linux build has a way onto its screen.
+            runtimes: muos.then(crate::muos::runtimes),
+            allowed_strategies: muos.then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
+            ..Default::default()
+        };
+        client.call_streaming(params, |incoming| match incoming {
+            Incoming::Notification { method, params } => {
+                match AnyNotification::decode(&method, params) {
+                    Ok(AnyNotification::LaunchRunning(n)) => {
+                        started.set(Some(Instant::now()));
+                        // Only a game butler runs itself has a pid.
+                        if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
+                            run.borrow_mut().strategy = Some(Strategy::Native);
+                            crate::muos::foreground(pid);
                         }
-                        _ => {}
+                        emit.send(Event::LaunchRunning);
                     }
+                    Ok(AnyNotification::LaunchExited(_)) => log::info!("game exited"),
+                    Ok(AnyNotification::PrereqsStarted(n)) => {
+                        emit.status(format!("Installing {} prerequisites", n.tasks.len()))
+                    }
+                    Ok(AnyNotification::PrereqsTaskState(n)) => emit.status(format!(
+                        "{}: {:?} {:.0}%",
+                        n.name,
+                        n.status,
+                        n.progress * 100.0
+                    )),
+                    Ok(AnyNotification::Log(log)) => {
+                        log::debug!("butler: {}", log.message);
+                        match log.level {
+                            LogLevel::Error => on_error_line(log.message),
+                            // butler's run lock: another launch of this
+                            // install has to finish first.
+                            LogLevel::Info if log.message.starts_with("Waiting for") => {
+                                emit.status(log.message)
+                            }
+                            _ => {}
+                        }
+                    }
+                    other => log_notification(&method, other),
                 }
-                Ok(other) => log::debug!("{other:?}"),
-                Err(error) => log::warn!("bad {method} notification: {error}"),
             }
-        }
-        Incoming::Request { id, method, params } => {
-            let request = match AnyServerRequest::decode(&method, params) {
-                Ok(request) => request,
-                Err(error) => {
-                    log::warn!("bad {method} request: {error}");
-                    let _ = client.reply_error(&id, -32602, &error.to_string());
-                    return;
+            Incoming::Request { id, method, params } => {
+                let request = match AnyServerRequest::decode(&method, params) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        log::warn!("bad {method} request: {error}");
+                        let _ = client.reply_error(&id, -32602, &error.to_string());
+                        return;
+                    }
+                };
+                if let Err(error) = self.answer(&id, request) {
+                    log::warn!("answering {method}: {error:#}");
+                    let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
                 }
-            };
-            let outcome = answer_launch_request(client, prompts, name, emit, &id, request, run);
-            if let Err(error) = outcome {
-                log::warn!("answering {method}: {error:#}");
-                let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
             }
-        }
-    })?;
-    Ok(())
-}
+        })?;
+        Ok(())
+    }
 
-fn answer_launch_request(
-    client: &Client,
-    prompts: &Prompts,
-    name: &str,
-    emit: &Emitter,
-    id: &serde_json::Value,
-    request: AnyServerRequest,
-    run: &std::cell::RefCell<Run>,
-) -> Result<()> {
-    match request {
-        AnyServerRequest::RuntimeLaunch(p) => {
-            let candidate = p
-                .candidate
-                .as_ref()
-                .context("runtime launch names no payload")?;
-            let content = crate::muos::content_for(candidate, PathBuf::from(&p.full_target_path))
-                .map_err(anyhow::Error::msg)?;
-            // butler's LaunchRunning came just before this, so the
-            // interface is hiding; the emulator's first frame is later
-            // than that.
-            let args = p.args.as_deref().unwrap_or(&[]);
-            let env = p.env.clone().unwrap_or_default();
-            let mut seen = Run::default();
-            let launched = crate::muos::launch(name, &content, args, &env, &mut seen);
-            *run.borrow_mut() = seen;
-            match launched {
-                Ok(()) => client.reply(id, RuntimeLaunchResult {}),
-                Err(error) => client.reply_error(id, 500, &format!("{error:#}")),
+    /// Answers what butler asks in the middle of the launch.
+    fn answer(&self, id: &serde_json::Value, request: AnyServerRequest) -> Result<()> {
+        let LaunchCall {
+            client,
+            prompts,
+            name,
+            emit,
+            run,
+            ..
+        } = *self;
+        match request {
+            AnyServerRequest::RuntimeLaunch(p) => {
+                let candidate = p
+                    .candidate
+                    .as_ref()
+                    .context("runtime launch names no payload")?;
+                let content =
+                    crate::muos::content_for(candidate, PathBuf::from(&p.full_target_path))
+                        .map_err(anyhow::Error::msg)?;
+                // butler's LaunchRunning came just before this, so the
+                // interface is hiding; the emulator's first frame is later
+                // than that.
+                let args = p.args.as_deref().unwrap_or(&[]);
+                let env = p.env.clone().unwrap_or_default();
+                let mut seen = Run::default();
+                let launched = crate::muos::launch(name, &content, args, &env, &mut seen);
+                *run.borrow_mut() = seen;
+                match launched {
+                    Ok(()) => client.reply(id, RuntimeLaunchResult {}),
+                    Err(error) => client.reply_error(id, 500, &format!("{error:#}")),
+                }
             }
-        }
-        AnyServerRequest::PickManifestAction(p) => {
-            let names: Vec<&str> = p.actions.iter().map(|a| a.name.as_str()).collect();
-            let picked = if names.len() == 1 {
-                Some(0)
-            } else {
-                prompts.pick(emit, "What do you want to launch?", "", &names)
-            };
-            match picked {
-                Some(index) => client.reply(
-                    id,
-                    PickManifestActionResult {
-                        index: index as i64,
-                    },
-                ),
-                None => client.reply_error(id, 499, "launch cancelled"),
+            AnyServerRequest::PickManifestAction(p) => {
+                let names: Vec<&str> = p.actions.iter().map(|a| a.name.as_str()).collect();
+                let picked = if names.len() == 1 {
+                    Some(0)
+                } else {
+                    prompts.pick(emit, "What do you want to launch?", "", &names)
+                };
+                match picked {
+                    Some(index) => client.reply(
+                        id,
+                        PickManifestActionResult {
+                            index: index as i64,
+                        },
+                    ),
+                    None => client.reply_error(id, 499, "launch cancelled"),
+                }
             }
-        }
-        AnyServerRequest::AcceptLicense(p) => {
-            let accept =
-                prompts.ask(emit, "License agreement", &p.text, &["Accept", "Decline"]) == Some(0);
-            client.reply(id, AcceptLicenseResult { accept })
-        }
-        AnyServerRequest::ShellLaunch(p) => {
-            log::info!("opening {}", p.item_path);
-            open::that_detached(&p.item_path)?;
-            client.reply(id, ShellLaunchResult {})
-        }
-        AnyServerRequest::URLLaunch(p) => {
-            log::info!("opening {}", p.url);
-            open::that_detached(&p.url)?;
-            client.reply(id, URLLaunchResult {})
-        }
-        AnyServerRequest::HTMLLaunch(_) => {
-            // TODO: serve the folder and open a window for it.
-            emit.send(Event::Error("HTML games are not supported yet".into()));
-            client.reply_error(id, 501, "HTML games are not supported yet")
-        }
-        AnyServerRequest::AllowSandboxSetup(_) => {
-            client.reply(id, AllowSandboxSetupResult { allow: false })
-        }
-        AnyServerRequest::PrereqsFailed(p) => {
-            let go_on = prompts.ask(
-                emit,
-                "Prerequisites failed to install",
-                &p.error,
-                &["Launch anyway", "Cancel"],
-            ) == Some(0);
-            client.reply(id, PrereqsFailedResult { r#continue: go_on })
-        }
-        other => {
-            log::warn!("unhandled server request {other:?}");
-            client.reply_error(id, -32601, "not supported by this client")
+            AnyServerRequest::AcceptLicense(p) => {
+                let accept =
+                    prompts.ask(emit, "License agreement", &p.text, &["Accept", "Decline"])
+                        == Some(0);
+                client.reply(id, AcceptLicenseResult { accept })
+            }
+            AnyServerRequest::ShellLaunch(p) => {
+                log::info!("opening {}", p.item_path);
+                open::that_detached(&p.item_path)?;
+                client.reply(id, ShellLaunchResult {})
+            }
+            AnyServerRequest::URLLaunch(p) => {
+                log::info!("opening {}", p.url);
+                open::that_detached(&p.url)?;
+                client.reply(id, URLLaunchResult {})
+            }
+            AnyServerRequest::HTMLLaunch(_) => {
+                // TODO: serve the folder and open a window for it.
+                emit.send(Event::Error("HTML games are not supported yet".into()));
+                client.reply_error(id, 501, "HTML games are not supported yet")
+            }
+            AnyServerRequest::AllowSandboxSetup(_) => {
+                client.reply(id, AllowSandboxSetupResult { allow: false })
+            }
+            AnyServerRequest::PrereqsFailed(p) => {
+                let go_on = prompts.ask(
+                    emit,
+                    "Prerequisites failed to install",
+                    &p.error,
+                    &["Launch anyway", "Cancel"],
+                ) == Some(0);
+                client.reply(id, PrereqsFailedResult { r#continue: go_on })
+            }
+            other => {
+                log::warn!("unhandled server request {other:?}");
+                client.reply_error(id, -32601, "not supported by this client")
+            }
         }
     }
 }
@@ -2393,31 +2424,44 @@ fn wait_for_retry(commands: &mpsc::Receiver<Command>) -> bool {
 
 /// The games the profile owns and whether butler's cache of them is stale.
 fn owned_games(client: &Client, profile_id: i64, fresh: bool) -> Result<(Vec<Arc<Game>>, bool)> {
-    let mut games = Vec::new();
     let mut stale = false;
-    let mut cursor = None;
-    loop {
+    let games = paginate(|cursor| {
         let page = client.call(FetchProfileOwnedKeysParams {
             profile_id,
             limit: Some(100),
             // The first page's fresh fetch saves the whole list; the
             // rest read it back.
             fresh: Some(fresh && cursor.is_none()),
-            cursor: cursor.take(),
+            cursor,
             ..Default::default()
         })?;
         stale |= page.stale == Some(true);
-        games.extend(
-            page.items
-                .into_iter()
-                .filter_map(|key| key.game.map(Arc::new)),
-        );
-        match page.next_cursor {
+        let games = page
+            .items
+            .into_iter()
+            .filter_map(|key| key.game.map(Arc::new))
+            .collect();
+        Ok((games, page.next_cursor))
+    })?;
+    Ok((games, stale && !fresh))
+}
+
+/// Walks a paged butler call: `page` fetches with the cursor the last page
+/// gave (none for the first) and returns its items and the next cursor,
+/// which is missing or empty at the end.
+fn paginate<T>(
+    mut page: impl FnMut(Option<String>) -> Result<(Vec<T>, Option<String>)>,
+) -> Result<Vec<T>> {
+    let mut all = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (items, next) = page(cursor.take())?;
+        all.extend(items);
+        match next {
             Some(next) if !next.is_empty() => cursor = Some(next),
-            _ => break,
+            _ => return Ok(all),
         }
     }
-    Ok((games, stale && !fresh))
 }
 
 /// Sends the owned list as butler saves it, page by page, until `done`.
@@ -2506,26 +2550,20 @@ fn collection_list(
     profile_id: i64,
     fresh: bool,
 ) -> Result<(Vec<Collection>, bool)> {
-    let mut collections = Vec::new();
     let mut stale = false;
-    let mut cursor = None;
-    loop {
+    let collections = paginate(|cursor| {
         let page = client.call(FetchProfileCollectionsParams {
             profile_id,
             limit: Some(100),
             // The first page's fresh fetch saves the whole list; the
             // rest read it back.
             fresh: Some(fresh && cursor.is_none()),
-            cursor: cursor.take(),
+            cursor,
             ..Default::default()
         })?;
         stale |= page.stale == Some(true);
-        collections.extend(page.items);
-        match page.next_cursor {
-            Some(next) if !next.is_empty() => cursor = Some(next),
-            _ => break,
-        }
-    }
+        Ok((page.items, page.next_cursor))
+    })?;
     Ok((collections, stale))
 }
 
@@ -2565,22 +2603,15 @@ fn filtered_games(
     collection_id: i64,
     query: &CollectionGamesFilters,
 ) -> Result<Vec<Arc<Game>>> {
-    let mut games = Vec::new();
-    let mut cursor = None;
-    loop {
-        let (page, next) = collection_page(
+    paginate(|cursor| {
+        collection_page(
             client,
             profile_id,
             collection_id,
-            cursor.take(),
+            cursor,
             Some(query.clone()),
-        )?;
-        games.extend(page);
-        match next {
-            Some(next) => cursor = Some(next),
-            None => return Ok(games),
-        }
-    }
+        )
+    })
 }
 
 /// One page of a collection's games from butler's database, and the cursor
@@ -2611,21 +2642,14 @@ fn collection_page(
 }
 
 fn all_caves(client: &Client) -> Result<Vec<Cave>> {
-    let mut caves = Vec::new();
-    let mut cursor = None;
-    loop {
+    paginate(|cursor| {
         let page = client.call(FetchCavesParams {
             limit: Some(100),
-            cursor: cursor.take(),
+            cursor,
             ..Default::default()
         })?;
-        caves.extend(page.items);
-        match page.next_cursor {
-            Some(next) if !next.is_empty() => cursor = Some(next),
-            _ => break,
-        }
-    }
-    Ok(caves)
+        Ok((page.items, page.next_cursor))
+    })
 }
 
 #[cfg(test)]
