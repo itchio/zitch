@@ -345,8 +345,8 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         assert_eq!(love_blocker("11.3", "11.5"), None);
         assert_eq!(love_blocker("11.5", "11.5.1"), None);
         assert_eq!(love_blocker("", "11.5"), None);
-        assert!(love_blocker("11.6", "11.5").is_some());
-        assert!(love_blocker("12.0", "11.5").is_some());
+        assert_eq!(love_blocker("11.6", "11.5"), None);
+        assert_eq!(love_blocker("12.0", "11.5"), None);
         assert!(love_blocker("0.8.0", "11.5").is_some());
         assert!(love_blocker("0.10.2", "11.5").unwrap().contains("11.5"));
     }
@@ -355,7 +355,7 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
     fn love_platforms_up_to_ours() {
         assert_eq!(
             love_platforms_for("11.2"),
-            ["love:11.0", "love:11.1", "love:11.2"]
+            ["love:11.0", "love:11.1", "love:11.2", "love:12.0"]
         );
         assert!(love_platforms_for("").is_empty());
     }

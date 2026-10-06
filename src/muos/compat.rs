@@ -13,18 +13,17 @@ use crate::butlerd::types::{
 
 use super::*;
 
-/// Why a game cannot run on the LÖVE that is here. It has to be made
-/// for the same major version and no newer a minor one; the 0.x series
-/// is a different API, so 11.x will not load those at all. A game that
-/// does not say which LÖVE it wants is given a try.
+/// Why a game cannot run on the LÖVE that is here. The 0.x series is a
+/// different API, so 11.x will not load those at all. A game made for a
+/// newer LÖVE, or one that does not say which it wants, is given a try.
 pub(super) fn love_blocker(wanted: &str, have: &str) -> Option<String> {
-    let (major, minor) = parse_version(wanted)?;
-    let runs = parse_version(have).is_some_and(|(m, n)| m == major && minor <= n);
+    let (major, _) = parse_version(wanted)?;
+    let runs = parse_version(have).is_some_and(|(m, _)| m <= major);
     (!runs).then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
 }
 
 /// The LÖVE games this device runs, in the words of a game's scanned
-/// platforms: `love:11.0` up to its own version.
+/// platforms: `love:11.0` up to its own version, and the next major one.
 pub fn love_platforms() -> &'static [String] {
     static PLATFORMS: OnceLock<Vec<String>> = OnceLock::new();
     PLATFORMS.get_or_init(|| {
@@ -38,7 +37,10 @@ pub(super) fn love_platforms_for(have: &str) -> Vec<String> {
     let Some((major, minor)) = parse_version(have) else {
         return Vec::new();
     };
-    (0..=minor).map(|n| format!("love:{major}.{n}")).collect()
+    (0..=minor)
+        .map(|n| format!("love:{major}.{n}"))
+        .chain([format!("love:{}.0", major + 1)])
+        .collect()
 }
 
 pub(super) struct Love {
