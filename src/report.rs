@@ -6,11 +6,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-/// How the game ran, in the player's words.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the game ran, in the player's words. Saved as its [`Rating::id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Rating {
     Perfect,
     Playable,
@@ -205,30 +207,49 @@ pub struct SavedRun {
 
 pub type Runs = HashMap<String, SavedRun>;
 
-/// The saved runs by cave id, or none when the file is missing or
+/// What the player said about a game on this device, kept after sending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedReport {
+    pub upload_id: i64,
+    pub build_id: Option<i64>,
+    pub rating: Rating,
+    pub flags: Vec<String>,
+    /// Unix seconds.
+    pub sent_at: i64,
+}
+
+/// Saved reports by game id.
+pub type Reports = HashMap<i64, SavedReport>;
+
+/// A flag's id as the static one in [`FLAG_GROUPS`], if it is one.
+pub fn flag(id: &str) -> Option<&'static Flag> {
+    flags().map(|(_, f)| f).find(|f| f.id == id)
+}
+
+/// A JSON file's contents, or the default when it is missing or
 /// unreadable.
-pub fn load_runs(path: &Path) -> Runs {
+pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
             log::warn!("reading {}: {error}", path.display());
-            Runs::new()
+            T::default()
         }),
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("reading {}: {error}", path.display());
             }
-            Runs::new()
+            T::default()
         }
     }
 }
 
 /// Writes beside, then renames, like the settings.
-pub fn save_runs(path: &Path, runs: &Runs) {
+pub fn save<T: Serialize>(path: &Path, value: &T) {
     let result = (|| -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text = serde_json::to_string(runs).map_err(std::io::Error::other)?;
+        let text = serde_json::to_string(value).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.part");
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path)
@@ -388,6 +409,13 @@ mod tests {
         let form = report.form("{}".into());
         assert!(form.contains(&("build_id", "3".to_string())));
         assert!(form.contains(&("flags", r#"["cut_off","wrong_mapping"]"#.to_string())));
+    }
+
+    #[test]
+    fn ratings_save_as_their_ids() {
+        for rating in Rating::ALL {
+            assert_eq!(json!(rating), json!(rating.id()));
+        }
     }
 
     #[test]

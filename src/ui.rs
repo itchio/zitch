@@ -14,7 +14,7 @@ use crate::model::{
 };
 use crate::page_info::PageInfo;
 use crate::qr::QrCode;
-use crate::report::{self, Rating, Report};
+use crate::report::{self, Rating, Report, SavedReport};
 
 // The itch app's palette (renderer/styles.ts): codGray, itemBackground,
 // ivory, carnation, gossip, amber.
@@ -26,6 +26,7 @@ const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0xba);
 const GREEN: Color32 = Color32::from_rgb(0xb9, 0xe8, 0xa1);
 const AMBER: Color32 = Color32::from_rgb(0xff, 0xc2, 0x00);
+const ORANGE: Color32 = Color32::from_rgb(0xff, 0x8c, 0x42);
 /// The app's secondary button surface: translucent white over whatever
 /// is behind, so one style works on the page and on a row.
 const SURFACE: Color32 = Color32::from_rgba_premultiplied(0x0b, 0x0b, 0x0b, 0x0b);
@@ -609,6 +610,8 @@ pub struct LibraryView<'a> {
     pub installed: &'a std::collections::HashSet<i64>,
     pub installs: &'a std::collections::HashMap<i64, InstallState>,
     pub updatable: &'a std::collections::HashSet<i64>,
+    /// What the player made of each game they tried.
+    pub marks: &'a std::collections::HashMap<i64, Mark>,
     pub covers: &'a CoverLoader,
     /// Show the vertical scroll bar; a pad or finger has no use for it.
     pub scrollbar: bool,
@@ -628,6 +631,7 @@ pub fn library(
         installed,
         installs,
         updatable,
+        marks,
         covers,
         scrollbar,
         focused: view_focused,
@@ -890,6 +894,7 @@ pub fn library(
                         installed: installed.contains(&game.id),
                         install: installs.get(&game.id),
                         updatable: updatable.contains(&game.id),
+                        mark: marks.get(&game.id).copied(),
                     };
                     draw_tile(ui, m, covers, rect, cover_height, tile, animation);
                 }
@@ -1025,6 +1030,67 @@ struct Tile<'a> {
     installed: bool,
     install: Option<&'a InstallState>,
     updatable: bool,
+    mark: Option<Mark>,
+}
+
+/// A cover's corner mark: how the player rated the game, or that they
+/// tried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// The rating, and whether it was of the build installed now.
+    Rated(Rating, bool),
+    Tried,
+}
+
+pub fn rating_color(rating: Rating) -> Color32 {
+    match rating {
+        Rating::Perfect => GREEN,
+        Rating::Playable => AMBER,
+        Rating::MajorIssues => ORANGE,
+        Rating::WontRun => ACCENT,
+    }
+}
+
+/// A round mark on a dark disc, so it reads on any cover: a check for a
+/// game that runs great, a bar for one with issues, an exclamation mark
+/// for one that barely runs, a cross for one that doesn't, and an empty
+/// ring for one only tried.
+fn paint_mark(ui: &Ui, m: &Metrics, center: egui::Pos2, mark: Mark) {
+    let r = m.space(9.0);
+    let painter = ui.painter();
+    painter.circle_filled(center, r + m.space(2.0), Color32::from_black_alpha(190));
+    let (rating, current) = match mark {
+        Mark::Tried => {
+            painter.circle_stroke(center, r * 0.6, Stroke::new(m.space(1.5), DIM));
+            return;
+        }
+        Mark::Rated(rating, current) => (rating, current),
+    };
+    let color = if current {
+        rating_color(rating)
+    } else {
+        rating_color(rating).gamma_multiply(0.5)
+    };
+    painter.circle_filled(center, r, color);
+    let ink = Stroke::new(m.space(2.0), Color32::from_gray(0x15));
+    let at = |x: f32, y: f32| center + vec2(x, y) * r;
+    match rating {
+        Rating::Perfect => {
+            painter.line_segment([at(-0.45, 0.0), at(-0.1, 0.38)], ink);
+            painter.line_segment([at(-0.1, 0.38), at(0.5, -0.35)], ink);
+        }
+        Rating::Playable => {
+            painter.line_segment([at(-0.45, 0.0), at(0.45, 0.0)], ink);
+        }
+        Rating::MajorIssues => {
+            painter.line_segment([at(0.0, -0.5), at(0.0, 0.12)], ink);
+            painter.circle_filled(at(0.0, 0.45), ink.width * 0.6, ink.color);
+        }
+        Rating::WontRun => {
+            painter.line_segment([at(-0.38, -0.38), at(0.38, 0.38)], ink);
+            painter.line_segment([at(-0.38, 0.38), at(0.38, -0.38)], ink);
+        }
+    }
 }
 
 fn draw_tile(
@@ -1042,6 +1108,7 @@ fn draw_tile(
         installed,
         install,
         updatable,
+        mark,
     } = tile;
     let cover = Rect::from_min_size(rect.min, vec2(rect.width(), cover_height));
     let radius = CornerRadius::same(6);
@@ -1065,6 +1132,10 @@ fn draw_tile(
         );
         let pos = cover.center() - galley.size() / 2.0;
         ui.painter().galley(pos, galley, DIM);
+    }
+    if let Some(mark) = mark {
+        let inset = m.space(14.0);
+        paint_mark(ui, m, cover.right_top() + vec2(-inset, inset), mark);
     }
     if let Some(install) = install {
         let bar = Rect::from_min_max(
@@ -1620,6 +1691,9 @@ pub struct GameView<'a> {
     pub scroll: Option<DetailScroll>,
     /// Counts openings of a game page, so each starts scrolled to the top.
     pub visit: u64,
+    /// The player's compatibility report, and whether it was of the build
+    /// installed now.
+    pub reported: Option<(&'a SavedReport, bool)>,
 }
 
 /// Where the game page scrolls when focus moves between its parts.
@@ -1675,6 +1749,7 @@ pub fn game_detail(
         focused_shot,
         scroll,
         visit,
+        reported,
     } = view;
     let shots = info.map_or(0, |info| info.screenshots.len());
     let focused_shot = focused_shot.filter(|&i| i < shots);
@@ -1724,6 +1799,7 @@ pub fn game_detail(
                     focused_button,
                     failure,
                     install_failure,
+                    reported,
                 },
                 actions,
             );
@@ -1781,6 +1857,7 @@ struct GameSummary<'a> {
     focused_button: usize,
     failure: Option<&'a LaunchFailure>,
     install_failure: Option<&'a str>,
+    reported: Option<(&'a SavedReport, bool)>,
 }
 
 /// The cover beside the title, status and buttons.
@@ -1802,6 +1879,7 @@ fn game_summary(
         focused_button,
         failure,
         install_failure,
+        reported,
     } = view;
     let buttons = game_buttons(game, caves, install, running, update, online);
     let width = ui.available_width();
@@ -1949,6 +2027,25 @@ fn game_summary(
                 }
                 (None, None) if online => subtle(ui, m, "Not installed"),
                 (None, None) => subtle(ui, m, "Not installed; offline"),
+            }
+            if let Some((saved, current)) = reported {
+                let mut line = format!("You reported: {}", saved.rating.label());
+                for id in &saved.flags {
+                    if let Some(flag) = report::flag(id) {
+                        line.push_str(&format!(" \u{b7} {}", flag.label));
+                    }
+                }
+                let color = if current {
+                    rating_color(saved.rating)
+                } else {
+                    line.push_str(" \u{b7} for an older build");
+                    DIM
+                };
+                ui.label(
+                    egui::RichText::new(line)
+                        .font(FontId::proportional(m.caption))
+                        .color(color),
+                );
             }
             ui.add_space(m.space(20.0));
             ui.horizontal(|ui| {

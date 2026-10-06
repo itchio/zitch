@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
-use crate::report::{Rating, Report, Run, SavedRun};
+use crate::report::{Rating, Report, Reports, Run, Runs, SavedReport, SavedRun};
 use crate::self_update::{self, SelfUpdate};
 use crate::settings::Settings;
 use crate::ui;
@@ -153,9 +153,14 @@ pub struct App {
     /// How a game runs here, while the player fills it in.
     report: Option<ui::ReportView>,
     /// The last run of each cave, for a report filed later.
-    runs: std::collections::HashMap<String, SavedRun>,
+    runs: Runs,
     /// Where `runs` is kept; none for a screenshot run.
     runs_path: Option<PathBuf>,
+    /// The reports sent from this device, by game.
+    reports: Reports,
+    /// The cover marks by game, from the caves, runs and reports.
+    marks: std::collections::HashMap<i64, ui::Mark>,
+    reports_path: Option<PathBuf>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
     pub rows: ui::Rows,
@@ -316,6 +321,13 @@ impl App {
         } = options;
         let settings = Settings::load(&settings_path);
         let runs_path = settings_path.with_file_name("runs.json");
+        let reports_path = settings_path.with_file_name("reports.json");
+        let reports: Reports = crate::report::load(&reports_path);
+        // Nothing is installed until butler says, so every report is current.
+        let marks = reports
+            .iter()
+            .map(|(id, saved)| (*id, ui::Mark::Rated(saved.rating, true)))
+            .collect();
         // Hiding every type this device has counts as hiding none, as the
         // filter treats it, so the page shows them all on.
         let mut playable_hidden = settings.playable_hidden;
@@ -382,8 +394,11 @@ impl App {
             page_scroll: ui::PageScroll::default(),
             report: None,
             game_options: Vec::new(),
-            runs: crate::report::load_runs(&runs_path),
+            runs: crate::report::load(&runs_path),
             runs_path: shot.is_none().then_some(runs_path),
+            reports,
+            marks,
+            reports_path: shot.is_none().then_some(reports_path),
             menu: None,
             quitting: None,
             actions: Vec::new(),
@@ -1328,6 +1343,7 @@ impl App {
                 }
                 self.running.insert(cave_id.clone(), Instant::now());
                 self.launch_failures.remove(&cave_id);
+                self.rebuild_marks();
                 self.backend.send(Command::Launch { cave_id });
             }
             // Only meaningful while a prompt is open, handled above.
@@ -2125,6 +2141,7 @@ impl App {
                     self.catalog_add(Source::Install, &games);
                     self.installed = caves.iter().filter_map(CaveExt::game_id).collect();
                     self.caves = caves;
+                    self.rebuild_marks();
                     if self.collections_installed_only {
                         self.collection_filtered = None;
                         self.request_collection_filtered(None);
@@ -2206,6 +2223,7 @@ impl App {
                             self.notify(format!("Couldn't launch: {}", failure.message));
                         }
                         self.launch_failures.insert(cave_id.clone(), failure);
+                        self.rebuild_marks();
                     }
                     // Take the screen back. Most window systems already hand
                     // focus to the last focused window when the game's goes
@@ -2517,8 +2535,27 @@ impl App {
             self.runs.retain(|id, _| caves.iter().any(|c| &c.id == id));
         }
         if let Some(path) = &self.runs_path {
-            crate::report::save_runs(path, &self.runs);
+            crate::report::save(path, &self.runs);
         }
+        self.rebuild_marks();
+    }
+
+    /// Rebuilds the cover marks: the player's rating where there is one,
+    /// else whether the installed game was tried. Called whenever the
+    /// installs, runs, launch failures or reports change.
+    fn rebuild_marks(&mut self) {
+        let mut marks: std::collections::HashMap<i64, ui::Mark> = self
+            .caves
+            .iter()
+            .filter(|cave| self.reportable(cave))
+            .filter_map(|cave| Some((cave.game_id()?, ui::Mark::Tried)))
+            .collect();
+        for &game_id in self.reports.keys() {
+            if let Some((saved, current)) = reported(&self.reports, &self.caves, game_id) {
+                marks.insert(game_id, ui::Mark::Rated(saved.rating, current));
+            }
+        }
+        self.marks = marks;
     }
 
     /// Whether the cave was launched, so there is something to report on.
@@ -2547,16 +2584,30 @@ impl App {
             .filter(|saved| saved.upload_id == upload.id && saved.build_id == build_id)
             .map(|saved| saved.run.clone())
             .unwrap_or_default();
+        // An earlier report on this build starts the answers.
+        let earlier = self
+            .reports
+            .get(&game.id)
+            .filter(|saved| saved.upload_id == upload.id && saved.build_id == build_id);
+        let (rating, flags) = match earlier {
+            Some(saved) => (
+                saved.rating,
+                saved
+                    .flags
+                    .iter()
+                    .filter_map(|id| crate::report::flag(id))
+                    .map(|f| f.id)
+                    .collect(),
+            ),
+            None if self.launch_failures.contains_key(cave_id) => (Rating::WontRun, Vec::new()),
+            None => (Rating::Perfect, Vec::new()),
+        };
         let draft = Report {
             game_id: game.id,
             upload_id: upload.id,
             build_id,
-            rating: if self.launch_failures.contains_key(cave_id) {
-                Rating::WontRun
-            } else {
-                Rating::Perfect
-            },
-            flags: Vec::new(),
+            rating,
+            flags,
             run,
         };
         self.report = Some(ui::ReportView::new(game.title.clone(), draft));
@@ -2572,6 +2623,21 @@ impl App {
             // The screenshot script's sample.
             return;
         }
+        let sent_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let saved = SavedReport {
+            upload_id: report.upload_id,
+            build_id: report.build_id,
+            rating: report.rating,
+            flags: report.flags.iter().map(|f| f.to_string()).collect(),
+            sent_at,
+        };
+        self.reports.insert(report.game_id, saved);
+        if let Some(path) = &self.reports_path {
+            crate::report::save(path, &self.reports);
+        }
+        self.rebuild_marks();
         self.backend.send(Command::Report(Box::new(report)));
     }
 
@@ -2592,8 +2658,15 @@ impl App {
         };
         let mut options = Vec::new();
         if self.reportable(cave) {
+            let reported = cave
+                .game_id()
+                .is_some_and(|id| self.reports.contains_key(&id));
             options.push((
-                "Report compatibility",
+                if reported {
+                    "Update compatibility report"
+                } else {
+                    "Report compatibility"
+                },
                 Action::Report {
                     cave_id: cave_id.to_string(),
                 },
@@ -3277,6 +3350,7 @@ impl App {
                                 installed: &self.installed,
                                 installs: &self.installs,
                                 updatable: &self.updatable(),
+                                marks: &self.marks,
                                 covers: &self.covers,
                                 scrollbar: self.input_mode == InputMode::Keyboard,
                                 focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
@@ -3303,6 +3377,7 @@ impl App {
                                             installed: &self.installed,
                                             installs: &self.installs,
                                             updatable: &self.updatable(),
+                                            marks: &self.marks,
                                             covers: &self.covers,
                                             scrollbar: self.input_mode == InputMode::Keyboard,
                                             focused: self.toolbar_focus[tab_slot(Tab::Collections)]
@@ -3392,6 +3467,7 @@ impl App {
                                         focused_button: button,
                                         failure,
                                         install_failure,
+                                        reported: reported(&self.reports, &self.caves, game.id),
                                         info: info.as_deref(),
                                         info_loading,
                                         focused_shot: shot,
@@ -3518,6 +3594,26 @@ impl ToolbarStop {
             action,
         }
     }
+}
+
+/// The player's report on a game, and whether it was of a build
+/// installed now. A game not installed has nothing newer to compare.
+fn reported<'a>(
+    reports: &'a Reports,
+    caves: &[Cave],
+    game_id: i64,
+) -> Option<(&'a SavedReport, bool)> {
+    let saved = reports.get(&game_id)?;
+    let mut installed = caves
+        .iter()
+        .filter(|c| c.game_id() == Some(game_id))
+        .peekable();
+    let current = installed.peek().is_none()
+        || installed.any(|cave| {
+            cave.upload.as_ref().map(|u| u.id) == Some(saved.upload_id)
+                && cave.build.as_ref().map(|b| b.id) == saved.build_id
+        });
+    Some((saved, current))
 }
 
 fn tab_slot(tab: Tab) -> usize {
