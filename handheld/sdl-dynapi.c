@@ -203,11 +203,65 @@ static void unknown_entry(void)
     abort();
 }
 
+/* A game on a desktop shader translator (FNA's MojoShader) hands the
+   driver GLSL ES 1.00, which has a single color target. A shader that
+   writes to more is rewritten as GLSL ES 3.00, and so is every shader
+   it is linked with, as one program cannot mix the two versions. */
+
+#define GL_EXTENSIONS_ 0x1F03
+#define GL_VERSION_ 0x1F02
+#define GL_SHADER_TYPE_ 0x8B4F
+#define GL_FRAGMENT_SHADER_ 0x8B30
+
 static void *(*real_get_proc)(const char *name);
 static void (*real_shader_source)(unsigned shader, int count, const char *const *strings,
                                   const int *lengths);
+static void (*real_link_program)(unsigned program);
+static void (*real_delete_shader)(unsigned shader);
 
-#define DRAW_BUFFERS "#extension GL_EXT_draw_buffers : require\n"
+/* The GLSL ES 1.00 shaders the game has, as it wrote them. */
+struct shader {
+    unsigned id;
+    char *source;
+    int rewritten;
+    struct shader *next;
+};
+static struct shader *shaders;
+
+static struct shader *find_shader(unsigned id)
+{
+    for (struct shader *s = shaders; s; s = s->next) {
+        if (s->id == id) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static void forget_shader(unsigned id)
+{
+    for (struct shader **at = &shaders; *at; at = &(*at)->next) {
+        if ((*at)->id == id) {
+            struct shader *gone = *at;
+            *at = gone->next;
+            free(gone->source);
+            free(gone);
+            return;
+        }
+    }
+}
+
+/* Whether the context takes GLSL ES 3.00. */
+static int has_es3(void)
+{
+    static int known = -1;
+    if (known < 0) {
+        const char *(*get_string)(unsigned) = real_get_proc("glGetString");
+        const char *version = get_string ? get_string(GL_VERSION_) : NULL;
+        known = version && strncmp(version, "OpenGL ES ", 10) == 0 && version[10] >= '3';
+    }
+    return known;
+}
 
 /* Whether the shader writes to a color target past the first. */
 static int writes_more_targets(const char *source)
@@ -222,18 +276,146 @@ static int writes_more_targets(const char *source)
     return 0;
 }
 
-/* GLSL ES 1.00 has one color target unless the shader asks for the
-   draw buffers extension. Shader translators for desktop games leave
-   that out, and strict drivers then refuse the shader. */
+static int is_word(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* GLSL ES 1.00 names and what GLSL ES 3.00 calls them. */
+static const char *const RENAMED[][2] = {
+    {"texture2D", "texture"},
+    {"texture2DProj", "textureProj"},
+    {"texture2DLod", "textureLod"},
+    {"texture2DLodEXT", "textureLod"},
+    {"texture2DProjLod", "textureProjLod"},
+    {"texture2DProjLodEXT", "textureProjLod"},
+    {"texture2DGradEXT", "textureGrad"},
+    {"texture3D", "texture"},
+    {"textureCube", "texture"},
+    {"textureCubeLod", "textureLod"},
+    {"textureCubeLodEXT", "textureLod"},
+    {"textureCubeGradEXT", "textureGrad"},
+    {"gl_FragDepthEXT", "gl_FragDepth"},
+    {"gl_FragColor", "zitch_FragData0"},
+};
+
+#define MAX_TARGETS 8
+/* Room for the longest replacement of one word. */
+#define WORD_ROOM 32
+#define TARGET_DECL "layout(location = %d) out highp vec4 zitch_FragData%d;\n"
+
+/* The GLSL ES 1.00 `source` as GLSL ES 3.00, for the caller to free. */
+static char *to_es3(const char *source, int fragment)
+{
+    const char *body = strchr(source, '\n');
+    if (!body) {
+        return NULL;
+    }
+    body++;
+    /* No replacement is longer than its word plus WORD_ROOM, and a
+       word is at least two bytes with its separator. */
+    size_t room = 64 + MAX_TARGETS * (sizeof(TARGET_DECL) + 8) + strlen(body) * (WORD_ROOM / 2 + 1);
+    char *out = malloc(room);
+    char *text = malloc(strlen(body) * (WORD_ROOM / 2 + 1) + 1);
+    if (!out || !text) {
+        free(out);
+        free(text);
+        return NULL;
+    }
+    unsigned targets = 0;
+    char *to = text;
+    const char *at = body;
+    while (*at) {
+        if (*at == '#' && strncmp(at, "#extension", 10) == 0) {
+            /* What 1.00 needed extensions for is built into 3.00. */
+            while (*at && *at != '\n') {
+                at++;
+            }
+            continue;
+        }
+        if (!is_word(*at) || (at > body && is_word(at[-1]))) {
+            *to++ = *at++;
+            continue;
+        }
+        size_t len = 1;
+        while (is_word(at[len])) {
+            len++;
+        }
+        const char *word = NULL;
+        if (len == 9 && memcmp(at, "attribute", 9) == 0) {
+            word = "in";
+        } else if (len == 7 && memcmp(at, "varying", 7) == 0) {
+            word = fragment ? "in" : "out";
+        } else if (len == 11 && memcmp(at, "gl_FragData", 11) == 0 && at[11] == '['
+                   && at[12] >= '0' && at[12] < '0' + MAX_TARGETS && at[13] == ']') {
+            targets |= 1u << (at[12] - '0');
+            to += sprintf(to, "zitch_FragData%c", at[12]);
+            at += 14;
+            continue;
+        } else {
+            for (size_t i = 0; i < sizeof(RENAMED) / sizeof(RENAMED[0]); i++) {
+                if (strlen(RENAMED[i][0]) == len && memcmp(at, RENAMED[i][0], len) == 0) {
+                    word = RENAMED[i][1];
+                    if (strcmp(word, "zitch_FragData0") == 0) {
+                        targets |= 1;
+                    }
+                    break;
+                }
+            }
+        }
+        if (word) {
+            to += sprintf(to, "%s", word);
+        } else {
+            memcpy(to, at, len);
+            to += len;
+        }
+        at += len;
+    }
+    *to = '\0';
+    char *head = out + sprintf(out, "#version 300 es\n");
+    for (int i = 0; fragment && i < MAX_TARGETS; i++) {
+        if (targets & (1u << i)) {
+            head += sprintf(head, TARGET_DECL, i, i);
+        }
+    }
+    strcpy(head, text);
+    free(text);
+    return out;
+}
+
+/* Hands the driver the 3.00 form of a shader the game wrote as 1.00. */
+static int rewrite(struct shader *shader)
+{
+    void (*get_shader)(unsigned, unsigned, int *) = real_get_proc("glGetShaderiv");
+    int type = 0;
+    if (!get_shader) {
+        return 0;
+    }
+    get_shader(shader->id, GL_SHADER_TYPE_, &type);
+    char *modern = to_es3(shader->source, type == GL_FRAGMENT_SHADER_);
+    if (!modern) {
+        return 0;
+    }
+    const char *one = modern;
+    real_shader_source(shader->id, 1, &one, NULL);
+    free(modern);
+    shader->rewritten = 1;
+    return 1;
+}
+
 static void shader_source(unsigned shader, int count, const char *const *strings,
                           const int *lengths)
 {
+    forget_shader(shader);
     size_t total = 0;
     for (int i = 0; i < count; i++) {
         total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
     }
-    char *source = malloc(total + sizeof(DRAW_BUFFERS));
-    if (!source) {
+    char *source = malloc(total + 1);
+    struct shader *entry = calloc(1, sizeof(*entry));
+    if (!source || !entry) {
+        free(source);
+        free(entry);
         real_shader_source(shader, count, strings, lengths);
         return;
     }
@@ -244,26 +426,68 @@ static void shader_source(unsigned shader, int count, const char *const *strings
         used += len;
     }
     source[used] = '\0';
-    char *line_end = strchr(source, '\n');
-    if (strncmp(source, "#version 100", 12) == 0 && line_end && writes_more_targets(source)
-        && !strstr(source, "GL_EXT_draw_buffers")) {
-        char *rest = line_end + 1;
-        memmove(rest + sizeof(DRAW_BUFFERS) - 1, rest, strlen(rest) + 1);
-        memcpy(rest, DRAW_BUFFERS, sizeof(DRAW_BUFFERS) - 1);
-        const char *one = source;
-        real_shader_source(shader, 1, &one, NULL);
-    } else {
+    if (strncmp(source, "#version 100", 12) != 0 || !has_es3()) {
+        free(source);
+        free(entry);
+        real_shader_source(shader, count, strings, lengths);
+        return;
+    }
+    entry->id = shader;
+    entry->source = source;
+    entry->next = shaders;
+    shaders = entry;
+    if (!writes_more_targets(source) || !rewrite(entry)) {
         real_shader_source(shader, count, strings, lengths);
     }
-    free(source);
+}
+
+/* Brings the program's shaders to one version before they link. */
+static void link_program(unsigned program)
+{
+    void (*get_attached)(unsigned, int, int *, unsigned *) = real_get_proc("glGetAttachedShaders");
+    void (*compile)(unsigned) = real_get_proc("glCompileShader");
+    unsigned ids[8];
+    int count = 0;
+    if (shaders && get_attached && compile) {
+        get_attached(program, 8, &count, ids);
+    }
+    int rewritten = 0;
+    for (int i = 0; i < count; i++) {
+        struct shader *shader = find_shader(ids[i]);
+        rewritten |= shader && shader->rewritten;
+    }
+    for (int i = 0; rewritten && i < count; i++) {
+        struct shader *shader = find_shader(ids[i]);
+        if (shader && !shader->rewritten && rewrite(shader)) {
+            compile(shader->id);
+        }
+    }
+    real_link_program(program);
+}
+
+static void delete_shader(unsigned shader)
+{
+    forget_shader(shader);
+    real_delete_shader(shader);
 }
 
 static void *get_proc(const char *name)
 {
     void *fn = real_get_proc(name);
-    if (fn && strcmp(name, "glShaderSource") == 0) {
+    if (!fn) {
+        return NULL;
+    }
+    if (strcmp(name, "glShaderSource") == 0) {
         real_shader_source = fn;
         return (void *)shader_source;
+    }
+    if (strcmp(name, "glLinkProgram") == 0) {
+        real_link_program = fn;
+        return (void *)link_program;
+    }
+    if (strcmp(name, "glDeleteShader") == 0) {
+        real_delete_shader = fn;
+        return (void *)delete_shader;
     }
     return fn;
 }

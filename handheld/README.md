@@ -203,11 +203,12 @@ two additions to their environment (`muos::game_env`):
   dynamically linked SDL2 asking to be replaced by itself. It opens the
   firmware's library at `/usr/lib` or `/usr/lib/aarch64-linux-gnu`;
   `ZITCH_SDL_LIB` names another.
-  The shim also answers the game's lookup of `glShaderSource` with a
-  wrapper: a `#version 100` shader that writes to `gl_FragData[1]` or
-  higher gets `#extension GL_EXT_draw_buffers : require` added, which
-  the PowerVR driver needs before it compiles one (FNA games translate
-  their shaders this way).
+  The shim also answers the game's lookups of `glShaderSource`,
+  `glLinkProgram` and `glDeleteShader` with wrappers. FNA games hand the
+  driver GLSL ES 1.00 shaders, which have one color target; one that
+  writes to `gl_FragData[1]` or higher is rewritten as GLSL ES 3.00 on
+  an ES 3 context, and so are the shaders it is linked with, since a
+  program holds one version.
 - `LANG=en_US.UTF-8` when unset. The firmware sets no locale and games
   read it without checking.
 
