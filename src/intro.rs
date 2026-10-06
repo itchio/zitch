@@ -8,8 +8,8 @@ use egui::{Color32, Mesh, Rect, TextureHandle, pos2, vec2};
 
 /// Milliseconds. The beam, then the logo until `LOGO`, then the handoff.
 const BEAM: f32 = 110.0;
-const LOGO: f32 = 600.0;
-const TOTAL: f32 = 1240.0;
+const LOGO: f32 = 410.0;
+const TOTAL: f32 = 1050.0;
 /// Longest step one frame may take, so a slow first frame skips nothing.
 const MAX_STEP: f32 = 50.0;
 /// Power off: the screen closes to a line, the line to a dot, the dot fades.
@@ -131,7 +131,7 @@ impl Intro {
             painter.rect_filled(flash, 0.0, crate::ui::TEXT.gamma_multiply(0.85 * (1.0 - k)));
         }
 
-        let lines = 0.45 * (1.0 - span(t, 300.0, 300.0));
+        let lines = 0.45 * (1.0 - span(t, 250.0, LOGO - 250.0));
         if lines > 0.0 {
             let color = Color32::from_black_alpha((lines * 255.0) as u8);
             let mut y = screen.top();
