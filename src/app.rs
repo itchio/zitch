@@ -13,7 +13,8 @@ use crate::model::{
     Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
     Launched, Loadable, Mark, Page, Profile, Prompt, RatingFilter, Tab, UploadExt, UserExt,
-    human_size, known_playable_here, wrap_step,
+    human_duration_seconds, human_size, human_time_ago, known_playable_here, rfc3339_to_unix,
+    wrap_step,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
@@ -2516,7 +2517,7 @@ impl App {
                         capitalize(&p.stage),
                         p.progress * 100.0,
                         human_size(p.bps as i64),
-                        ui::human_duration_seconds(p.eta as i64),
+                        human_duration_seconds(p.eta as i64),
                     ),
                     Some(p.progress as f32),
                 ),
@@ -2593,8 +2594,8 @@ impl App {
                 let when = download
                     .finished_at
                     .as_deref()
-                    .and_then(ui::rfc3339_to_unix)
-                    .map(ui::human_time_ago);
+                    .and_then(rfc3339_to_unix)
+                    .map(human_time_ago);
                 (
                     match when {
                         Some(when) => format!("{outcome}, {when}"),

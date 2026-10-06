@@ -10,8 +10,8 @@ use crate::images::{Animation, CoverLoader, Variant};
 use crate::model::human_size;
 use crate::model::{
     Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Mark, Page,
-    PlayableType, Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here,
-    scanned_platform_words, wrap_step,
+    PlayableType, Prompt, Tab, UploadDetail, UploadExt, human_duration, human_duration_seconds,
+    platform_names, playable_here, scanned_platform_words, wrap_step,
 };
 use crate::page_info::PageInfo;
 use crate::qr::QrCode;
@@ -25,6 +25,8 @@ const TILE_HOVER: Color32 = Color32::from_gray(0x2a);
 pub const TEXT: Color32 = Color32::from_rgb(0xff, 0xff, 0xf0);
 const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0xba);
+/// Text on a button that is not the main one.
+const TEXT_SOFT: Color32 = Color32::from_rgb(0xe8, 0xe2, 0xdf);
 const GREEN: Color32 = Color32::from_rgb(0xb9, 0xe8, 0xa1);
 const AMBER: Color32 = Color32::from_rgb(0xff, 0xc2, 0x00);
 const ORANGE: Color32 = Color32::from_rgb(0xff, 0x8c, 0x42);
@@ -399,18 +401,6 @@ struct Playing {
     /// Uploaded the first time each frame is shown, so starting playback
     /// never sends the whole gif to the GPU in one frame.
     textures: Vec<Option<TextureHandle>>,
-}
-
-impl Game {
-    /// The animated cover, when the game has one distinct from its still.
-    fn animated_cover(&self) -> Option<&str> {
-        let cover = self.cover_url.as_deref()?;
-        let is_gif = cover
-            .rsplit('.')
-            .next()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
-        (is_gif && self.still_cover_url.as_deref() != Some(cover)).then_some(cover)
-    }
 }
 
 /// One carousel: a title and the game ids it shows.
@@ -866,10 +856,7 @@ pub fn library(
                         vec2(tile_width, cover_height),
                     );
                     ui.painter().rect_filled(rect, m.space(6.0), TILE_BG);
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(
-                        Rect::from_center_size(rect.center(), vec2(m.space(32.0), m.space(32.0))),
-                    ));
-                    child.add(egui::Spinner::new().size(m.space(28.0)).color(DIM));
+                    spinner_at(ui, rect.center(), m.space(28.0), DIM);
                 }
                 for col in first..last.min(count) {
                     let Some(game) = games.get(&section.games[col]) else {
@@ -1071,7 +1058,7 @@ fn paint_mark(ui: &Ui, m: &Metrics, center: egui::Pos2, mark: Mark) {
         rating_color(rating).gamma_multiply(0.5)
     };
     painter.circle_filled(center, r, color);
-    let ink = Stroke::new(m.space(2.0), Color32::from_gray(0x15));
+    let ink = Stroke::new(m.space(2.0), BG);
     let at = |x: f32, y: f32| center + vec2(x, y) * r;
     match rating {
         Rating::Perfect => {
@@ -1160,12 +1147,7 @@ fn draw_tile(
         );
     }
     if focused {
-        ui.painter().rect_stroke(
-            cover.expand(2.0),
-            CornerRadius::same(8),
-            Stroke::new(3.0, ACCENT),
-            egui::StrokeKind::Outside,
-        );
+        focus_ring(ui, cover, [m.space(6.0); 4], m);
     }
     let title_rect = Rect::from_min_max(
         pos2(rect.left(), cover.bottom() + m.space(6.0)),
@@ -1445,10 +1427,12 @@ pub fn login(ui: &mut Ui, m: &Metrics, login: &LoginView, actions: &mut Vec<Acti
         return;
     }
     let spinner = m.space(18.0);
-    let mut child = ui.new_child(
-        egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, y), vec2(spinner, spinner))),
+    spinner_at(
+        ui,
+        pos2(left + spinner / 2.0, y + spinner / 2.0),
+        spinner,
+        DIM,
     );
-    child.add(egui::Spinner::new().size(spinner).color(DIM));
     ui.painter().text(
         pos2(left + spinner + m.space(10.0), y + spinner / 2.0),
         egui::Align2::LEFT_CENTER,
@@ -1541,12 +1525,15 @@ pub fn notice(ctx: &egui::Context, m: &Metrics, page: Rect, text: &str) {
 
 pub fn centered_spinner(ui: &mut Ui, m: &Metrics) {
     let rect = ui.available_rect_before_wrap();
-    let center = rect.center();
-    let size = m.space(40.0);
-    let mut child = ui.new_child(
-        egui::UiBuilder::new().max_rect(Rect::from_center_size(center, vec2(size, size))),
-    );
-    child.add(egui::Spinner::new().size(m.space(32.0)).color(DIM));
+    spinner_at(ui, rect.center(), m.space(32.0), DIM);
+}
+
+/// A spinner of `size` centered on `center`.
+fn spinner_at(ui: &Ui, center: egui::Pos2, size: f32, color: Color32) {
+    egui::Spinner::new()
+        .size(size)
+        .color(color)
+        .paint_at(ui, Rect::from_center_size(center, vec2(size, size)));
 }
 
 /// A small label anchored by its bottom-left corner.
@@ -1647,24 +1634,37 @@ pub fn game_buttons(
 
 /// The game's scanned platforms, the ones this device runs in green.
 fn platform_line(ui: &mut Ui, m: &Metrics, words: &[(String, bool)]) {
-    let font = FontId::proportional(m.caption);
-    let format = |color| egui::TextFormat {
-        font_id: font.clone(),
-        color,
-        ..Default::default()
-    };
-    let mut job = egui::text::LayoutJob::default();
-    for (i, (word, here)) in words.iter().enumerate() {
-        if i > 0 {
-            job.append(", ", 0.0, format(DIM));
-        }
-        job.append(word, 0.0, format(if *here { GREEN } else { DIM }));
-    }
+    let mut job = platform_job(FontId::proportional(m.caption), words);
     job.wrap.max_width = ui.available_width();
     ui.label(job);
 }
 
+fn text_format(font: &FontId, color: Color32) -> egui::TextFormat {
+    egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    }
+}
+
+/// Platform words joined by commas, the ones this device runs in green.
+fn platform_job(font: FontId, words: &[(String, bool)]) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for (i, (word, here)) in words.iter().enumerate() {
+        if i > 0 {
+            job.append(", ", 0.0, text_format(&font, DIM));
+        }
+        job.append(
+            word,
+            0.0,
+            text_format(&font, if *here { GREEN } else { DIM }),
+        );
+    }
+    job
+}
+
 /// Everything the detail page reads while drawing.
+#[derive(Clone, Copy)]
 pub struct GameView<'a> {
     pub game: &'a Game,
     pub covers: &'a CoverLoader,
@@ -1732,23 +1732,14 @@ pub fn game_detail(
     actions: &mut Vec<Action>,
 ) {
     let GameView {
-        game,
         covers,
-        caves,
-        install,
-        running,
-        running_since,
-        update,
-        online,
         focused_button,
-        failure,
-        install_failure,
         info,
         info_loading,
         focused_shot,
         scroll,
         visit,
-        reported,
+        ..
     } = view;
     let shots = info.map_or(0, |info| info.screenshots.len());
     let focused_shot = focused_shot.filter(|&i| i < shots);
@@ -1786,19 +1777,9 @@ pub fn game_detail(
             game_summary(
                 ui,
                 m,
-                GameSummary {
-                    game,
-                    covers,
-                    caves,
-                    install,
-                    running,
-                    running_since,
-                    update,
-                    online,
+                GameView {
                     focused_button,
-                    failure,
-                    install_failure,
-                    reported,
+                    ..view
                 },
                 actions,
             );
@@ -1843,30 +1824,9 @@ struct PageInfoView<'a> {
     scroll: Option<DetailScroll>,
 }
 
-/// The top of the game page: what [`GameView`] has, less the page info.
-struct GameSummary<'a> {
-    game: &'a Game,
-    covers: &'a CoverLoader,
-    caves: &'a [&'a Cave],
-    install: Option<&'a InstallState>,
-    running: bool,
-    running_since: Option<Instant>,
-    update: Option<&'a GameUpdate>,
-    online: bool,
-    focused_button: usize,
-    failure: Option<&'a LaunchFailure>,
-    install_failure: Option<&'a str>,
-    reported: Option<(&'a SavedReport, bool)>,
-}
-
 /// The cover beside the title, status and buttons.
-fn game_summary(
-    ui: &mut Ui,
-    m: &Metrics,
-    view: GameSummary,
-    actions: &mut Vec<Action>,
-) -> egui::Response {
-    let GameSummary {
+fn game_summary(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
+    let GameView {
         game,
         covers,
         caves,
@@ -1879,6 +1839,7 @@ fn game_summary(
         failure,
         install_failure,
         reported,
+        ..
     } = view;
     let buttons = game_buttons(game, caves, install, running, update, online);
     let width = ui.available_width();
@@ -1889,10 +1850,7 @@ fn game_summary(
         ui.spacing_mut().item_spacing.x = column_gap;
         let (cover, _) = ui.allocate_exact_size(vec2(cover_width, cover_height), Sense::hover());
         let radius = CornerRadius::same(8);
-        let url = game
-            .still_cover_url
-            .as_deref()
-            .or(game.cover_url.as_deref());
+        let url = tile_cover(game);
         if !url.is_some_and(|url| paint_cover(ui, covers, url, Variant::Detail, cover, radius)) {
             ui.painter().rect_filled(cover, radius, TILE_BG);
         }
@@ -1940,7 +1898,7 @@ fn game_summary(
                     );
                     ui.add_space(m.space(8.0));
                     let (bar, _) = ui.allocate_exact_size(
-                        vec2(ui.available_width().min(420.0), 8.0),
+                        vec2(ui.available_width().min(m.space(420.0)), progress_height(m)),
                         Sense::hover(),
                     );
                     progress_bar(ui, bar, install.progress as f32);
@@ -2060,7 +2018,7 @@ fn game_summary(
                 }
                 for (index, (label, action)) in buttons.iter().enumerate() {
                     let response = pill(ui, m, label, index == focused_button, index == 0);
-                    if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    if takes_focus(&response, pointer_moved(ui), index == focused_button) {
                         actions.push(Action::FocusButton(index));
                     }
                     if response.clicked() {
@@ -2098,8 +2056,7 @@ fn game_summary(
                 }
             }
         });
-    })
-    .response
+    });
 }
 
 /// Screenshots, tags and the lines under them, below the top of the page.
@@ -2455,18 +2412,19 @@ fn status_readout(ui: &mut Ui, m: &Metrics, text: &str) {
         height,
     );
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-        pos2(rect.left(), rect.center().y - icon / 2.0),
-        vec2(icon, icon),
-    )));
-    child.add(egui::Spinner::new().size(icon).color(ACCENT));
+    spinner_at(
+        ui,
+        pos2(rect.left() + icon / 2.0, rect.center().y),
+        icon,
+        ACCENT,
+    );
     ui.painter().galley(
         pos2(
             rect.left() + icon + m.space(12.0),
             rect.center().y - galley.size().y / 2.0,
         ),
         galley,
-        Color32::from_rgb(0xe8, 0xe2, 0xdf),
+        TEXT_SOFT,
     );
 }
 
@@ -2540,7 +2498,7 @@ fn pill_with(
         } else if focused {
             TEXT
         } else {
-            Color32::from_rgb(0xe8, 0xe2, 0xdf)
+            TEXT_SOFT
         }
     };
     if focused {
@@ -2587,31 +2545,16 @@ fn choice_card(
 ) -> egui::Response {
     let pad = vec2(m.space(16.0), m.space(9.0));
     let inner = ui.available_width() - 2.0 * pad.x;
-    let name_color = if focused {
-        TEXT
-    } else {
-        Color32::from_rgb(0xe8, 0xe2, 0xdf)
-    };
+    let name_color = if focused { TEXT } else { TEXT_SOFT };
     let name = one_line(ui, label, bold(m.button), name_color, inner);
     let font = FontId::proportional(m.caption);
-    let format = |color| egui::TextFormat {
-        font_id: font.clone(),
-        color,
-        ..Default::default()
-    };
-    let mut job = egui::text::LayoutJob::default();
-    for (i, (word, here)) in detail.platforms.iter().enumerate() {
-        if i > 0 {
-            job.append(", ", 0.0, format(DIM));
-        }
-        job.append(word, 0.0, format(if *here { GREEN } else { DIM }));
-    }
+    let mut job = platform_job(font.clone(), &detail.platforms);
     if detail.platforms.is_empty() {
-        job.append("no platforms listed", 0.0, format(DIM));
+        job.append("no platforms listed", 0.0, text_format(&font, DIM));
     }
     for note in &detail.notes {
-        job.append(" · ", 0.0, format(DIM));
-        job.append(note, 0.0, format(DIM));
+        job.append(" · ", 0.0, text_format(&font, DIM));
+        job.append(note, 0.0, text_format(&font, DIM));
     }
     job.wrap.max_width = inner;
     job.wrap.max_rows = 2;
@@ -2675,7 +2618,7 @@ pub fn toolbar(
         hovered: None,
         rect: Rect::NOTHING,
     };
-    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    let pointer_moved = pointer_moved(ui);
     let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = m.space(10.0);
         let mut first = 0;
@@ -2710,13 +2653,9 @@ pub fn toolbar(
     out
 }
 
-/// Short remaining-time text for progress lines.
-pub fn human_duration_seconds(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else {
-        format!("{}m {:02}s", seconds / 60, seconds % 60)
-    }
+/// How tall every progress bar is.
+fn progress_height(m: &Metrics) -> f32 {
+    m.space(6.0)
 }
 
 /// The app's styles.progress: a grey track and an accent fill with
@@ -2758,114 +2697,44 @@ fn progress_bar(ui: &Ui, rect: Rect, fraction: f32) {
     }
 }
 
-/// Seconds since the Unix epoch for an RFC 3339 timestamp as butler
-/// writes them: `2026-09-03T19:06:45.123Z` or with a `+hh:mm` offset.
-pub fn rfc3339_to_unix(text: &str) -> Option<i64> {
-    let text = text.trim();
-    let (date, rest) = text.split_at_checked(10)?;
-    let mut parts = date.split('-');
-    let year: i64 = parts.next()?.parse().ok()?;
-    let month: i64 = parts.next()?.parse().ok()?;
-    let day: i64 = parts.next()?.parse().ok()?;
-    let rest = rest.strip_prefix(['T', 't', ' '])?;
-    let (time, zone) = match rest.find(['Z', 'z', '+', '-']) {
-        Some(at) => rest.split_at(at),
-        None => (rest, "Z"),
-    };
-    let time = time.split('.').next()?;
-    let mut parts = time.split(':');
-    let hour: i64 = parts.next()?.parse().ok()?;
-    let minute: i64 = parts.next()?.parse().ok()?;
-    let second: i64 = parts.next().unwrap_or("0").parse().ok()?;
-    let offset = match zone {
-        "Z" | "z" => 0,
-        _ => {
-            let sign = if zone.starts_with('-') { -1 } else { 1 };
-            let mut parts = zone[1..].split(':');
-            let hours: i64 = parts.next()?.parse().ok()?;
-            let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
-            sign * (hours * 3600 + minutes * 60)
-        }
-    };
-    // Days from civil, Howard Hinnant's algorithm.
-    let (y, m) = if month <= 2 {
-        (year - 1, month + 9)
-    } else {
-        (year, month - 3)
-    };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    Some(days * 86400 + hour * 3600 + minute * 60 + second - offset)
-}
-
-/// "just now", "5 min ago", "3h ago", "2 days ago".
-pub fn human_time_ago(unix: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let seconds = (now - unix).max(0);
-    if seconds < 60 {
-        "just now".to_string()
-    } else if seconds < 3600 {
-        format!("{} min ago", seconds / 60)
-    } else if seconds < 86400 {
-        format!("{}h ago", seconds / 3600)
-    } else if seconds < 2 * 86400 {
-        "yesterday".to_string()
-    } else {
-        format!("{} days ago", seconds / 86400)
-    }
-}
-
-fn human_duration(seconds: i64) -> String {
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        format!("{minutes} min")
-    } else {
-        format!("{}h {:02}m", minutes / 60, minutes % 60)
-    }
-}
-
-impl Page {
-    pub fn is_library(&self) -> bool {
-        matches!(self, Page::Library)
-    }
-
-    /// A game's page with its first button focused.
-    pub fn game(id: i64) -> Self {
-        Page::Game {
-            id,
-            button: 0,
-            shot: None,
-        }
-    }
-}
-
 /// A modal question. Keyboard and controller focus go to it while it is
 /// up; the mouse can also pick a button. It dims the whole `screen` and centers itself in
 /// `page`, the part above the footer, whose hints are drawn over the dim.
-pub fn prompt(
-    ctx: &egui::Context,
-    m: &Metrics,
-    screen: Rect,
-    page: Rect,
-    prompt: &Prompt,
-    actions: &mut Vec<Action>,
-) {
-    egui::Area::new(egui::Id::new("prompt-dim"))
+/// How dark the screen goes behind an overlay.
+const DIM_ALPHA: u8 = 170;
+
+/// Dims the whole screen behind an overlay and takes its clicks, so
+/// nothing under it can be pressed. The response says when the dim
+/// itself was clicked, for overlays that close on it.
+fn backdrop(ctx: &egui::Context, id: &str, screen: Rect, alpha: u8) -> egui::Response {
+    egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .interactable(true)
         .show(ctx, |ui| {
-            ui.allocate_rect(screen, Sense::click());
+            let response = ui.allocate_rect(screen, Sense::click());
             ui.painter()
-                .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
-        });
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(alpha));
+            response
+        })
+        .inner
+}
+
+/// A card centered in `page`, the part above the footer, over a dimmed
+/// `screen`. `body` draws inside it and is told how tall the card may
+/// grow, so what it draws under its heading can scroll within that.
+fn modal(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    page: Rect,
+    id: &str,
+    body: impl FnOnce(&mut Ui, f32),
+) {
+    backdrop(ctx, &format!("{id}-dim"), screen, DIM_ALPHA);
     let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
-    let shown = egui::Area::new(egui::Id::new("prompt"))
+    let margin = m.space(24.0);
+    let shown = egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Foreground)
         .anchor(
             egui::Align2::CENTER_CENTER,
@@ -2876,104 +2745,135 @@ pub fn prompt(
                 .fill(TILE_BG)
                 .corner_radius(CornerRadius::same(14))
                 .stroke(Stroke::new(1.0, BORDER))
-                .inner_margin(m.space(24.0))
+                .inner_margin(margin)
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    // The dialog never outgrows the screen: under the title,
-                    // the body and the choices scroll together inside what
-                    // is left of it.
-                    let budget = page.height() * 0.9 - 2.0 * m.space(24.0);
-                    let top = ui.cursor().top();
-                    ui.label(
-                        egui::RichText::new(&prompt.title)
-                            .font(bold(m.dialog))
-                            .color(TEXT),
-                    );
-                    ui.add_space(m.space(10.0));
-                    let budget = (budget - (ui.cursor().top() - top)).max(m.space(60.0));
-                    // An area's ui is bounded by the dialog's size from the
-                    // previous frame, so a scroll area placed straight in it
-                    // would only get last frame's leftover and chase its own
-                    // tail. Hand it the budget as its own rect instead.
-                    ui.allocate_ui(vec2(ui.available_width(), budget), |ui| {
-                        // The bar stays visible whatever the input: on a pad
-                        // it is the one cue that the dialog goes on below.
-                        egui::ScrollArea::vertical()
-                            .id_salt("content")
-                            .auto_shrink([false, true])
-                            .max_height(budget)
-                            .scroll_bar_visibility(scroll_bar(ui, true))
-                            .show(ui, |ui| {
-                                if let Some((line, fraction)) = &prompt.progress {
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .font(FontId::proportional(m.caption))
-                                            .color(ACCENT),
-                                    );
-                                    ui.add_space(m.space(8.0));
-                                    let (bar, _) = ui.allocate_exact_size(
-                                        vec2(ui.available_width(), 8.0),
-                                        Sense::hover(),
-                                    );
-                                    progress_bar(ui, bar, *fraction);
-                                    ui.add_space(m.space(14.0));
-                                }
-                                if !prompt.body.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(&prompt.body)
-                                            .font(FontId::proportional(m.caption))
-                                            .color(DIM),
-                                    );
-                                    ui.add_space(m.space(18.0));
-                                }
-                                // Room for the focus ring, painted outside the pill.
-                                ui.add_space(m.ring);
-                                let choices = |ui: &mut Ui| {
-                                    ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
-                                    for (index, label) in prompt.choices.iter().enumerate() {
-                                        let focused = index == prompt.focus;
-                                        let primary = prompt.primary == Some(index);
-                                        let response = match prompt.details.get(index) {
-                                            Some(detail) => {
-                                                choice_card(ui, m, label, detail, focused)
-                                            }
-                                            None => pill(ui, m, label, focused, primary),
-                                        };
-                                        if focused {
-                                            ui.scroll_to_rect(response.rect.expand(m.ring), None);
-                                        }
-                                        if response.hovered()
-                                            && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                                        {
-                                            actions.push(Action::PromptFocus(index));
-                                        }
-                                        if response.clicked() {
-                                            actions.push(Action::Answer {
-                                                prompt: prompt.id,
-                                                choice: Some(index),
-                                            });
-                                        }
-                                    }
-                                };
-                                if prompt.stacked {
-                                    ui.vertical(choices);
-                                } else {
-                                    ui.horizontal_wrapped(choices);
-                                }
-                                ui.add_space(m.ring);
-                            });
-                    });
+                    body(ui, page.height() * 0.9 - 2.0 * margin);
                 });
         });
     // A centered area and a shrinking list settle over a few frames. A host
     // that redraws only on input would show the first frame's layout, so
     // ask for frames until the dialog holds still.
-    let id = egui::Id::new("prompt-rect");
+    let key = egui::Id::new(id).with("rect");
     let rect = shown.response.rect;
-    if ctx.data(|d| d.get_temp::<Rect>(id)) != Some(rect) {
-        ctx.data_mut(|d| d.insert_temp(id, rect));
+    if ctx.data(|d| d.get_temp::<Rect>(key)) != Some(rect) {
+        ctx.data_mut(|d| d.insert_temp(key, rect));
         ctx.request_repaint();
     }
+}
+
+/// The rest of a modal's content, scrolling inside the `height` the card
+/// has left. The scroll bar stays visible whatever the input: on a pad it
+/// is the one cue that the dialog goes on below.
+fn modal_rest(
+    ui: &mut Ui,
+    m: &Metrics,
+    height: f32,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    content: impl FnOnce(&mut Ui),
+) {
+    let height = height.max(m.space(60.0));
+    // An area's ui is bounded by the dialog's size from the previous
+    // frame, so a scroll area placed straight in it would only get last
+    // frame's leftover and chase its own tail. Hand it the height as its
+    // own rect instead.
+    ui.allocate_ui(vec2(ui.available_width(), height), |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt(salt)
+            .auto_shrink([false, true])
+            .max_height(height)
+            .scroll_bar_visibility(scroll_bar(ui, true))
+            .show(ui, content);
+    });
+}
+
+/// Whether the pointer moved this frame. A moving pointer takes focus
+/// from the keyboard or pad; one resting on a row leaves it alone.
+fn pointer_moved(ui: &Ui) -> bool {
+    ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+}
+
+/// Whether hovering this widget should move focus onto it.
+fn takes_focus(response: &egui::Response, pointer_moved: bool, focused: bool) -> bool {
+    response.hovered() && pointer_moved && !focused
+}
+
+pub fn prompt(
+    ctx: &egui::Context,
+    m: &Metrics,
+    screen: Rect,
+    page: Rect,
+    prompt: &Prompt,
+    actions: &mut Vec<Action>,
+) {
+    modal(ctx, m, screen, page, "prompt", |ui, budget| {
+        // The dialog never outgrows the screen: under the title, the body
+        // and the choices scroll together inside what is left of it.
+        let top = ui.cursor().top();
+        ui.label(
+            egui::RichText::new(&prompt.title)
+                .font(bold(m.dialog))
+                .color(TEXT),
+        );
+        ui.add_space(m.space(10.0));
+        let moved = pointer_moved(ui);
+        let rest = budget - (ui.cursor().top() - top);
+        modal_rest(ui, m, rest, "content", |ui| {
+            if let Some((line, fraction)) = &prompt.progress {
+                ui.label(
+                    egui::RichText::new(line)
+                        .font(FontId::proportional(m.caption))
+                        .color(ACCENT),
+                );
+                ui.add_space(m.space(8.0));
+                let (bar, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), progress_height(m)),
+                    Sense::hover(),
+                );
+                progress_bar(ui, bar, *fraction);
+                ui.add_space(m.space(14.0));
+            }
+            if !prompt.body.is_empty() {
+                ui.label(
+                    egui::RichText::new(&prompt.body)
+                        .font(FontId::proportional(m.caption))
+                        .color(DIM),
+                );
+                ui.add_space(m.space(18.0));
+            }
+            // Room for the focus ring, painted outside the pill.
+            ui.add_space(m.ring);
+            let choices = |ui: &mut Ui| {
+                ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
+                for (index, label) in prompt.choices.iter().enumerate() {
+                    let focused = index == prompt.focus;
+                    let primary = prompt.primary == Some(index);
+                    let response = match prompt.details.get(index) {
+                        Some(detail) => choice_card(ui, m, label, detail, focused),
+                        None => pill(ui, m, label, focused, primary),
+                    };
+                    if focused {
+                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                    }
+                    if takes_focus(&response, moved, focused) {
+                        actions.push(Action::PromptFocus(index));
+                    }
+                    if response.clicked() {
+                        actions.push(Action::Answer {
+                            prompt: prompt.id,
+                            choice: Some(index),
+                        });
+                    }
+                }
+            };
+            if prompt.stacked {
+                ui.vertical(choices);
+            } else {
+                ui.horizontal_wrapped(choices);
+            }
+            ui.add_space(m.ring);
+        });
+    });
 }
 
 /// How a game runs here, as the player reports it: a rating, then what
@@ -3131,150 +3031,98 @@ pub fn report(
     view: &ReportView,
     actions: &mut Vec<Action>,
 ) {
-    egui::Area::new(egui::Id::new("report-dim"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(screen.min)
-        .interactable(true)
-        .show(ctx, |ui| {
-            ui.allocate_rect(screen, Sense::click());
-            ui.painter()
-                .rect_filled(screen, 0.0, Color32::from_black_alpha(170));
-        });
-    let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
-    let shown = egui::Area::new(egui::Id::new("report"))
-        .order(egui::Order::Foreground)
-        .anchor(
-            egui::Align2::CENTER_CENTER,
-            page.center() - ctx.content_rect().center(),
-        )
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(TILE_BG)
-                .corner_radius(CornerRadius::same(14))
-                .stroke(Stroke::new(1.0, BORDER))
-                .inner_margin(m.space(24.0))
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    let budget = page.height() * 0.9 - 2.0 * m.space(24.0);
-                    let top = ui.cursor().top();
-                    let title = if view.picked {
-                        view.draft.rating.label()
-                    } else {
-                        "How did it run?"
-                    };
-                    ui.label(egui::RichText::new(title).font(bold(m.dialog)).color(TEXT));
-                    ui.add_space(m.space(4.0));
-                    let subtitle = if view.picked && view.draft.rating.asks_flags() {
-                        "What went wrong?"
-                    } else {
-                        view.game.as_str()
-                    };
-                    subtle_truncated(ui, m, subtitle);
-                    ui.add_space(m.space(10.0));
-                    // The note stays in view under the scrolling rows.
-                    let note = "Includes device details and the game's error output.";
-                    let note_height = m.caption + m.space(14.0);
-                    let budget =
-                        (budget - (ui.cursor().top() - top) - note_height).max(m.space(60.0));
-                    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-                    let mut row_response = |response: egui::Response, index: usize| {
-                        if response.hovered() && pointer_moved {
-                            actions.push(Action::ReportFocus(index));
+    modal(ctx, m, screen, page, "report", |ui, budget| {
+        let top = ui.cursor().top();
+        let title = if view.picked {
+            view.draft.rating.label()
+        } else {
+            "How did it run?"
+        };
+        ui.label(egui::RichText::new(title).font(bold(m.dialog)).color(TEXT));
+        ui.add_space(m.space(4.0));
+        let subtitle = if view.picked && view.draft.rating.asks_flags() {
+            "What went wrong?"
+        } else {
+            view.game.as_str()
+        };
+        subtle_truncated(ui, m, subtitle);
+        ui.add_space(m.space(10.0));
+        // The note stays in view under the scrolling rows.
+        let note = "Includes device details and the game's error output.";
+        let note_height = m.caption + m.space(14.0);
+        let rest = budget - (ui.cursor().top() - top) - note_height;
+        let moved = pointer_moved(ui);
+        let mut row_response = |response: egui::Response, index: usize| {
+            if takes_focus(&response, moved, index == view.focus) {
+                actions.push(Action::ReportFocus(index));
+            }
+            if response.clicked() {
+                actions.push(Action::ReportFocus(index));
+                actions.push(Action::Activate);
+            }
+        };
+        modal_rest(ui, m, rest, ("report", view.picked), |ui| {
+            ui.add_space(m.ring);
+            if !view.picked {
+                ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
+                for (index, rating) in Rating::ALL.iter().enumerate() {
+                    let focused = index == view.focus;
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.add_space(m.ring);
+                            pill(ui, m, rating.label(), focused, false)
+                        })
+                        .inner;
+                    if focused {
+                        ui.scroll_to_rect(response.rect.expand(m.ring), None);
+                    }
+                    row_response(response, index);
+                }
+            } else {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut index = 0;
+                if view.draft.rating.asks_flags() {
+                    for group in report::FLAG_GROUPS {
+                        group_heading(ui, m, group.label);
+                        for flag in group.flags {
+                            let checked = view.draft.flags.contains(&flag.id);
+                            let response = check_row(
+                                ui,
+                                m,
+                                ("flag", index),
+                                flag.label,
+                                checked,
+                                index == view.focus,
+                            );
+                            row_response(response, index);
+                            index += 1;
                         }
-                        if response.clicked() {
-                            actions.push(Action::ReportFocus(index));
-                            actions.push(Action::Activate);
+                    }
+                    ui.add_space(m.space(16.0));
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = m.space(12.0);
+                    ui.add_space(m.ring);
+                    for (offset, label) in ["Send", "Cancel"].iter().enumerate() {
+                        let row = index + offset;
+                        let focused = row == view.focus;
+                        let response = pill(ui, m, label, focused, offset == 0);
+                        if focused {
+                            ui.scroll_to_rect(response.rect.expand(m.ring), None);
                         }
-                    };
-                    ui.allocate_ui(vec2(ui.available_width(), budget), |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("report", view.picked))
-                            .auto_shrink([false, true])
-                            .max_height(budget)
-                            .scroll_bar_visibility(scroll_bar(ui, true))
-                            .show(ui, |ui| {
-                                ui.add_space(m.ring);
-                                if !view.picked {
-                                    ui.spacing_mut().item_spacing = m.space(1.0) * vec2(12.0, 10.0);
-                                    for (index, rating) in Rating::ALL.iter().enumerate() {
-                                        let focused = index == view.focus;
-                                        let response = ui
-                                            .horizontal(|ui| {
-                                                ui.add_space(m.ring);
-                                                pill(ui, m, rating.label(), focused, false)
-                                            })
-                                            .inner;
-                                        if focused {
-                                            ui.scroll_to_rect(response.rect.expand(m.ring), None);
-                                        }
-                                        row_response(response, index);
-                                    }
-                                } else {
-                                    ui.spacing_mut().item_spacing.y = 0.0;
-                                    let mut index = 0;
-                                    if view.draft.rating.asks_flags() {
-                                        for group in report::FLAG_GROUPS {
-                                            ui.add_space(m.space(6.0));
-                                            ui.horizontal(|ui| {
-                                                ui.add_space(m.ring + m.space(8.0));
-                                                ui.label(
-                                                    egui::RichText::new(group.label)
-                                                        .font(bold(m.caption))
-                                                        .color(DIM),
-                                                );
-                                            });
-                                            ui.add_space(m.space(4.0));
-                                            for flag in group.flags {
-                                                let checked = view.draft.flags.contains(&flag.id);
-                                                let response = check_row(
-                                                    ui,
-                                                    m,
-                                                    ("flag", index),
-                                                    flag.label,
-                                                    checked,
-                                                    index == view.focus,
-                                                );
-                                                row_response(response, index);
-                                                index += 1;
-                                            }
-                                        }
-                                        ui.add_space(m.space(16.0));
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = m.space(12.0);
-                                        ui.add_space(m.ring);
-                                        for (offset, label) in ["Send", "Cancel"].iter().enumerate()
-                                        {
-                                            let row = index + offset;
-                                            let focused = row == view.focus;
-                                            let response = pill(ui, m, label, focused, offset == 0);
-                                            if focused {
-                                                ui.scroll_to_rect(
-                                                    response.rect.expand(m.ring),
-                                                    None,
-                                                );
-                                            }
-                                            row_response(response, row);
-                                        }
-                                    });
-                                }
-                                ui.add_space(m.ring);
-                            });
-                    });
-                    ui.add_space(m.space(10.0));
-                    ui.label(
-                        egui::RichText::new(note)
-                            .font(FontId::proportional(m.caption))
-                            .color(DIM),
-                    );
+                        row_response(response, row);
+                    }
                 });
+            }
+            ui.add_space(m.ring);
         });
-    let id = egui::Id::new("report-rect");
-    let rect = shown.response.rect;
-    if ctx.data(|d| d.get_temp::<Rect>(id)) != Some(rect) {
-        ctx.data_mut(|d| d.insert_temp(id, rect));
-        ctx.request_repaint();
-    }
+        ui.add_space(m.space(10.0));
+        ui.label(
+            egui::RichText::new(note)
+                .font(FontId::proportional(m.caption))
+                .color(DIM),
+        );
+    });
 }
 
 /// A game's page as a QR code, to open on a phone.
@@ -3429,46 +3277,60 @@ pub fn playable_types(
     row: usize,
     actions: &mut Vec<Action>,
 ) {
-    ui.label(
-        egui::RichText::new("Playable types")
-            .font(bold(m.heading))
-            .color(TEXT),
-    );
-    ui.add_space(m.space(4.0));
-    subtle(ui, m, "Playable here shows games of the checked types.");
+    let note = "Playable here shows games of the checked types.";
+    list_page(ui, m, "Playable types", Some(note), |ui, moved| {
+        let all_on = types.iter().all(|t| !hidden.contains(&t.id));
+        let mut group = None;
+        let rows = std::iter::once(("Everything", all_on, None)).chain(
+            types
+                .iter()
+                .map(|t| (t.label.as_str(), !hidden.contains(&t.id), Some(t))),
+        );
+        for (index, (label, checked, kind)) in rows.enumerate() {
+            if let Some(kind) = kind
+                && group != Some(kind.group)
+            {
+                group = Some(kind.group);
+                group_heading(ui, m, kind.group.label());
+            }
+            let response = check_row(ui, m, ("type", index), label, checked, index == row);
+            if takes_focus(&response, moved, index == row) {
+                actions.push(Action::FocusTypeRow(index));
+            }
+            if response.clicked() {
+                actions.push(Action::FocusTypeRow(index));
+                actions.push(Action::Activate);
+            }
+        }
+    });
+}
+
+/// A page of rows under a heading. The rows scroll, reaching a ring's
+/// width into the margins so focus rings paint uncut; `rows` is told
+/// whether the pointer moved this frame.
+fn list_page(
+    ui: &mut Ui,
+    m: &Metrics,
+    title: &str,
+    note: Option<&str>,
+    rows: impl FnOnce(&mut Ui, bool),
+) {
+    ui.label(egui::RichText::new(title).font(bold(m.heading)).color(TEXT));
+    if let Some(note) = note {
+        ui.add_space(m.space(4.0));
+        subtle(ui, m, note);
+    }
     ui.add_space(m.space(10.0));
     let rect = ui.available_rect_before_wrap().expand2(vec2(m.ring, 0.0));
     let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    let moved = pointer_moved(ui);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_bar_visibility(scroll_bar(ui, false))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add_space(m.ring);
-            let all_on = types.iter().all(|t| !hidden.contains(&t.id));
-            let mut group = None;
-            let rows = std::iter::once(("Everything", all_on, None)).chain(
-                types
-                    .iter()
-                    .map(|t| (t.label.as_str(), !hidden.contains(&t.id), Some(t))),
-            );
-            for (index, (label, checked, kind)) in rows.enumerate() {
-                if let Some(kind) = kind
-                    && group != Some(kind.group)
-                {
-                    group = Some(kind.group);
-                    group_heading(ui, m, kind.group.label());
-                }
-                let response = check_row(ui, m, ("type", index), label, checked, index == row);
-                if response.hovered() && pointer_moved {
-                    actions.push(Action::FocusTypeRow(index));
-                }
-                if response.clicked() {
-                    actions.push(Action::FocusTypeRow(index));
-                    actions.push(Action::Activate);
-                }
-            }
+            rows(ui, moved);
             ui.add_space(m.ring);
         });
 }
@@ -3593,69 +3455,50 @@ pub fn settings(
     row: usize,
     actions: &mut Vec<Action>,
 ) {
-    ui.label(
-        egui::RichText::new("Settings")
-            .font(bold(m.heading))
-            .color(TEXT),
-    );
-    ui.add_space(m.space(10.0));
-    let rect = ui.available_rect_before_wrap().expand2(vec2(m.ring, 0.0));
-    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(scroll_bar(ui, false))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(m.ring);
-            let mut group = None;
-            for (index, setting) in rows.iter().enumerate() {
-                if group != Some(setting.group) {
-                    group = Some(setting.group);
-                    group_heading(ui, m, setting.group);
-                }
-                let focused = index == row;
-                let id = ("setting", index);
-                let response = match &setting.kind {
-                    SettingKind::Toggle { on, .. } => {
-                        check_row(ui, m, id, setting.label, *on, focused)
-                    }
-                    SettingKind::Link(_) => link_row(ui, m, id, setting.label, focused),
-                };
-                if response.hovered() && pointer_moved {
-                    actions.push(Action::FocusSettingsRow(index));
-                }
-                if response.clicked() {
-                    actions.push(Action::FocusSettingsRow(index));
-                    actions.push(Action::Activate);
-                }
+    list_page(ui, m, "Settings", None, |ui, moved| {
+        let mut group = None;
+        for (index, setting) in rows.iter().enumerate() {
+            if group != Some(setting.group) {
+                group = Some(setting.group);
+                group_heading(ui, m, setting.group);
             }
-            if !about.is_empty() {
-                group_heading(ui, m, "About");
-                for (label, value) in about {
-                    let (rect, _) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), m.space(28.0)),
-                        Sense::hover(),
-                    );
-                    let left = rect.left() + m.ring + m.space(8.0);
-                    ui.painter().text(
-                        pos2(left, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        label,
-                        FontId::proportional(m.body),
-                        DIM,
-                    );
-                    ui.painter().text(
-                        pos2(left + m.space(72.0), rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        value,
-                        FontId::proportional(m.body),
-                        TEXT,
-                    );
-                }
+            let focused = index == row;
+            let id = ("setting", index);
+            let response = match &setting.kind {
+                SettingKind::Toggle { on, .. } => check_row(ui, m, id, setting.label, *on, focused),
+                SettingKind::Link(_) => link_row(ui, m, id, setting.label, focused),
+            };
+            if takes_focus(&response, moved, focused) {
+                actions.push(Action::FocusSettingsRow(index));
             }
-            ui.add_space(m.ring);
-        });
+            if response.clicked() {
+                actions.push(Action::FocusSettingsRow(index));
+                actions.push(Action::Activate);
+            }
+        }
+        if !about.is_empty() {
+            group_heading(ui, m, "About");
+            for (label, value) in about {
+                let (rect, _) = ui
+                    .allocate_exact_size(vec2(ui.available_width(), m.space(28.0)), Sense::hover());
+                let left = rect.left() + m.ring + m.space(8.0);
+                ui.painter().text(
+                    pos2(left, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(m.body),
+                    DIM,
+                );
+                ui.painter().text(
+                    pos2(left + m.space(72.0), rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    value,
+                    FontId::proportional(m.body),
+                    TEXT,
+                );
+            }
+        }
+    });
 }
 
 /// How far the drawer has slid in, 0 to 1, animating toward `open`.
@@ -3692,18 +3535,10 @@ pub fn drawer(
         return;
     }
     let width = drawer_width(m, screen);
-    egui::Area::new(egui::Id::new("drawer-dim"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(screen.min)
-        .interactable(true)
-        .show(ctx, |ui| {
-            let response = ui.allocate_rect(screen, Sense::click());
-            ui.painter()
-                .rect_filled(screen, 0.0, Color32::from_black_alpha((170.0 * open) as u8));
-            if response.clicked() && focus.is_some() {
-                actions.push(Action::Back);
-            }
-        });
+    let dim = backdrop(ctx, "drawer-dim", screen, (DIM_ALPHA as f32 * open) as u8);
+    if dim.clicked() && focus.is_some() {
+        actions.push(Action::Back);
+    }
     let panel = Rect::from_min_size(
         egui::pos2(screen.min.x - width * (1.0 - open), screen.min.y),
         vec2(width, screen.height()),
@@ -3723,7 +3558,7 @@ pub fn drawer(
                     Rect::from_min_size(egui::pos2(panel.min.x, cursor), vec2(width, row_height));
                 let response = ui.allocate_rect(row, Sense::click());
                 let focused = focus == Some(index);
-                if response.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                if takes_focus(&response, pointer_moved(ui), focused) {
                     actions.push(Action::MenuFocus(index));
                 }
                 if focused {
@@ -3967,7 +3802,7 @@ fn filter_group(
         hovered: None,
         rect: Rect::NOTHING,
     };
-    let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+    let pointer_moved = pointer_moved(ui);
     let radius = m.space(12.0);
     let border = m.space(1.25).max(1.0);
     let icon = m.icon(12.0);
@@ -4355,10 +4190,7 @@ pub fn downloads(
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
                 let rect = rect.translate(vec2(m.ring, 0.0));
-                // A moving pointer takes focus, as it does over tiles; a
-                // pointer resting on a row leaves keyboard focus alone.
-                let pointer_moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-                if response.hovered() && pointer_moved && !focused_row {
+                if takes_focus(&response, pointer_moved(ui), focused_row) {
                     actions.push(Action::FocusDownload {
                         row: index,
                         button: 0,
@@ -4370,12 +4202,7 @@ pub fn downloads(
                     ui.scroll_to_rect(rect.expand(m.ring), None);
                 }
                 if focused_row {
-                    ui.painter().rect_stroke(
-                        rect.expand(2.0),
-                        CornerRadius::same(8),
-                        Stroke::new(3.0, ACCENT),
-                        egui::StrokeKind::Outside,
-                    );
+                    focus_ring(ui, rect, [m.space(6.0); 4], m);
                 }
                 ui.painter().rect_filled(rect, radius, TILE_BG);
 
@@ -4406,7 +4233,7 @@ pub fn downloads(
                             let focused = view.focus == DownloadFocus::Row { row: index, button };
                             let response = pill(ui, m, label, focused, false);
                             buttons_left = buttons_left.min(response.rect.left());
-                            if response.hovered() && pointer_moved && !focused {
+                            if takes_focus(&response, pointer_moved(ui), focused) {
                                 actions.push(Action::FocusDownload { row: index, button });
                             }
                             if response.clicked() {
@@ -4419,13 +4246,7 @@ pub fn downloads(
                 let text_left = thumb.right() + m.space(16.0);
                 let text_right = buttons_left - m.space(16.0);
                 let text_width = (text_right - text_left).max(0.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(
-                    row.title.clone(),
-                    bold(m.title),
-                    TEXT,
-                );
-                job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
-                let title = ui.painter().layout_job(job);
+                let title = one_line(ui, &row.title, bold(m.title), TEXT, text_width);
                 let detail_color = if row.failed { ACCENT } else { DIM };
                 let detail = ui.painter().layout(
                     row.detail.clone(),
@@ -4446,8 +4267,10 @@ pub fn downloads(
                     .galley(pos2(text_left, y), detail.clone(), detail_color);
                 y += detail.size().y + m.space(10.0);
                 if let Some(progress) = row.progress {
-                    let bar =
-                        Rect::from_min_size(pos2(text_left, y), vec2(text_width, m.space(6.0)));
+                    let bar = Rect::from_min_size(
+                        pos2(text_left, y),
+                        vec2(text_width, progress_height(m)),
+                    );
                     progress_bar(ui, bar, progress);
                 }
             }
@@ -4459,7 +4282,7 @@ pub fn downloads(
 
 #[cfg(test)]
 mod tests {
-    use super::{Rows, Section, rfc3339_to_unix};
+    use super::{Rows, Section};
 
     fn section(games: &[i64]) -> Section {
         Section {
@@ -4489,20 +4312,5 @@ mod tests {
         rows.row = 3;
         rows.settle_on_game();
         assert_eq!(rows.row, 3);
-    }
-
-    #[test]
-    fn parses_butler_timestamps() {
-        assert_eq!(rfc3339_to_unix("2026-09-03T19:06:45Z"), Some(1788462405));
-        assert_eq!(
-            rfc3339_to_unix("2026-09-03T19:06:45.123456789Z"),
-            Some(1788462405)
-        );
-        assert_eq!(
-            rfc3339_to_unix("2026-09-03T12:06:45-07:00"),
-            Some(1788462405)
-        );
-        assert_eq!(rfc3339_to_unix("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(rfc3339_to_unix("nope"), None);
     }
 }
