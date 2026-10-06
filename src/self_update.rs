@@ -8,7 +8,6 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use sha2::{Digest, Sha256};
 
 const LATEST_URL: &str = "https://api.github.com/repos/itchio/zitch/releases/latest";
-const USER_AGENT: &str = concat!("zitch/", env!("ZITCH_VERSION"));
 const ARCHIVE_DIR: &str = "/mnt/mmc/ARCHIVE";
 const ASSET_SUFFIX: &str = "-muos.muxapp";
 const SUMS_NAME: &str = "SHA256SUMS";
@@ -143,8 +142,8 @@ fn current_version() -> String {
 }
 
 fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
-    ureq::get(url)
-        .header("User-Agent", USER_AGENT)
+    crate::http::agent()
+        .get(url)
         .call()
         .map_err(|e| e.to_string())
 }

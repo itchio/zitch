@@ -5,15 +5,18 @@ use std::time::Instant;
 
 use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
 
+use crate::actions::{Action, Direction, Page, Tab, wrap_step};
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 use crate::model::human_size;
 use crate::model::{
-    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Mark, Page,
-    PlayableType, Prompt, Tab, UploadDetail, UploadExt, human_duration, human_duration_seconds,
-    platform_names, playable_here, scanned_platform_words, wrap_step,
+    Cave, Game, GameUpdate, InstallState, LaunchFailure, Mark, Prompt, UploadExt, human_duration,
+    human_duration_seconds,
 };
 use crate::page_info::PageInfo;
+use crate::playable::{
+    PlayableType, UploadDetail, platform_names, playable_here, scanned_platform_words,
+};
 use crate::qr::QrCode;
 use crate::report::{self, Rating, Report, SavedReport};
 

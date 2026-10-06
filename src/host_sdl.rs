@@ -13,11 +13,11 @@ use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::MouseButton;
 
+use crate::actions::Action;
 use crate::app::{App, Options, Shot};
 use crate::backend::{Backend, Waker};
 use crate::gamepad::{Gamepad, PadButton, Stick, Triggers, button_action};
 use crate::images::CoverLoader;
-use crate::model::Action;
 
 pub struct Window {
     pub size: (f32, f32),
@@ -577,7 +577,7 @@ impl Pads {
     }
 
     /// Repeats due now for anything still held.
-    fn repeat(&mut self) -> Vec<crate::model::Direction> {
+    fn repeat(&mut self) -> Vec<crate::actions::Direction> {
         let mut moves = Vec::new();
         if self.stick.deadline().is_some() {
             moves.extend(self.stick.update(self.stick_pos.0, self.stick_pos.1));

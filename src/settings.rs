@@ -36,37 +36,11 @@ impl Settings {
     /// The saved settings, or the defaults when there are none or the
     /// file cannot be read.
     pub fn load(path: &Path) -> Self {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Self::default();
-            }
-            Err(error) => {
-                log::warn!("reading {}: {error}", path.display());
-                return Self::default();
-            }
-        };
-        serde_json::from_str(&text).unwrap_or_else(|error| {
-            log::warn!("reading {}: {error}", path.display());
-            Self::default()
-        })
+        crate::json_file::load(path)
     }
 
-    /// Writes beside, then renames, so losing power mid-write leaves the
-    /// old file whole.
     pub fn save(&self, path: &Path) {
-        let result = (|| -> std::io::Result<()> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-            let tmp = path.with_extension("json.part");
-            std::fs::write(&tmp, text)?;
-            std::fs::rename(&tmp, path)
-        })();
-        if let Err(error) = result {
-            log::warn!("saving {}: {error}", path.display());
-        }
+        crate::json_file::save(path, self);
     }
 }
 

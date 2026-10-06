@@ -33,9 +33,12 @@ use crate::butlerd::types::{
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
-    Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
-    GameUpdate, LaunchFailure, Launched, Profile, Prompt, PromptOrigin, UploadDetail, UploadExt,
-    UserExt, scans_decide, upload_detail, upload_platform_names, upload_runs_here,
+    Cave, Collection, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure,
+    Launched, Profile, Prompt, PromptOrigin, UploadExt, UserExt,
+};
+use crate::playable::{
+    CollectionFilter, UploadDetail, scans_decide, upload_detail, upload_platform_names,
+    upload_runs_here,
 };
 use crate::report::{Report, Run, Strategy};
 

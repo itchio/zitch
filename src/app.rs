@@ -4,19 +4,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::actions::{Action, Direction, Page, Tab, wrap_step};
 use crate::backend::{Backend, Command, Event};
 use crate::battery::Battery;
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
 use crate::model::{
-    Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
-    DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
-    Launched, Loadable, Mark, Page, Profile, Prompt, PromptOrigin, RatingFilter, Tab, UploadExt,
-    UserExt, human_duration_seconds, human_size, human_time_ago, known_playable_here,
-    rfc3339_to_unix, wrap_step,
+    Cave, CaveExt, CollectionGames, Download, DownloadProgress, DownloadReason, Game, GameUpdate,
+    InstallState, Kind, LaunchFailure, Launched, Loadable, Mark, Profile, Prompt, PromptOrigin,
+    RatingFilter, UploadExt, UserExt, human_duration_seconds, human_size, human_time_ago,
+    rfc3339_to_unix,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
+use crate::playable::{CollectionFilter, known_playable_here};
 use crate::qr::QrCode;
 use crate::report::{Rating, Report, Reports, Run, Runs, SavedReport, SavedRun};
 use crate::sample;
@@ -333,11 +334,11 @@ impl App {
         let settings = Settings::load(&settings_path);
         let runs_path = settings_path.with_file_name("runs.json");
         let reports_path = settings_path.with_file_name("reports.json");
-        let reports: Reports = crate::report::load(&reports_path);
+        let reports: Reports = crate::json_file::load(&reports_path);
         // Hiding every type this device has counts as hiding none, as the
         // filter treats it, so the page shows them all on.
         let mut playable_hidden = settings.playable_hidden;
-        if crate::model::device_platforms()
+        if crate::playable::device_platforms()
             .iter()
             .all(|p| playable_hidden.contains(p))
         {
@@ -402,7 +403,7 @@ impl App {
             page_scroll: ui::PageScroll::default(),
             report: None,
             prompt_options: Vec::new(),
-            runs: crate::report::load(&runs_path),
+            runs: crate::json_file::load(&runs_path),
             runs_path: shot.is_none().then_some(runs_path),
             reports,
             marks: Default::default(),
@@ -1151,7 +1152,7 @@ impl App {
                 }
                 Page::PlayableTypes { row } => {
                     // Everything, then each type.
-                    let last = crate::model::playable_types().len();
+                    let last = crate::playable::playable_types().len();
                     let page = 6;
                     let row = match direction {
                         Direction::Up | Direction::Down => wrap_step(row, last + 1, direction),
@@ -1221,7 +1222,7 @@ impl App {
                     }
                 }
                 Page::PlayableTypes { row } => {
-                    let action = match crate::model::type_at_row(row) {
+                    let action = match crate::playable::type_at_row(row) {
                         Some(t) => Action::TogglePlayableType(t.id.clone()),
                         None => Action::AllPlayableTypes,
                     };
@@ -1254,7 +1255,7 @@ impl App {
                 self.playable_filter_changed();
             }
             Action::OnlyPlayableType(id) => {
-                self.playable_hidden = crate::model::playable_types()
+                self.playable_hidden = crate::playable::playable_types()
                     .iter()
                     .map(|t| t.id.clone())
                     .filter(|t| *t != id)
@@ -1399,7 +1400,7 @@ impl App {
                 Page::Library => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
                 Page::PlayableTypes { row } => {
-                    if let Some(t) = crate::model::type_at_row(row) {
+                    if let Some(t) = crate::playable::type_at_row(row) {
                         self.actions.push(Action::OnlyPlayableType(t.id.clone()));
                     }
                 }
@@ -1693,7 +1694,7 @@ impl App {
 
     /// How many of the device's types "Playable here" includes.
     fn shown_type_count(&self) -> usize {
-        crate::model::device_platforms()
+        crate::playable::device_platforms()
             .iter()
             .filter(|p| !self.playable_hidden.contains(p))
             .count()
@@ -2695,7 +2696,7 @@ impl App {
             self.runs.retain(|id, _| caves.iter().any(|c| &c.id == id));
         }
         if let Some(path) = &self.runs_path {
-            crate::report::save(path, &self.runs);
+            crate::json_file::save(path, &self.runs);
         }
         self.refresh_marks();
     }
@@ -2869,7 +2870,7 @@ impl App {
 
     fn save_reports(&self) {
         if let Some(path) = &self.reports_path {
-            crate::report::save(path, &self.reports);
+            crate::json_file::save(path, &self.reports);
         }
     }
 
@@ -3313,9 +3314,10 @@ impl App {
             }
             Page::PlayableTypes { row } => {
                 let mut hints = vec![(vec![Glyph::NavigateVertical], "Choose".to_string())];
-                match crate::model::type_at_row(row) {
+                match crate::playable::type_at_row(row) {
                     // Everything is already on: A has nothing to do.
-                    None if self.shown_type_count() == crate::model::device_platforms().len() => {}
+                    None if self.shown_type_count()
+                        == crate::playable::device_platforms().len() => {}
                     None => hints.push((vec![Glyph::Confirm], "Turn all on".to_string())),
                     Some(t) => {
                         let label = if self.playable_hidden.contains(&t.id) {
@@ -3613,7 +3615,7 @@ impl App {
                     (_, Page::PlayableTypes { row }) => ui::playable_types(
                         ui,
                         &m,
-                        crate::model::playable_types(),
+                        crate::playable::playable_types(),
                         &self.playable_hidden,
                         row,
                         &mut self.actions,

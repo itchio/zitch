@@ -1,7 +1,8 @@
 //! Stand-ins the screenshot script shows, to look at dialogs without a
 //! game that brings them up.
 
-use crate::model::{Prompt, PromptOrigin, UploadDetail};
+use crate::model::{Prompt, PromptOrigin};
+use crate::playable::UploadDetail;
 use crate::report::{Rating, Report, Run};
 use crate::ui::ReportView;
 

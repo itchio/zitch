@@ -1,3 +1,4 @@
+mod actions;
 mod app;
 mod backend;
 mod battery;
@@ -7,11 +8,14 @@ mod gamepad;
 mod glyphs;
 #[cfg(feature = "sdl-host")]
 mod host_sdl;
+mod http;
 mod images;
 mod intro;
+mod json_file;
 mod model;
 mod muos;
 mod page_info;
+mod playable;
 mod qr;
 mod report;
 mod sample;

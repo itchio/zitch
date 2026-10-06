@@ -9,7 +9,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::model::{Action, Direction};
+use crate::actions::{Action, Direction};
 
 const STICK_THRESHOLD: f32 = 0.5;
 const STICK_FIRST_REPEAT: Duration = Duration::from_millis(350);
@@ -258,7 +258,7 @@ mod reader {
     use gilrs::{Axis, Button, EventType, Gilrs};
 
     use super::{Gamepad, PadButton, PadSender, Stick, Triggers, button_action};
-    use crate::model::{Action, Direction};
+    use crate::actions::{Action, Direction};
 
     /// How long the reader sleeps with nothing held. Hotplug and input both
     /// wake it early, so this only bounds how fast it notices being asked

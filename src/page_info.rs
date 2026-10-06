@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-const USER_AGENT: &str = concat!("zitch/", env!("ZITCH_VERSION"));
 const TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Games whose details stay in memory; the least recently shown go first.
 const KEEP: usize = 20;
 /// How long a failed fetch waits before it is tried again.
@@ -274,8 +274,9 @@ impl Inner {
 /// The parsed payload, or why not with how long to wait before trying
 /// again.
 fn fetch(url: &str) -> Result<PageInfo, (String, Duration)> {
-    let response = ureq::get(url)
-        .header("User-Agent", USER_AGENT)
+    // A small file: the whole exchange gets one deadline.
+    let response = crate::http::agent()
+        .get(url)
         .config()
         .timeout_global(Some(TIMEOUT))
         .build()

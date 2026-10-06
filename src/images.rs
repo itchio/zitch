@@ -715,7 +715,10 @@ impl Inner {
     ) -> Result<image::DynamicImage, (String, Duration)> {
         use std::io::Read;
         let retry = |e: String| (e, RETRY_AFTER);
-        let response = ureq::get(url).call().map_err(|e| retry(e.to_string()))?;
+        let response = crate::http::agent()
+            .get(url)
+            .call()
+            .map_err(|e| retry(e.to_string()))?;
         // One byte past the limit tells a file at the limit from one over it.
         let cap = policy.max_download + 1;
         let mut body = response.into_body().into_reader().take(cap);
@@ -785,7 +788,10 @@ impl Inner {
             touch(&path);
             return Ok(bytes);
         }
-        let response = ureq::get(url).call().map_err(|e| e.to_string())?;
+        let response = crate::http::agent()
+            .get(url)
+            .call()
+            .map_err(|e| e.to_string())?;
         let bytes = response
             .into_body()
             .with_config()

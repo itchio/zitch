@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -270,39 +269,6 @@ pub fn flag(id: &str) -> Option<&'static Flag> {
     flags().map(|(_, f)| f).find(|f| f.id == id)
 }
 
-/// A JSON file's contents, or the default when it is missing or
-/// unreadable.
-pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
-            log::warn!("reading {}: {error}", path.display());
-            T::default()
-        }),
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("reading {}: {error}", path.display());
-            }
-            T::default()
-        }
-    }
-}
-
-/// Writes beside, then renames, like the settings.
-pub fn save<T: Serialize>(path: &Path, value: &T) {
-    let result = (|| -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let text = serde_json::to_string(value).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("json.part");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(error) = result {
-        log::warn!("saving {}: {error}", path.display());
-    }
-}
-
 /// The last `max` bytes of `text`, cut at a character boundary.
 pub fn tail(text: &str, max: usize) -> &str {
     let mut start = text.len().saturating_sub(max);
@@ -374,9 +340,9 @@ pub fn saved_api_key(dbpath: &Path, profile_id: i64) -> Result<String> {
 pub fn send(api_url: &str, api_key: &str, report: &Report) -> Result<()> {
     let url = format!("{api_url}/games/{}/compatibility-reports", report.game_id);
     let form = report.form(crate::device_info::for_report());
-    let mut response = ureq::post(&url)
+    let mut response = crate::http::agent()
+        .post(&url)
         .header("Authorization", &format!("Bearer {api_key}"))
-        .header("User-Agent", concat!("zitch/", env!("ZITCH_VERSION")))
         .config()
         .http_status_as_error(false)
         .build()
