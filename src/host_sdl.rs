@@ -22,6 +22,65 @@ use crate::images::CoverLoader;
 pub struct Window {
     pub size: (f32, f32),
     pub fullscreen: bool,
+    /// Log how often the loop woke and drew, and what asked for it.
+    pub frame_stats: bool,
+}
+
+/// How often the frame stats are logged.
+const STATS_EVERY: Duration = Duration::from_secs(5);
+
+/// What the loop did since the last report, for finding what keeps it
+/// awake on a battery.
+struct FrameStats {
+    since: Instant,
+    /// Passes through the interface, drawn or not.
+    passes: u32,
+    /// Frames put on screen.
+    drawn: u32,
+    /// Looks at SDL's queue while waiting.
+    polls: u32,
+    /// Passes that had SDL input.
+    input: u32,
+    /// Who asked for each pass, by where the request was made.
+    causes: std::collections::BTreeMap<String, u32>,
+}
+
+impl FrameStats {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            passes: 0,
+            drawn: 0,
+            polls: 0,
+            input: 0,
+            causes: Default::default(),
+        }
+    }
+
+    fn report(&mut self) {
+        if self.since.elapsed() < STATS_EVERY {
+            return;
+        }
+        let secs = self.since.elapsed().as_secs_f32();
+        let causes: Vec<String> = self
+            .causes
+            .iter()
+            .map(|(cause, count)| format!("{cause} x{count}"))
+            .collect();
+        log::info!(
+            "frames: {:.1}/s drawn, {:.1}/s passes, {:.1}/s polls, {} with input; asked by: {}",
+            self.drawn as f32 / secs,
+            self.passes as f32 / secs,
+            self.polls as f32 / secs,
+            self.input,
+            if causes.is_empty() {
+                "nothing".to_string()
+            } else {
+                causes.join(", ")
+            },
+        );
+        *self = Self::new();
+    }
 }
 
 /// SDL treats a trigger as an axis; past this it counts as pressed.
@@ -154,6 +213,7 @@ pub fn run(
     // Two frames of a colour nothing else uses, one per buffer, make every
     // tile different from what the GPU remembers.
     let mut scrub = false;
+    let mut stats = window.frame_stats.then(FrameStats::new);
 
     'frames: loop {
         let deadline = [
@@ -176,6 +236,14 @@ pub fn run(
                 break;
             }
             sdl_events = event_pump.poll_iter().collect();
+            if let Some(stats) = &mut stats {
+                stats.polls += 1;
+                stats.report();
+            }
+        }
+        if let Some(stats) = &mut stats {
+            stats.passes += 1;
+            stats.input += u32::from(!sdl_events.is_empty());
         }
         let (w, _) = sdl_window.size();
         let (pw, ph) = sdl_window.drawable_size();
@@ -237,6 +305,16 @@ pub fn run(
             app.update_logic(ui.ctx());
             app.update_ui(ui);
         });
+        if let Some(stats) = &mut stats {
+            for cause in ctx.repaint_causes() {
+                let file = cause.file.rsplit('/').next().unwrap_or(cause.file);
+                *stats
+                    .causes
+                    .entry(format!("{file}:{}", cause.line))
+                    .or_default() += 1;
+            }
+            stats.report();
+        }
         let egui::FullOutput {
             platform_output,
             mut textures_delta,
@@ -317,6 +395,9 @@ pub fn run(
             wait = Duration::ZERO;
         }
         sdl_window.gl_swap_window();
+        if let Some(stats) = &mut stats {
+            stats.drawn += 1;
+        }
         if close {
             break;
         }

@@ -3836,7 +3836,13 @@ impl App {
         }
         self.apply_actions(ui.ctx());
         self.covers.end_frame();
-        if !self.installs.is_empty() {
+        // Progress lines tick along while something is installing; one that
+        // failed just sits there until it is dismissed.
+        if self
+            .installs
+            .values()
+            .any(|install| install.error.is_none())
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
     }

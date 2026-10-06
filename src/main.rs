@@ -111,6 +111,11 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Log how often the frame loop woke and drew, and what asked for it.
+    #[cfg(feature = "sdl-host")]
+    #[arg(long, hide = true)]
+    frame_stats: bool,
+
     /// The API the sign-in talks to. For development.
     #[arg(
         long,
@@ -224,6 +229,7 @@ fn main() -> anyhow::Result<()> {
             host_sdl::Window {
                 size: cli.window,
                 fullscreen: cli.fullscreen,
+                frame_stats: cli.frame_stats,
             },
         )
     }
