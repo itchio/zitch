@@ -146,6 +146,8 @@ pub struct App {
     detail_scroll: Option<ui::DetailScroll>,
     /// Game pages opened so far; each opening starts at the top.
     detail_visit: u64,
+    /// How the open game's page is scrolled.
+    page_scroll: ui::PageScroll,
     /// What the game options list does, by choice.
     game_options: Vec<Action>,
     /// How a game runs here, while the player fills it in.
@@ -377,6 +379,7 @@ impl App {
             viewer: None,
             detail_scroll: None,
             detail_visit: 0,
+            page_scroll: ui::PageScroll::default(),
             report: None,
             game_options: Vec::new(),
             runs: crate::report::load_runs(&runs_path),
@@ -1298,6 +1301,7 @@ impl App {
                 }
                 if matches!(page, Page::Game { .. }) {
                     self.detail_visit += 1;
+                    self.page_scroll = ui::PageScroll::default();
                 }
                 self.page = page;
             }
@@ -3394,6 +3398,7 @@ impl App {
                                         scroll: self.detail_scroll.take(),
                                         visit: self.detail_visit,
                                     },
+                                    &mut self.page_scroll,
                                     &mut self.actions,
                                 );
                             }

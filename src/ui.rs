@@ -1635,7 +1635,29 @@ pub enum DetailScroll {
     End,
 }
 
-pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Action>) {
+/// Where the open game's page is scrolled, eased with [`glide`] the way
+/// the library's rows are. Kept for one opening of a page.
+#[derive(Debug, Default)]
+pub struct PageScroll {
+    vscroll: f32,
+    vgoal: Option<f32>,
+    hscroll: f32,
+    hgoal: Option<f32>,
+    /// How far the page can scroll, as last laid out.
+    vmax: f32,
+    /// The Screenshots heading's top and the bottom of the page info,
+    /// relative to the page's top, as last laid out.
+    heading_top: Option<f32>,
+    info_bottom: f32,
+}
+
+pub fn game_detail(
+    ui: &mut Ui,
+    m: &Metrics,
+    view: GameView,
+    page: &mut PageScroll,
+    actions: &mut Vec<Action>,
+) {
     let GameView {
         game,
         covers,
@@ -1661,47 +1683,89 @@ pub fn game_detail(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<A
     } else {
         focused_button
     };
-    egui::ScrollArea::vertical()
+    let view_height = ui.available_height();
+    let goal = match scroll {
+        Some(DetailScroll::Top) => Some(0.0),
+        // From the heading down to the last line, as much as fits.
+        Some(DetailScroll::Screenshots) => page
+            .heading_top
+            .map(|top| top.min((page.info_bottom - view_height).max(0.0))),
+        Some(DetailScroll::End) => Some(page.vmax),
+        Some(DetailScroll::Shot) | None => None,
+    };
+    if let Some(goal) = goal {
+        page.vgoal = Some(goal.clamp(0.0, page.vmax)).filter(|&goal| goal != page.vscroll);
+    }
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    let mut area = egui::ScrollArea::vertical()
         .id_salt(("game", visit))
         .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .show(ui, |ui| {
-            ui.push_id(visit, |ui| {
-                let top = game_summary(
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    let mut sent = None;
+    if glide(&mut page.vscroll, &mut page.vgoal, dt) {
+        area = area.vertical_scroll_offset(page.vscroll);
+        sent = Some(page.vscroll);
+    }
+    let output = area.show(ui, |ui| {
+        ui.push_id(visit, |ui| {
+            let page_top = ui.min_rect().top();
+            game_summary(
+                ui,
+                m,
+                GameSummary {
+                    game,
+                    covers,
+                    caves,
+                    install,
+                    running,
+                    running_since,
+                    update,
+                    online,
+                    focused_button,
+                    failure,
+                    install_failure,
+                },
+                actions,
+            );
+            page.heading_top = None;
+            if let Some(info) = info {
+                let heading = page_info(
                     ui,
                     m,
-                    GameSummary {
-                        game,
+                    PageInfoView {
+                        info,
                         covers,
-                        caves,
-                        install,
-                        running,
-                        running_since,
-                        update,
-                        online,
-                        focused_button,
-                        failure,
-                        install_failure,
+                        focused_shot,
+                        scroll,
                     },
+                    page,
                     actions,
                 );
-                if scroll == Some(DetailScroll::Top) {
-                    top.scroll_to_me(Some(egui::Align::TOP));
-                }
-                if let Some(info) = info {
-                    page_info(ui, m, info, covers, focused_shot, scroll, actions);
-                } else if info_loading {
-                    page_info_placeholder(ui, m);
-                }
-                if scroll == Some(DetailScroll::End) {
-                    let bottom = ui.min_rect().left_bottom();
-                    ui.scroll_to_rect(
-                        Rect::from_min_size(bottom, vec2(1.0, 0.0)),
-                        Some(egui::Align::BOTTOM),
-                    );
-                }
-            })
-        });
+                page.heading_top = heading.map(|top| top - page_top);
+            } else if info_loading {
+                page_info_placeholder(ui, m);
+            }
+            page.info_bottom = ui.min_rect().bottom() - page_top;
+        })
+    });
+    page.vscroll = output.state.offset.y;
+    // The area did not land where it was sent: it clamped, so the goal is
+    // out of reach.
+    if sent.is_some_and(|sent| (sent - output.state.offset.y).abs() > 0.5) {
+        page.vgoal = None;
+    }
+    if page.vgoal.is_some() || page.hgoal.is_some() {
+        ui.ctx().request_repaint();
+    }
+    page.vmax = (output.content_size.y - output.inner_rect.height()).max(0.0);
+}
+
+/// What [`page_info`] draws from.
+struct PageInfoView<'a> {
+    info: &'a PageInfo,
+    covers: &'a CoverLoader,
+    focused_shot: Option<usize>,
+    scroll: Option<DetailScroll>,
 }
 
 /// The top of the game page: what [`GameView`] has, less the page info.
@@ -1940,15 +2004,20 @@ fn game_summary(
 }
 
 /// Screenshots, tags and the lines under them, below the top of the page.
+/// Returns the top of the Screenshots heading, when there is one.
 fn page_info(
     ui: &mut Ui,
     m: &Metrics,
-    info: &PageInfo,
-    covers: &CoverLoader,
-    focused_shot: Option<usize>,
-    scroll: Option<DetailScroll>,
+    view: PageInfoView,
+    page: &mut PageScroll,
     actions: &mut Vec<Action>,
-) {
+) -> Option<f32> {
+    let PageInfoView {
+        info,
+        covers,
+        focused_shot,
+        scroll,
+    } = view;
     ui.add_space(m.space(20.0));
     let mut heading = None;
     if !info.screenshots.is_empty() {
@@ -1958,7 +2027,7 @@ fn page_info(
                 .color(if focused_shot.is_some() { TEXT } else { DIM }),
         );
         ui.add_space(m.space(10.0) - m.ring);
-        heading = Some(label.rect);
+        heading = Some(label.rect.top());
         screenshot_strip(
             ui,
             m,
@@ -1966,6 +2035,7 @@ fn page_info(
             covers,
             focused_shot,
             scroll,
+            page,
             actions,
         );
         ui.add_space(m.space(10.0) - m.ring);
@@ -1987,17 +2057,7 @@ fn page_info(
     }
     // Room below the last line, kept clear of the footer when scrolled to.
     ui.add_space(m.space(12.0));
-    // From the heading down to the last line, as much as fits. After the
-    // strip, which scrolls itself sideways to the focused screenshot.
-    if scroll == Some(DetailScroll::Screenshots)
-        && let Some(heading) = heading
-    {
-        let bottom = ui.min_rect().bottom();
-        ui.scroll_to_rect(
-            Rect::from_x_y_ranges(heading.x_range(), heading.top()..=bottom),
-            None,
-        );
-    }
+    heading
 }
 
 /// Where the page info will go while it is fetched: the Screenshots
@@ -2042,6 +2102,7 @@ fn screenshot_strip(
     covers: &CoverLoader,
     focused: Option<usize>,
     scroll: Option<DetailScroll>,
+    page: &mut PageScroll,
     actions: &mut Vec<Action>,
 ) {
     let height = screenshot_height(m);
@@ -2054,70 +2115,96 @@ fn screenshot_strip(
     area.min.x -= ring;
     area.max.x += ring;
     area.max.y = area.min.y + height + 2.0 * ring;
+    // Until it loads, a screenshot holds a 4:3 space.
+    let widths: Vec<f32> = covers
+        .screenshot_sizes(urls)
+        .into_iter()
+        .map(|size| (height * size.map_or(4.0 / 3.0, |s| s.x / s.y.max(1.0))).round())
+        .collect();
+    if let Some(index) = focused
+        && matches!(scroll, Some(DetailScroll::Screenshots | DetailScroll::Shot))
+    {
+        // As a library row follows its focused tile: just far enough to
+        // show it with a gap either side, measured from where the row is
+        // heading so quick presses stack up.
+        let left = ring + widths[..index].iter().sum::<f32>() + gap * index as f32;
+        let right = left + widths[index];
+        let width = area.width();
+        let total = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32 + 2.0 * ring;
+        let mut offset = page.hgoal.unwrap_or(page.hscroll);
+        if left - gap < offset {
+            offset = left - gap;
+        } else if right + gap > offset + width {
+            offset = right + gap - width;
+        }
+        let goal = offset.clamp(0.0, (total - width).max(0.0));
+        page.hgoal = Some(goal).filter(|&goal| goal != page.hscroll);
+    }
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
     let mut strip = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("screenshot-strip")
             .max_rect(area),
     );
-    egui::ScrollArea::horizontal()
+    let mut row = egui::ScrollArea::horizontal()
         .id_salt("screenshots")
         .auto_shrink([false, true])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .show(&mut strip, |ui| {
-            egui::Frame::NONE
-                .inner_margin(egui::Margin::same(ring as i8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        let mut previous_shown = false;
-                        let sizes = covers.screenshot_sizes(urls);
-                        for (index, url) in urls.iter().enumerate() {
-                            // Until it loads, a screenshot holds a 4:3 space.
-                            let aspect = sizes[index].map_or(4.0 / 3.0, |s| s.x / s.y.max(1.0));
-                            let size = vec2((height * aspect).round(), height);
-                            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                            let shown = ui.is_rect_visible(rect);
-                            let texture = if shown {
-                                covers.screenshot(ui.ctx(), url)
-                            } else {
-                                if previous_shown {
-                                    covers.prefetch_screenshot(ui.ctx(), url);
-                                }
-                                None
-                            };
-                            previous_shown = shown;
-                            match texture {
-                                Some(texture) if shown => paint_texture(
-                                    ui,
-                                    egui::load::SizedTexture::from_handle(&texture),
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    let mut sent = None;
+    if glide(&mut page.hscroll, &mut page.hgoal, dt) {
+        row = row.horizontal_scroll_offset(page.hscroll);
+        sent = Some(page.hscroll);
+    }
+    let output = row.show(&mut strip, |ui| {
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::same(ring as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let mut previous_shown = false;
+                    for (index, url) in urls.iter().enumerate() {
+                        let size = vec2(widths[index], height);
+                        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                        let shown = ui.is_rect_visible(rect);
+                        let texture = if shown {
+                            covers.screenshot(ui.ctx(), url)
+                        } else {
+                            if previous_shown {
+                                covers.prefetch_screenshot(ui.ctx(), url);
+                            }
+                            None
+                        };
+                        previous_shown = shown;
+                        match texture {
+                            Some(texture) if shown => paint_texture(
+                                ui,
+                                egui::load::SizedTexture::from_handle(&texture),
+                                rect,
+                                CornerRadius::same(radii[0] as u8),
+                            ),
+                            _ => {
+                                ui.painter().rect_filled(
                                     rect,
                                     CornerRadius::same(radii[0] as u8),
-                                ),
-                                _ => {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        CornerRadius::same(radii[0] as u8),
-                                        TILE_BG,
-                                    );
-                                }
+                                    TILE_BG,
+                                );
                             }
-                            if focused == Some(index) {
-                                focus_ring(ui, rect, radii, m);
-                                if matches!(
-                                    scroll,
-                                    Some(DetailScroll::Screenshots | DetailScroll::Shot)
-                                ) {
-                                    ui.scroll_to_rect(rect.expand(ring), None);
-                                }
-                            }
-                            if response.clicked() {
-                                actions.push(Action::ViewScreenshot(index));
-                            }
-                            response.on_hover_cursor(egui::CursorIcon::PointingHand);
                         }
-                    });
+                        if focused == Some(index) {
+                            focus_ring(ui, rect, radii, m);
+                        }
+                        if response.clicked() {
+                            actions.push(Action::ViewScreenshot(index));
+                        }
+                        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    }
                 });
-        });
+            });
+    });
+    page.hscroll = output.state.offset.x;
+    if sent.is_some_and(|sent| (sent - output.state.offset.x).abs() > 0.5) {
+        page.hgoal = None;
+    }
     // Only the column's own width: the page's layout grows to whatever is
     // allocated, and the ring's room in the margin would shift everything
     // after the strip left.
