@@ -26,6 +26,29 @@ PortMaster port installs on others. See
 [handheld/README.md](handheld/README.md) for building, deploying and
 testing on the device.
 
+### Running Linux builds on handhelds
+
+A lot of itch.io games ship a Linux build, and on an arm64 handheld
+those can run as-is. The problem is the screen: games bundle their own
+SDL2, built for X11 or Wayland, and the handheld has neither. zitch
+ships an SDL shim (`handheld/sdl-dynapi.c`) and launches Linux builds
+with `SDL_DYNAMIC_API` pointing at it. SDL2's dynamic API lets the
+game's own copy hand every call to another library, so the shim routes
+them into the firmware's libSDL2, which knows how to draw to the panel.
+The firmware's library doesn't lay its jump table out like upstream, so
+the shim matches entries by name instead of by index. It also catches
+SDL2 linked into one of the game's libraries rather than the executable.
+
+The shim also wraps a few GL shader entry points. FNA games (XNA ports)
+hand the driver GLSL ES 1.00 shaders that write to more than one color
+target, which the Mali driver rejects; the shim rewrites those as GLSL
+ES 3.00 so they compile. That's what got Anodyne running.
+
+Before offering a Linux build, zitch checks what butler found in it and
+says why when it can't run: 32-bit or x86, SDL2 built without the
+dynamic API, SDL3, GLFW or raw X11, or a glibc newer than the
+firmware's. Details in [handheld/README.md](handheld/README.md).
+
 ## Credits
 
 Button glyphs are from Kenney's [Input Prompts](https://kenney.nl/assets/input-prompts) pack (CC0); see `assets/prompts/LICENSE-kenney.txt`.
