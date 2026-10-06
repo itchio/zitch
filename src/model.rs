@@ -855,7 +855,8 @@ pub enum Action {
     SetCollectionsInstalledOnly(bool),
     /// The sign-in page's checkbox: report what device this is.
     SetShareDeviceInfo(bool),
-    /// Step through the tabs, wrapping.
+    /// Step through the tabs, wrapping; on a game's page, step to the game
+    /// beside it in the row it was opened from.
     CycleTab(i32),
     /// Y on a pad: in and out of the filters on the library, the QR code
     /// on a game's page.

@@ -494,6 +494,14 @@ impl App {
         self.catalog.get(&id).map(|g| &**g)
     }
 
+    /// The game `step` places along from `id` in the library row its page
+    /// was opened from; none from Downloads or past either end.
+    fn game_beside(&self, id: i64, step: i32) -> Option<i64> {
+        self.active_rows_ref()?
+            .beside(id, step)
+            .filter(|next| self.catalog.contains_key(next))
+    }
+
     /// Screenshots the game's page shows, once its details are in.
     fn screenshot_count(&self, id: i64) -> usize {
         self.page_info
@@ -1184,11 +1192,19 @@ impl App {
                     self.collection_rows.follow = true;
                 }
             }
-            Action::CycleTab(step) => {
-                if self.page.is_library() {
-                    self.actions.push(Action::SetTab(self.tab.next(step)));
+            Action::CycleTab(step) => match self.page {
+                Page::Library => self.actions.push(Action::SetTab(self.tab.next(step))),
+                Page::Game { id, .. } => {
+                    if let Some(next) = self.game_beside(id, step) {
+                        // The row follows, so Back lands on this game.
+                        if let Some(rows) = self.active_rows() {
+                            rows.focus_game(next);
+                        }
+                        self.actions.push(Action::Open(Page::game(next)));
+                    }
                 }
-            }
+                Page::PlayableTypes { .. } => {}
+            },
             Action::Search => match self.page {
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
@@ -2957,6 +2973,9 @@ impl App {
                     if !game.url.is_empty() {
                         hints.push((vec![Glyph::Secondary], "QR code".to_string()));
                     }
+                }
+                if self.game_beside(id, -1).is_some() || self.game_beside(id, 1).is_some() {
+                    hints.push((vec![Glyph::TabLeft, Glyph::TabRight], "Games".to_string()));
                 }
                 hints.push((vec![Glyph::Back], "Back".to_string()));
                 hints

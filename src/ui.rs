@@ -521,6 +521,16 @@ impl Rows {
         self.sections.get(self.row)?.games.get(self.col()).copied()
     }
 
+    /// The game `step` places along from `id` in the focused row, when
+    /// `id` is the focused game; the row a game's page was opened from.
+    pub fn beside(&self, id: i64, step: i32) -> Option<i64> {
+        if self.focused_game() != Some(id) {
+            return None;
+        }
+        let col = self.col().checked_add_signed(step as isize)?;
+        self.sections.get(self.row)?.games.get(col).copied()
+    }
+
     pub fn focus_tile(&mut self, row: usize, col: usize) {
         if let Some(section) = self.sections.get(row)
             && col < section.games.len()
