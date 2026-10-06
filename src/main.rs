@@ -57,6 +57,10 @@ struct Cli {
     #[arg(long, env = "ZITCH_API_KEY_FILE")]
     api_key_file: Option<PathBuf>,
 
+    /// The key itself, for a session where a file is awkward. Never logged.
+    #[arg(long, env = "ZITCH_API_KEY", hide = true)]
+    api_key: Option<String>,
+
     /// Write a PNG of the window to this path once the library has loaded
     /// (or after a few seconds) and exit. For development.
     #[arg(long, value_name = "PATH")]
@@ -148,7 +152,7 @@ fn main() -> anyhow::Result<()> {
         .dbpath
         .unwrap_or_else(|| config_dir.join("db").join("butler.db"));
     log::info!("using {}", dbpath.display());
-    let api_key = std::env::var("ZITCH_API_KEY").ok().or_else(|| {
+    let api_key = cli.api_key.clone().or_else(|| {
         let path = cli.api_key_file.as_ref()?;
         match std::fs::read_to_string(path) {
             Ok(key) => Some(key.trim().to_string()),

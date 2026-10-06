@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
+.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -16,19 +16,19 @@ help:
 	@echo "make release      compile an optimized binary to target/release/zitch"
 	@echo "make run          build and launch the app"
 	@echo "make run-verbose  same, logging every JSON-RPC message"
-	@echo "make run-handheld lay out for a 640x480 screen (RG35XX H), scaled to the window"
+	@echo "make run-handheld lay out for a 640x480 handheld screen, scaled to the window"
 	@echo "make run-tv       fullscreen, minimized while a game runs"
 	@echo "make shot         launch, write a screenshot to \$$SHOT ($(SHOT)), exit"
 	@echo "                  SCRIPT=\"down,right,enter\" plays input first"
 	@echo "make shots        the same at 640x480, 1280x720 and 1920x1080, to /tmp/zitch-*.png"
 	@echo "make shots-baseline  capture every scene to target/shots/baseline"
 	@echo "make shots-check     capture again and compare against the baseline"
-	@echo "make check        format, lint, and type-check without running"
+	@echo "make check        formatting, lints and tests, as CI runs them"
 	@echo "make clean        remove build output"
 	@echo "make sync-butler  regenerate src/butlerd/types.rs from \$$BUTLER_DIR ($(BUTLER_DIR))"
-	@echo "make handheld     cross-compile the SDL host for the RG35XX H (make handheld-sysroot once first; see handheld/README.md)"
-	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh"
-	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot"
+	@echo "make handheld     cross-compile the SDL host for muOS handhelds (make handheld-sysroot once first; see handheld/README.md)"
+	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh (HANDHELD=root@<ip>)"
+	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot (HANDHELD=root@<ip>)"
 	@echo "make handheld-love    fetch the LÖVE runtime the device builds ship, into target/handheld-love"
 	@echo "make handheld-glyph   render handheld/glyph.svg as the muOS list icon, target/zitch-glyph.{png,svg}"
 	@echo "make handheld-muxapp  package it with butler and LÖVE as target/zitch.muxapp for the muOS Archive Manager"
@@ -77,8 +77,9 @@ shots-check: build
 	APP=$(APP) scripts/shots.sh check
 
 check:
-	cargo fmt
-	cargo clippy
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+	cargo test
 
 fmt:
 	cargo fmt
@@ -90,10 +91,13 @@ sync-butler:
 clean:
 	cargo clean
 
-# --- Handheld (RG35XX H running muOS) ---------------------------------------
+# --- Handhelds (muOS) --------------------------------------------------------
 # Cross-compiled with the aarch64-linux-gnu-gcc package against the
 # firmware's own SDL2, and pushed over ssh into the muOS Applications menu.
-HANDHELD ?= root@192.168.4.121
+# The device address is given per call: HANDHELD=root@<ip>.
+HANDHELD ?=
+handheld-host:
+	@test -n "$(HANDHELD)" || { echo "set HANDHELD=root@<ip> (see handheld/README.md)"; exit 1; }
 HANDHELD_TARGET = aarch64-unknown-linux-gnu
 HANDHELD_APP = /mnt/mmc/MUOS/application/zitch
 SYSROOT = target/handheld-sysroot/lib
@@ -105,7 +109,7 @@ SDL_SHIM = target/$(HANDHELD_TARGET)/release/libzitch-sdl.so
 # The device's C library, math library, loader and libgcc_s alongside its
 # SDL2, so the binary binds to the symbol versions the device has (the
 # package's glibc is newer). Only the startup objects come from the package.
-handheld-sysroot:
+handheld-sysroot: handheld-host
 	mkdir -p $(SYSROOT)
 	scp -q $(HANDHELD):/usr/lib/libSDL2-2.0.so.0.2800.5 \
 		$(HANDHELD):/lib/libc.so.6 $(HANDHELD):/lib/libm.so.6 \
@@ -166,7 +170,7 @@ $(HANDHELD_GLYPH_SVG): handheld/glyph.svg
 
 handheld-glyph: $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
 
-handheld-deploy: handheld $(HANDHELD_LOVE)/love $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
+handheld-deploy: handheld-host handheld $(HANDHELD_LOVE)/love $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
 	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs'
 	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
 		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(HANDHELD):$(HANDHELD_APP)/
@@ -187,7 +191,8 @@ handheld-shot: handheld-deploy
 	@echo /tmp/zitch-handheld.png
 
 # butler for the device, from broth's linux-arm64-head channel (the
-# versioned linux-arm64 channel lags master).
+# versioned linux-arm64 channel lags master). A butler cross-built from a
+# checkout can be put at this path instead and is used as is.
 HANDHELD_BUTLER ?= target/handheld-butler
 $(HANDHELD_BUTLER)/butler:
 	mkdir -p $(HANDHELD_BUTLER)
@@ -242,7 +247,7 @@ handheld-port: handheld-stage
 # harbourmaster is PortMaster's installer, so the port lands where a
 # catalog install would.
 PORTMASTER_DIR = /mnt/mmc/MUOS/PortMaster
-handheld-port-install: handheld-port
+handheld-port-install: handheld-host handheld-port
 	scp -q $(PORT) $(HANDHELD):/tmp/zitch.zip
 	ssh $(HANDHELD) 'cd $(PORTMASTER_DIR) && PATH=/opt/python/bin:$$PATH LD_LIBRARY_PATH=/opt/python/lib ./harbourmaster --quiet --no-check install /tmp/zitch.zip; status=$$?; rm -f /tmp/zitch.zip; exit $$status'
 

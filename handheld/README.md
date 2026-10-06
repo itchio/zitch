@@ -1,4 +1,8 @@
-# RG35XX H (muOS)
+# Handhelds
+
+muOS is the first firmware zitch supports: the RG35XX H, RG40XX H and
+TrimUI Brick Pro, on Jacaranda and Andromeda. Everything below is about
+muOS.
 
 muOS has no X11 or Wayland, so zitch is built with the SDL2 host
 (`--no-default-features --features sdl-host`, `src/host_sdl.rs`) and linked
@@ -7,8 +11,8 @@ against the SDL2 that ships with the firmware. Everything else is static.
 
 ## Setup
 
-- ssh access to the device as root. The Makefile defaults to
-  `root@DEVICE_IP`, override with `HANDHELD=root@<ip>`.
+- ssh access to the device as root. Pass `HANDHELD=root@<ip>` to the
+  device targets.
 - `aarch64-linux-gnu-gcc` and a rustup toolchain with the
   `aarch64-unknown-linux-gnu` target. `CARGO_CROSS` in the Makefile points at
   `~/.cargo/bin/cargo +stable`, change it if rustup is your system cargo.
@@ -101,7 +105,8 @@ glibc; a check there fails the job if it needs a symbol version newer than
 the device's 2.38. The firmware's SDL2 is still what it loads at run time.
 
 `handheld-shot` launches the app the same way picking it from the menu does:
-write `/tmp/app_go` and `/tmp/act_go`, kill `muxfrontend` (SIGKILL, it
+write `/tmp/app_go` and `/tmp/act_go` (`/run/muos/application` and
+`/run/muos/action` on Andromeda), kill `muxfrontend` (SIGKILL, it
 ignores SIGTERM), and `frontend.sh` runs `mux_launch.sh`. When zitch exits
 the frontend comes back by itself.
 
@@ -134,7 +139,7 @@ export is the official player, fake-08 rejects newer cart syntax).
 One choice launches at once; more and the user picks. The pick goes to
 butler's `Launch` as the target. A payload comes back in a
 `RuntimeLaunch` request, which zitch answers by running it
-(`src/muos.rs`) and replying when it exits; a Linux build butler
+(`src/muos/`) and replying when it exits; a Linux build butler
 launches itself, through the SDL shim. butler tracks the run either
 way, so play time and the itch.io session are recorded. From Play to
 the game's exit the screen is the game's: a "Launching" curtain covers
@@ -157,8 +162,9 @@ while it runs and itself again after.
 
 ### ROMs and fantasy console carts (RetroArch)
 
-Files: `.nes`, `.sfc`/`.smc`, `.gb`, `.gbc`, `.gba`, `.md`/`.gen`,
-`.prg`/`.d64`/`.crt` (C64), `.adf`/`.hdf` (Amiga), `.z64`/`.n64`, and
+Files: `.nes`, `.sfc`/`.smc`, `.gb`, `.gbc`, `.gba`, `.md`/`.gen`, `.32x`,
+`.sms`, `.gg`, `.pce`, `.lnx`, `.ngp`/`.ngc`, `.a26`,
+`.prg`/`.d64`/`.t64` (C64), `.adf` (Amiga), `.z64`/`.n64`/`.v64`, and
 `.p8`/`.p8.png` PICO-8 carts, which the firmware plays with the fake-08
 core under its `PICO-8` system, no official PICO-8 binary needed, and
 `.tic` TIC-80 carts, played with the tic80 core under `TIC-80`. butler
@@ -166,7 +172,8 @@ reports a cart as a `pico8-cart` or `tic80-cart` payload rather than a
 ROM, so it is asked for by that name and mapped to the same launch path.
 
 Launched the way the muOS menu launches one: write `/tmp/rom_go`,
-`/tmp/gov_go` and `/tmp/flt_go`, run `/opt/muos/script/mux/launch.sh`,
+`/tmp/gov_go` and `/tmp/flt_go` (`/run/muos/content`, `governor` and
+`filter` on Andromeda), run `/opt/muos/script/mux/launch.sh`,
 wait for RetroArch to exit. The core per system is the firmware's
 default: on Jacaranda from `/opt/muos/share/info/assign/<system>/global.ini`,
 on Andromeda from `libretro.json` and `external.json` in
@@ -218,8 +225,8 @@ fails to open a display. Quit with the game's own quit.
 
 ## Sign in
 
-First run needs `ARGS="--api-key-file <path on device>"`, the file is just
-the key. butler saves the profile in its db after that. Delete the key file
+Scan the QR code on first run, or pass
+`ARGS="--api-key-file <path on device>"`, the file is just the key. butler saves the profile in its db after that. Delete the key file
 from the device once it's in.
 
 ## Framebuffer dump

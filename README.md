@@ -14,12 +14,15 @@ The goal is not to replace our official Electron app, but to explore some other 
 
 If you have any other ideas that could be fun, drop them in the issues tracker.
 
-Once we get a bit further along, we'll publish signed builds to itch.io, and on
-[Broth](https://broth.itch.zone).
+Builds for Linux, macOS, Windows and handhelds are on the GitHub releases
+page. Desktop builds need butler, found under the itch app's config
+directory or on PATH.
 
 ## Handhelds
 
-zitch also runs on the RG35XX H under muOS through an SDL2 host. See
+zitch also runs on Linux handhelds through an SDL2 host. muOS is the
+first firmware supported (RG35XX H, RG40XX H, TrimUI Brick Pro), and a
+PortMaster port installs on others. See
 [handheld/README.md](handheld/README.md) for building, deploying and
 testing on the device.
 
