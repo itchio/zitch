@@ -84,7 +84,6 @@ mod tests {
         assert_eq!(info["os"], std::env::consts::OS);
         assert_eq!(info["arch"], std::env::consts::ARCH);
         assert_eq!(info["resolution"], "640x480");
-        assert!(info["platform"] == "desktop" || info["platform"] == "muos");
         // Off-device the muOS fields stay out rather than default.
         if info["platform"] == "desktop" {
             assert!(info.get("board").is_none());

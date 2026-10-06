@@ -88,6 +88,16 @@ pub struct LaunchFailure {
     pub log: Vec<String>,
 }
 
+/// How a launch ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launched {
+    /// The game ran and has exited.
+    Ran,
+    /// The user backed out before it started.
+    Cancelled,
+    Failed(LaunchFailure),
+}
+
 /// A question the backend needs answered before a call can go on, shown as
 /// a modal. The backend maps the chosen index back to the typed reply.
 #[derive(Debug, Clone, PartialEq)]

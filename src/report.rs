@@ -216,6 +216,39 @@ pub struct SavedReport {
     pub flags: Vec<String>,
     /// Unix seconds.
     pub sent_at: i64,
+    /// Reached itch.io. Files from before this field was kept hold reports
+    /// that were sent.
+    #[serde(default = "yes")]
+    pub sent: bool,
+    /// The run to send with it, kept until it is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Run>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl SavedReport {
+    /// The report to send again for `game_id`, while it is unsent.
+    pub fn unsent(&self, game_id: i64) -> Option<Report> {
+        if self.sent {
+            return None;
+        }
+        Some(Report {
+            game_id,
+            upload_id: self.upload_id,
+            build_id: self.build_id,
+            rating: self.rating,
+            flags: self
+                .flags
+                .iter()
+                .filter_map(|id| flag(id))
+                .map(|f| f.id)
+                .collect(),
+            run: self.run.clone().unwrap_or_default(),
+        })
+    }
 }
 
 /// Saved reports by game id.
@@ -350,6 +383,40 @@ pub fn send(api_url: &str, api_key: &str, report: &Report) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsent_reports_come_back_as_reports() {
+        let saved = SavedReport {
+            upload_id: 7,
+            build_id: Some(9),
+            rating: Rating::Playable,
+            flags: vec!["cut_off".into(), "made_up".into()],
+            sent_at: 0,
+            sent: false,
+            run: None,
+        };
+        let again = saved.unsent(3).unwrap();
+        assert_eq!(
+            (again.game_id, again.upload_id, again.build_id),
+            (3, 7, Some(9))
+        );
+        assert_eq!(again.flags, vec!["cut_off"]);
+        let sent = SavedReport {
+            sent: true,
+            ..saved
+        };
+        assert!(sent.unsent(3).is_none());
+    }
+
+    #[test]
+    fn reports_saved_before_the_sent_flag_count_as_sent() {
+        let parsed: SavedReport = serde_json::from_str(
+            r#"{"upload_id":1,"build_id":null,"rating":"perfect","flags":[],"sent_at":5}"#,
+        )
+        .unwrap();
+        assert!(parsed.sent);
+        assert!(parsed.run.is_none());
+    }
 
     #[test]
     fn tails_cut_on_characters() {

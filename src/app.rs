@@ -12,8 +12,8 @@ use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
-    Loadable, Mark, Page, Profile, Prompt, RatingFilter, Tab, UploadExt, UserExt, human_size,
-    known_playable_here, wrap_step,
+    Launched, Loadable, Mark, Page, Profile, Prompt, RatingFilter, Tab, UploadExt, UserExt,
+    human_size, known_playable_here, wrap_step,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
@@ -2114,6 +2114,7 @@ impl App {
                 Event::SignedIn(profile) => {
                     self.login = None;
                     self.profile = Some(profile);
+                    self.resend_reports();
                 }
                 Event::SignedOut => self.sign_out(),
                 Event::OwnedGames(games) => {
@@ -2298,14 +2299,18 @@ impl App {
                 }
                 Event::LaunchFinished {
                     cave_id,
-                    result,
+                    outcome,
                     run,
                 } => {
                     self.running.remove(&cave_id);
                     if let Some(run) = run {
                         self.save_run(&cave_id, run);
                     }
-                    if let Err(failure) = result {
+                    if outcome == Launched::Cancelled {
+                        // Nothing ran, so the window never left.
+                        continue;
+                    }
+                    if let Launched::Failed(failure) = outcome {
                         // The game's page shows the failure in full; the
                         // header line is for when the user is elsewhere.
                         let game_id = self
@@ -2330,11 +2335,27 @@ impl App {
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 Event::Online(online) => {
+                    if online && !self.online {
+                        self.resend_reports();
+                    }
                     self.online = online;
                     if !online {
                         self.refreshing = false;
                     }
                 }
+                Event::ReportSent { game_id, result } => match result {
+                    Ok(()) => {
+                        if let Some(saved) = self.reports.get_mut(&game_id) {
+                            saved.sent = true;
+                            saved.run = None;
+                            self.save_reports();
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("report for {game_id}: {error}");
+                        self.notify("Couldn't send the report; it will be sent later".into());
+                    }
+                },
                 Event::Prompt(prompt) => {
                     if self.prompt.is_some() {
                         self.prompt_queue.push_back(prompt);
@@ -2791,13 +2812,31 @@ impl App {
             rating: report.rating,
             flags: report.flags.iter().map(|f| f.to_string()).collect(),
             sent_at,
+            sent: false,
+            run: Some(report.run.clone()),
         };
         self.reports.insert(report.game_id, saved);
+        self.save_reports();
+        self.refresh_marks();
+        self.backend.send(Command::Report(Box::new(report)));
+    }
+
+    fn save_reports(&self) {
         if let Some(path) = &self.reports_path {
             crate::report::save(path, &self.reports);
         }
-        self.refresh_marks();
-        self.backend.send(Command::Report(Box::new(report)));
+    }
+
+    /// Sends the reports that have not reached itch.io yet.
+    fn resend_reports(&mut self) {
+        let unsent: Vec<Report> = self
+            .reports
+            .iter()
+            .filter_map(|(game_id, saved)| saved.unsent(*game_id))
+            .collect();
+        for report in unsent {
+            self.backend.send(Command::Report(Box::new(report)));
+        }
     }
 
     /// Something failed that has no page to show it on.

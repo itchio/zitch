@@ -2040,6 +2040,9 @@ fn game_summary(
                     line.push_str(" \u{b7} for an older build");
                     DIM
                 };
+                if !saved.sent {
+                    line.push_str(" \u{b7} not sent yet");
+                }
                 ui.label(
                     egui::RichText::new(line)
                         .font(FontId::proportional(m.caption))

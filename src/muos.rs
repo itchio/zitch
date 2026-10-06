@@ -147,6 +147,10 @@ impl Content {
 /// belongs to whichever bundled app happens to be written in LÖVE, and
 /// those come and go between releases.
 fn love() -> Option<&'static Love> {
+    #[cfg(test)]
+    if let Some(fake) = fake::firmware() {
+        return fake.love;
+    }
     static LOVE: OnceLock<Option<Love>> = OnceLock::new();
     LOVE.get_or_init(|| {
         let ours = std::env::current_exe()
@@ -497,6 +501,10 @@ fn manifests_here() -> bool {
 
 /// Every system that resolves here, by dash id. Read once.
 fn systems() -> &'static HashMap<String, System> {
+    #[cfg(test)]
+    if let Some(fake) = fake::firmware() {
+        return fake.systems;
+    }
     static SYSTEMS: OnceLock<HashMap<String, System>> = OnceLock::new();
     SYSTEMS.get_or_init(|| {
         let ids = ROM_IDS.iter().chain(&[PICO8, TIC80]);
@@ -1072,12 +1080,73 @@ fn launch_rom(
     }
 }
 
+/// A stand-in firmware for tests: what the device has, set per thread so
+/// a test decides instead of the machine it runs on.
+#[cfg(test)]
+mod fake {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
+    use super::{Love, System};
+
+    #[derive(Clone, Copy)]
+    pub struct Firmware {
+        pub systems: &'static HashMap<String, System>,
+        pub love: Option<&'static Love>,
+    }
+
+    thread_local! {
+        static FIRMWARE: Cell<Option<Firmware>> = const { Cell::new(None) };
+    }
+
+    pub fn firmware() -> Option<Firmware> {
+        FIRMWARE.with(Cell::get)
+    }
+
+    /// Runs `f` on a device with these systems and this LÖVE.
+    pub fn with<T>(systems: Vec<System>, love: Option<Love>, f: impl FnOnce() -> T) -> T {
+        let systems: HashMap<String, System> =
+            systems.into_iter().map(|s| (s.id.clone(), s)).collect();
+        let firmware = Firmware {
+            systems: Box::leak(Box::new(systems)),
+            love: love.map(|l| &*Box::leak(Box::new(l))),
+        };
+        let before = FIRMWARE.with(|cell| cell.replace(Some(firmware)));
+        let out = f();
+        FIRMWARE.with(|cell| cell.set(before));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
     use crate::butlerd::types::EngineInfo;
+
+    /// A device with nothing: no emulators, no LÖVE.
+    fn bare<T>(f: impl FnOnce() -> T) -> T {
+        fake::with(Vec::new(), None, f)
+    }
+
+    fn system(id: &str) -> System {
+        System {
+            id: id.to_string(),
+            assign: id.to_uppercase(),
+            launcher: format!("mu-{id}"),
+            core: format!("{id}_libretro.so"),
+            label: id.to_uppercase(),
+        }
+    }
+
+    fn love_11_5() -> Love {
+        Love {
+            binary: PathBuf::from("/app/love"),
+            libs: PathBuf::from("/app/libs"),
+            version: "11.5".to_string(),
+        }
+    }
 
     const ASSIGN_JSON: &str = r#"{ "nes": "Nintendo NES - Famicom", "gba": "Nintendo Game Boy Advance",
   "md": "Sega Mega Drive - Genesis", "a2600": "Atari 2600", "pico8": "PICO-8", "n64": "Nintendo N64" }"#;
@@ -1295,8 +1364,13 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         assert!(!is_disc_image(Path::new("game.nes")));
         assert!(!is_disc_image(Path::new("cover.png")));
         assert!(!is_disc_image(Path::new("README")));
-        // nothing resolves without the firmware
-        assert!(!disc_runs_here(Path::new("game.cue")));
+        assert!(!bare(|| disc_runs_here(Path::new("game.cue"))));
+        assert!(fake::with(vec![system("psx")], None, || {
+            disc_runs_here(Path::new("game.cue"))
+        }));
+        assert!(!fake::with(vec![system("psx")], None, || {
+            disc_runs_here(Path::new("game.nes"))
+        }));
     }
 
     #[test]
@@ -1347,7 +1421,6 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
 
     #[test]
     fn payloads_without_a_runtime_are_turned_away() {
-        // no LÖVE off-device, and no runtime for a native build either
         let love = payload(
             Flavor::Love,
             Some(EngineInfo {
@@ -1357,11 +1430,18 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
             }),
         );
         assert_eq!(
-            content_for(&love, PathBuf::from("/g/game.love")),
+            bare(|| content_for(&love, PathBuf::from("/g/game.love"))),
             Err("this device has no LÖVE".to_string())
         );
+        assert!(matches!(
+            fake::with(Vec::new(), Some(love_11_5()), || {
+                content_for(&love, PathBuf::from("/g/game.love"))
+            }),
+            Ok(Content::Love { .. })
+        ));
+        // A native build has no runtime on any firmware.
         let native = payload(Flavor::NativeLinux, None);
-        assert!(content_for(&native, PathBuf::from("/g/bin")).is_err());
+        assert!(bare(|| content_for(&native, PathBuf::from("/g/bin"))).is_err());
     }
 
     #[test]
@@ -1417,10 +1497,18 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
         assert!(!fits(
             serde_json::json!({ "path": "game.exe", "flavor": "windows", "arch": "arm64" })
         ));
-        // no runtimes off-device
-        assert!(!fits(
-            serde_json::json!({ "path": "game.love", "flavor": "love" })
-        ));
+        // A LÖVE game without a version is never known to fit; one with a
+        // version fits where there is a LÖVE for it.
+        let unversioned = serde_json::json!({ "path": "game.love", "flavor": "love" });
+        let versioned = serde_json::json!({
+            "path": "game.love", "flavor": "love",
+            "engine": { "engine": "love", "version": "11.4" }
+        });
+        assert!(!bare(|| fits(unversioned.clone())));
+        assert!(!bare(|| fits(versioned.clone())));
+        assert!(fake::with(Vec::new(), Some(love_11_5()), || {
+            !fits(unversioned.clone()) && fits(versioned.clone())
+        }));
         assert!(!fits(
             serde_json::json!({ "path": "x.bin", "flavor": "some-new-flavor" })
         ));

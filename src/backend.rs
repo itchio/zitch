@@ -34,8 +34,8 @@ use crate::butlerd::types::{
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, Collection, CollectionFilter, CollectionGames, Download, DownloadProgress, Game,
-    GameUpdate, LaunchFailure, Profile, Prompt, UploadDetail, UploadExt, UserExt, scans_decide,
-    upload_detail, upload_platform_names, upload_runs_here,
+    GameUpdate, LaunchFailure, Launched, Profile, Prompt, UploadDetail, UploadExt, UserExt,
+    scans_decide, upload_detail, upload_platform_names, upload_runs_here,
 };
 use crate::report::{Report, Run};
 
@@ -221,8 +221,13 @@ pub enum Event {
     /// `run` is what was seen of the game, when it was launched.
     LaunchFinished {
         cave_id: String,
-        result: Result<(), LaunchFailure>,
+        outcome: Launched,
         run: Option<Run>,
+    },
+    /// A compatibility report reached itch.io, or why it did not.
+    ReportSent {
+        game_id: i64,
+        result: Result<(), String>,
     },
     /// Updates butler found for installed games, one per cave.
     Updates(Vec<GameUpdate>),
@@ -470,7 +475,16 @@ fn session(
             ) {
                 Ok(daemon) => {
                     *link.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(daemon);
-                    *client = connect(link)?;
+                    *client = match connect(link) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            emit.send(Event::Error(format!("reconnecting to butler: {error:#}")));
+                            if wait_to_retry(commands) {
+                                break SessionEnd::Shutdown;
+                            }
+                            continue;
+                        }
+                    };
                     if let Err(error) = client.call(ProfileUseSavedLoginParams {
                         profile_id: profile.id,
                     }) {
@@ -484,9 +498,7 @@ fn session(
                 }
                 Err(error) => {
                     emit.send(Event::Error(format!("restarting butler: {error:#}")));
-                    if let Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) =
-                        commands.recv_timeout(RESPAWN_DELAY)
-                    {
+                    if wait_to_retry(commands) {
                         break SessionEnd::Shutdown;
                     }
                     continue;
@@ -636,13 +648,17 @@ fn session(
             }
             Ok(Command::Retry { download_id }) => {
                 if let Err(error) = client.call(DownloadsRetryParams { download_id }) {
-                    log::warn!("retry: {error:#}");
+                    emit.send(Event::Error(format!(
+                        "Couldn't retry the download: {error:#}"
+                    )));
                 }
                 refresh_downloads(client, emit);
             }
             Ok(Command::ClearFinished) => {
                 if let Err(error) = client.call(DownloadsClearFinishedParams {}) {
-                    log::warn!("clearing finished downloads: {error:#}");
+                    emit.send(Event::Error(format!(
+                        "Couldn't clear finished downloads: {error:#}"
+                    )));
                 }
                 refresh_downloads(client, emit);
             }
@@ -680,7 +696,7 @@ fn session(
                 if launches.any() {
                     emit.send(Event::LaunchFinished {
                         cave_id,
-                        result: Err(LaunchFailure {
+                        outcome: Launched::Failed(LaunchFailure {
                             message: "another game is still running".into(),
                             log: Vec::new(),
                         }),
@@ -702,7 +718,7 @@ fn session(
                         let cave_id = cave_id.clone();
                         move |error| Event::LaunchFinished {
                             cave_id: cave_id.clone(),
-                            result: Err(LaunchFailure {
+                            outcome: Launched::Failed(LaunchFailure {
                                 // The innermost error is butler's own words.
                                 message: error.root_cause().to_string(),
                                 log: Vec::new(),
@@ -711,22 +727,24 @@ fn session(
                         }
                     },
                     move |client, emit| {
+                        // Every way out undoes what starting did.
+                        let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
+                            launches.forget(&cave_id);
+                            crate::muos::foreground_back();
+                            emit.send(Event::LaunchFinished {
+                                cave_id: cave_id.clone(),
+                                outcome,
+                                run,
+                            });
+                        };
                         let (target, name) = match plan_launch(client, &prompts, &cave_id, emit) {
                             Ok(Plan::Launch { target, name }) => (target, name),
                             Ok(Plan::Cancelled) => {
-                                emit.send(Event::LaunchFinished {
-                                    cave_id,
-                                    result: Ok(()),
-                                    run: None,
-                                });
+                                finish(emit, Launched::Cancelled, None);
                                 return Ok(());
                             }
                             Err(failure) => {
-                                emit.send(Event::LaunchFinished {
-                                    cave_id,
-                                    result: Err(failure),
-                                    run: None,
-                                });
+                                finish(emit, Launched::Failed(failure), None);
                                 return Ok(());
                             }
                         };
@@ -741,28 +759,21 @@ fn session(
                             &name,
                             emit,
                         );
-                        launches.forget(&cave_id);
-                        crate::muos::foreground_back();
                         // Play time and last-played change with every run.
                         refresh_caves(client, emit);
                         // Ending the connection is how the user quits; the
                         // call's failure is then the expected outcome.
-                        let result = if quit.load(Ordering::Relaxed) {
-                            Ok(())
-                        } else {
-                            result
-                        };
-                        if let Err(failure) = &result {
-                            log::warn!("launch failed: {}", failure.message);
-                            for line in &failure.log {
-                                log::warn!("  {line}");
+                        let outcome = match result {
+                            Err(failure) if !quit.load(Ordering::Relaxed) => {
+                                log::warn!("launch failed: {}", failure.message);
+                                for line in &failure.log {
+                                    log::warn!("  {line}");
+                                }
+                                Launched::Failed(failure)
                             }
-                        }
-                        emit.send(Event::LaunchFinished {
-                            cave_id,
-                            result,
-                            run: Some(run),
-                        });
+                            _ => Launched::Ran,
+                        };
+                        finish(emit, outcome, Some(run));
                         Ok(())
                     },
                 );
@@ -770,21 +781,31 @@ fn session(
             Ok(Command::Report(report)) => {
                 let config = Arc::clone(config);
                 let profile_id = profile.id;
+                let game_id = report.game_id;
+                let thread_emit = emit.clone();
                 let spawned = std::thread::Builder::new()
                     .name("report".into())
                     .spawn(move || {
+                        let emit = thread_emit;
                         let key = match &config.api_key {
                             Some(key) => Ok(key.clone()),
                             None => crate::report::saved_api_key(&config.dbpath, profile_id),
                         };
                         let sent =
                             key.and_then(|key| crate::report::send(&config.api_url, &key, &report));
-                        if let Err(error) = sent {
+                        if let Err(error) = &sent {
                             log::warn!("compatibility report not sent: {error:#}");
                         }
+                        emit.send(Event::ReportSent {
+                            game_id: report.game_id,
+                            result: sent.map_err(|e| format!("{e:#}")),
+                        });
                     });
                 if let Err(error) = spawned {
-                    log::warn!("starting the report thread: {error}");
+                    emit.send(Event::ReportSent {
+                        game_id,
+                        result: Err(format!("starting the report thread: {error}")),
+                    });
                 }
             }
             Ok(Command::QuitGame { cave_id }) => {
@@ -851,12 +872,23 @@ fn session(
         }
     };
 
+    // An op thread waiting on a question has no one left to answer it.
+    prompts.close_all();
     stopping.store(true, Ordering::Relaxed);
     if let Err(error) = client.call(DownloadsDriveCancelParams {}) {
         log::debug!("stopping the download driver: {error:#}");
     }
     let _ = driver.join();
     Ok(end)
+}
+
+/// Pauses before another go at bringing butler back. True when the app is
+/// shutting down instead.
+fn wait_to_retry(commands: &mpsc::Receiver<Command>) -> bool {
+    matches!(
+        commands.recv_timeout(RESPAWN_DELAY),
+        Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected)
+    )
 }
 
 /// Keeps one `Downloads.Drive` call up for the life of the process, on its
@@ -1055,6 +1087,15 @@ impl Prompts {
             .remove(&id);
         emit.send(Event::PromptClosed(id));
         choice
+    }
+
+    /// Dismisses every open question, so the threads waiting on them
+    /// move on as if the user had backed out.
+    fn close_all(&self) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|p| p.into_inner());
+        for (_, tx) in waiting.drain() {
+            let _ = tx.send(None);
+        }
     }
 
     fn answer(&self, id: u64, choice: Option<usize>) {
