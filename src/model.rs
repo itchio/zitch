@@ -5,6 +5,7 @@ pub use crate::butlerd::types::{
     Cave, Collection, CollectionGamesFilters, Download, DownloadProgress, DownloadReason, Game,
     GameClassification, GameUpdate, Platforms, Profile, Upload, User,
 };
+use crate::report::Rating;
 
 pub trait UserExt {
     /// The display name, or the username when none is set.
@@ -762,6 +763,70 @@ impl<T> Loadable<T> {
     }
 }
 
+/// A cover's corner mark: how the player rated the game, or that they
+/// tried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// The rating, and whether it was of the build installed now.
+    Rated(Rating, bool),
+    Tried,
+}
+
+/// The toolbar's filter on the player's own ratings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RatingFilter {
+    #[default]
+    Any,
+    Runs,
+    HasIssues,
+    WontRun,
+    /// Tried, with no report yet.
+    Unrated,
+    Untried,
+}
+
+impl RatingFilter {
+    pub const ALL: [RatingFilter; 6] = [
+        RatingFilter::Any,
+        RatingFilter::Runs,
+        RatingFilter::HasIssues,
+        RatingFilter::WontRun,
+        RatingFilter::Unrated,
+        RatingFilter::Untried,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RatingFilter::Any => "Any rating",
+            RatingFilter::Runs => "Runs",
+            RatingFilter::HasIssues => "Has issues",
+            RatingFilter::WontRun => "Doesn't run",
+            RatingFilter::Unrated => "Not rated yet",
+            RatingFilter::Untried => "Not tried",
+        }
+    }
+
+    /// Whether a game with this mark passes. A rating counts whatever
+    /// build it was for.
+    pub fn matches(self, mark: Option<Mark>) -> bool {
+        matches!(
+            (self, mark),
+            (RatingFilter::Any, _)
+                | (
+                    RatingFilter::Runs,
+                    Some(Mark::Rated(Rating::Perfect | Rating::Playable, _))
+                )
+                | (
+                    RatingFilter::HasIssues,
+                    Some(Mark::Rated(Rating::MajorIssues, _))
+                )
+                | (RatingFilter::WontRun, Some(Mark::Rated(Rating::WontRun, _)))
+                | (RatingFilter::Unrated, Some(Mark::Tried))
+                | (RatingFilter::Untried, None)
+        )
+    }
+}
+
 /// One step through a list of `len` rows that wraps at both ends: up or
 /// left from the first row lands on the last, down or right from the
 /// last on the first. Other directions leave `index` as it is.
@@ -870,6 +935,9 @@ pub enum Action {
     FocusTypeRow(usize),
     /// Show or hide the rating and tried marks on covers.
     SetCoverMarks(bool),
+    /// The toolbar's rating pill: ask which of the player's ratings to show.
+    RatingFilterMenu,
+    SetRatingFilter(RatingFilter),
     /// Focus a row on the Settings page; the pointer is already there.
     FocusSettingsRow(usize),
     SetTab(Tab),
@@ -932,6 +1000,20 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rating_filters_match_marks() {
+        let rated = |r| Some(Mark::Rated(r, false));
+        assert!(RatingFilter::Any.matches(None));
+        assert!(RatingFilter::Runs.matches(rated(Rating::Playable)));
+        assert!(!RatingFilter::Runs.matches(rated(Rating::MajorIssues)));
+        assert!(RatingFilter::HasIssues.matches(rated(Rating::MajorIssues)));
+        assert!(RatingFilter::WontRun.matches(rated(Rating::WontRun)));
+        assert!(RatingFilter::Unrated.matches(Some(Mark::Tried)));
+        assert!(!RatingFilter::Unrated.matches(None));
+        assert!(RatingFilter::Untried.matches(None));
+        assert!(!RatingFilter::Untried.matches(Some(Mark::Tried)));
+    }
 
     #[test]
     fn lists_wrap_at_both_ends() {

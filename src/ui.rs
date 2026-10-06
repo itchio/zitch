@@ -9,9 +9,9 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 pub use crate::model::human_size;
 use crate::model::{
-    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Page, PlayableType,
-    Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here, scanned_platform_words,
-    wrap_step,
+    Action, Cave, Direction, Game, GameUpdate, InstallState, LaunchFailure, Mark, Page,
+    PlayableType, Prompt, Tab, UploadDetail, UploadExt, platform_names, playable_here,
+    scanned_platform_words, wrap_step,
 };
 use crate::page_info::PageInfo;
 use crate::qr::QrCode;
@@ -612,7 +612,8 @@ pub struct LibraryView<'a> {
     pub installs: &'a std::collections::HashMap<i64, InstallState>,
     pub updatable: &'a std::collections::HashSet<i64>,
     /// What the player made of each game they tried.
-    pub marks: &'a std::collections::HashMap<i64, Mark>,
+    /// None while the cover marks setting is off.
+    pub marks: Option<&'a std::collections::HashMap<i64, Mark>>,
     pub covers: &'a CoverLoader,
     /// Show the vertical scroll bar; a pad or finger has no use for it.
     pub scrollbar: bool,
@@ -895,7 +896,7 @@ pub fn library(
                         installed: installed.contains(&game.id),
                         install: installs.get(&game.id),
                         updatable: updatable.contains(&game.id),
-                        mark: marks.get(&game.id).copied(),
+                        mark: marks.and_then(|m| m.get(&game.id).copied()),
                     };
                     // Tiles rise into place one after another as the intro ends.
                     let delay = 60.0 + 70.0 * row.min(3) as f32 + 35.0 * (col - first) as f32;
@@ -1038,15 +1039,6 @@ struct Tile<'a> {
     install: Option<&'a InstallState>,
     updatable: bool,
     mark: Option<Mark>,
-}
-
-/// A cover's corner mark: how the player rated the game, or that they
-/// tried it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
-    /// The rating, and whether it was of the build installed now.
-    Rated(Rating, bool),
-    Tried,
 }
 
 pub fn rating_color(rating: Rating) -> Color32 {

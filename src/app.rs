@@ -12,8 +12,8 @@ use crate::images::CoverLoader;
 use crate::model::{
     Action, Cave, CaveExt, CollectionFilter, CollectionGames, Direction, Download,
     DownloadProgress, DownloadReason, Game, GameUpdate, InstallState, Kind, LaunchFailure,
-    Loadable, Page, Profile, Prompt, Tab, UploadExt, UserExt, human_size, known_playable_here,
-    wrap_step,
+    Loadable, Mark, Page, Profile, Prompt, RatingFilter, Tab, UploadExt, UserExt, human_size,
+    known_playable_here, wrap_step,
 };
 use crate::page_info::{Lookup, PageInfoLoader};
 use crate::qr::QrCode;
@@ -135,6 +135,9 @@ pub struct App {
     settings_return: Page,
     /// Rating and tried marks on the covers.
     cover_marks: bool,
+    /// The toolbar's filter on the player's own ratings. Not saved: it is
+    /// for browsing, and starts at Any.
+    rating_filter: RatingFilter,
     query: String,
     /// Move keyboard focus into the search box on the next frame.
     focus_search: bool,
@@ -154,7 +157,7 @@ pub struct App {
     /// How the open game's page is scrolled.
     page_scroll: ui::PageScroll,
     /// What the game options list does, by choice.
-    game_options: Vec<Action>,
+    prompt_options: Vec<Action>,
     /// How a game runs here, while the player fills it in.
     report: Option<ui::ReportView>,
     /// The last run of each cave, for a report filed later.
@@ -164,7 +167,7 @@ pub struct App {
     /// The reports sent from this device, by game.
     reports: Reports,
     /// The cover marks by game, from the caves, runs and reports.
-    marks: std::collections::HashMap<i64, ui::Mark>,
+    marks: std::collections::HashMap<i64, Mark>,
     reports_path: Option<PathBuf>,
     /// Something the user just did, shown in the header.
     pub actions: Vec<Action>,
@@ -387,6 +390,7 @@ impl App {
             types_return: Page::Library,
             settings_return: Page::Library,
             cover_marks: settings.cover_marks,
+            rating_filter: RatingFilter::Any,
             query: String::new(),
             focus_search: false,
             blur_search: false,
@@ -398,7 +402,7 @@ impl App {
             detail_visit: 0,
             page_scroll: ui::PageScroll::default(),
             report: None,
-            game_options: Vec::new(),
+            prompt_options: Vec::new(),
             runs: crate::report::load(&runs_path),
             runs_path: shot.is_none().then_some(runs_path),
             reports,
@@ -608,6 +612,13 @@ impl App {
                 Action::SetPlayableOnly(!self.playable_only),
             )],
         );
+        let rating = (
+            ui::ToolbarControl::Filters(vec![(
+                self.rating_filter.label(),
+                self.rating_filter != RatingFilter::Any,
+            )]),
+            vec![ToolbarStop::new("Your rating", Action::RatingFilterMenu)],
+        );
         let mut controls = Vec::new();
         let mut stops = Vec::new();
         let mut push = |control, mut more: Vec<ToolbarStop>| {
@@ -615,7 +626,10 @@ impl App {
             stops.append(&mut more);
         };
         match self.tab {
-            Tab::Library => push(playable.0, playable.1),
+            Tab::Library => {
+                push(playable.0, playable.1);
+                push(rating.0, rating.1);
+            }
             Tab::Collections => {
                 let installed = self.collections_installed_only;
                 push(
@@ -629,6 +643,7 @@ impl App {
                     ],
                 );
                 push(playable.0, playable.1);
+                push(rating.0, rating.1);
             }
             Tab::Downloads => {
                 let (label, busy) = if self.checking_updates {
@@ -644,7 +659,7 @@ impl App {
                 push(
                     ui::ToolbarControl::Button { label, busy },
                     vec![ToolbarStop {
-                        label,
+                        hint: label,
                         busy,
                         action: Action::CheckUpdates,
                     }],
@@ -788,9 +803,9 @@ impl App {
                 Action::Answer { prompt: id, choice } if id == prompt.id => {
                     if id == Self::SELF_UPDATE_PROMPT {
                         self.answer_self_update(choice);
-                    } else if id == Self::GAME_OPTIONS_PROMPT {
+                    } else if id == Self::OPTIONS_PROMPT {
                         self.prompt = self.prompt_queue.pop_front();
-                        let options = std::mem::take(&mut self.game_options);
+                        let options = std::mem::take(&mut self.prompt_options);
                         if let Some(action) = choice.and_then(|c| options.into_iter().nth(c)) {
                             self.actions.push(action);
                         }
@@ -1168,8 +1183,17 @@ impl App {
             Action::SetCoverMarks(on) => {
                 if self.cover_marks != on {
                     self.cover_marks = on;
-                    self.rebuild_marks();
                     self.save_settings();
+                }
+            }
+            Action::RatingFilterMenu => self.open_rating_filter(),
+            Action::SetRatingFilter(filter) => {
+                if self.rating_filter != filter {
+                    self.rating_filter = filter;
+                    self.rebuild_sections();
+                    self.rebuild_collection_sections();
+                    self.rows.follow = true;
+                    self.collection_rows.follow = true;
                 }
             }
             Action::FocusSettingsRow(row) => {
@@ -1389,7 +1413,7 @@ impl App {
                 }
                 self.running.insert(cave_id.clone(), Instant::now());
                 self.launch_failures.remove(&cave_id);
-                self.rebuild_marks();
+                self.refresh_marks();
                 self.backend.send(Command::Launch { cave_id });
             }
             // Only meaningful while a prompt is open, handled above.
@@ -1634,9 +1658,35 @@ impl App {
             .count()
     }
 
-    /// Whether the game clears the page-wide filter.
+    /// Whether the game clears the page-wide filters.
     fn passes(&self, game: &Game) -> bool {
-        !self.playable_only || known_playable_here(game, &self.playable_hidden)
+        self.rating_passes(game.id) && self.playable_passes(game)
+    }
+
+    /// Whether the game clears "Playable here", which also leaves out a
+    /// game the player rated Doesn't run on the build installed now.
+    fn playable_passes(&self, game: &Game) -> bool {
+        !self.playable_only
+            || (known_playable_here(game, &self.playable_hidden)
+                && !matches!(
+                    self.marks.get(&game.id),
+                    Some(Mark::Rated(Rating::WontRun, true))
+                ))
+    }
+
+    /// Whether the game clears the rating filter, which needs only its id.
+    fn rating_passes(&self, game_id: i64) -> bool {
+        self.rating_filter
+            .matches(self.marks.get(&game_id).copied())
+    }
+
+    /// Why a filtered row is empty.
+    fn empty_note(&self) -> String {
+        if self.rating_filter != RatingFilter::Any {
+            "Nothing here matches your rating filter".to_string()
+        } else {
+            "Nothing here runs on this device".to_string()
+        }
     }
 
     /// A row after the page-wide filter: none when it was empty anyway, a
@@ -1647,11 +1697,12 @@ impl App {
         }
         let games: Vec<i64> = games
             .into_iter()
-            .filter(|id| self.catalog.get(id).is_none_or(|g| self.passes(g)))
+            .filter(|id| match self.catalog.get(id) {
+                Some(game) => self.passes(game),
+                None => self.rating_passes(*id),
+            })
             .collect();
-        let note = games
-            .is_empty()
-            .then(|| "Nothing here runs on this device".to_string());
+        let note = games.is_empty().then(|| self.empty_note());
         Some(ui::Section {
             title: title(games.len()),
             games,
@@ -1737,11 +1788,14 @@ impl App {
                 let more = (!filter.any() || failed) && c.next_cursor.is_some();
                 let count = exact.map_or(c.collection.games_count, |_| games.len() as i64);
                 let note = match (games.is_empty(), installed_only) {
+                    (true, _) if more && self.rating_filter != RatingFilter::Any => {
+                        Some("Nothing loaded so far matches your rating filter".to_string())
+                    }
                     _ if more => None,
                     (true, _) if waiting => Some("Loading…".to_string()),
                     _ if c.games.is_empty() => Some("Empty collection".to_string()),
                     (true, true) => Some("Nothing installed from this collection".to_string()),
-                    (true, false) => Some("Nothing here runs on this device".to_string()),
+                    (true, false) => Some(self.empty_note()),
                     _ => None,
                 };
                 ui::Section {
@@ -2270,7 +2324,7 @@ impl App {
                             self.notify(format!("Couldn't launch: {}", failure.message));
                         }
                         self.launch_failures.insert(cave_id.clone(), failure);
-                        self.rebuild_marks();
+                        self.refresh_marks();
                     }
                     // Take the screen back. Most window systems already hand
                     // focus to the last focused window when the game's goes
@@ -2584,29 +2638,92 @@ impl App {
         if let Some(path) = &self.runs_path {
             crate::report::save(path, &self.runs);
         }
-        self.rebuild_marks();
+        self.refresh_marks();
     }
 
     /// Rebuilds the cover marks: the player's rating where there is one,
     /// else whether the installed game was tried. Called whenever the
     /// installs, runs, launch failures or reports change.
-    fn rebuild_marks(&mut self) {
-        if !self.cover_marks {
-            self.marks.clear();
-            return;
-        }
-        let mut marks: std::collections::HashMap<i64, ui::Mark> = self
+    fn rebuild_marks(&mut self) -> bool {
+        let mut marks: std::collections::HashMap<i64, Mark> = self
             .caves
             .iter()
             .filter(|cave| self.reportable(cave))
-            .filter_map(|cave| Some((cave.game_id()?, ui::Mark::Tried)))
+            .filter_map(|cave| Some((cave.game_id()?, Mark::Tried)))
             .collect();
         for &game_id in self.reports.keys() {
             if let Some((saved, current)) = reported(&self.reports, &self.caves, game_id) {
-                marks.insert(game_id, ui::Mark::Rated(saved.rating, current));
+                marks.insert(game_id, Mark::Rated(saved.rating, current));
             }
         }
+        if self.marks == marks {
+            return false;
+        }
         self.marks = marks;
+        true
+    }
+
+    /// Rebuilds the marks and, when a filter reads them, the rows too.
+    fn refresh_marks(&mut self) {
+        if self.rebuild_marks() && (self.rating_filter != RatingFilter::Any || self.playable_only) {
+            self.rebuild_sections();
+            self.rebuild_collection_sections();
+        }
+    }
+
+    /// Asks which of the player's ratings to show, with how many games
+    /// each would be.
+    fn open_rating_filter(&mut self) {
+        // Counts are of the Library tab's games after "Playable here";
+        // collection rows page in, so there they are left off.
+        let listed: Vec<i64> = if self.tab == Tab::Library {
+            let mut seen = std::collections::HashSet::new();
+            self.owned
+                .get()
+                .into_iter()
+                .flatten()
+                .map(|g| g.id)
+                .chain(self.installed_ids())
+                .filter(|id| seen.insert(*id))
+                .filter(|id| self.catalog.get(id).is_none_or(|g| self.playable_passes(g)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let choices = RatingFilter::ALL
+            .iter()
+            .map(|filter| {
+                if *filter == RatingFilter::Any || self.tab != Tab::Library {
+                    return filter.label().to_string();
+                }
+                let count = listed
+                    .iter()
+                    .filter(|id| filter.matches(self.marks.get(id).copied()))
+                    .count();
+                format!("{} ({count})", filter.label())
+            })
+            .collect();
+        let prompt = Prompt {
+            id: Self::OPTIONS_PROMPT,
+            title: "Your rating".to_string(),
+            body: String::new(),
+            choices,
+            focus: RatingFilter::ALL
+                .iter()
+                .position(|f| *f == self.rating_filter)
+                .unwrap_or(0),
+            primary: None,
+            stacked: true,
+            details: Vec::new(),
+            progress: None,
+        };
+        if let Some(open) = self.prompt.replace(prompt) {
+            self.prompt_queue.push_front(open);
+        }
+        self.prompt_options = RatingFilter::ALL
+            .iter()
+            .map(|f| Action::SetRatingFilter(*f))
+            .collect();
     }
 
     /// Whether the cave was launched, so there is something to report on.
@@ -2688,7 +2805,7 @@ impl App {
         if let Some(path) = &self.reports_path {
             crate::report::save(path, &self.reports);
         }
-        self.rebuild_marks();
+        self.refresh_marks();
         self.backend.send(Command::Report(Box::new(report)));
     }
 
@@ -2699,7 +2816,7 @@ impl App {
 
     /// The backend counts its prompt ids up from 1.
     const SELF_UPDATE_PROMPT: u64 = u64::MAX;
-    const GAME_OPTIONS_PROMPT: u64 = u64::MAX - 1;
+    const OPTIONS_PROMPT: u64 = u64::MAX - 1;
 
     /// The game page's More button: what else there is to do with the
     /// installed game, as a list.
@@ -2735,7 +2852,7 @@ impl App {
             .map_or("Game", |g| g.title.as_str())
             .to_string();
         self.prompt = Some(Prompt {
-            id: Self::GAME_OPTIONS_PROMPT,
+            id: Self::OPTIONS_PROMPT,
             title,
             body: String::new(),
             choices: options.iter().map(|(label, _)| label.to_string()).collect(),
@@ -2745,7 +2862,7 @@ impl App {
             details: Vec::new(),
             progress: None,
         });
-        self.game_options = options.into_iter().map(|(_, action)| action).collect();
+        self.prompt_options = options.into_iter().map(|(_, action)| action).collect();
     }
 
     /// The drawer's row: open the dialog, checking unless there is
@@ -3061,7 +3178,7 @@ impl App {
                 let on_toolbar = self
                     .toolbar_focus_in(stops.len(), rows_empty)
                     .and_then(|index| stops.get(index))
-                    .map(|stop| stop.label);
+                    .map(|stop| stop.hint);
                 let mut hints = Vec::new();
                 // Confirm names what the focused control does.
                 let confirm = match self.tab {
@@ -3460,7 +3577,7 @@ impl App {
                                 installed: &self.installed,
                                 installs: &self.installs,
                                 updatable: &self.updatable(),
-                                marks: &self.marks,
+                                marks: self.cover_marks.then_some(&self.marks),
                                 covers: &self.covers,
                                 scrollbar: self.input_mode == InputMode::Keyboard,
                                 focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
@@ -3487,7 +3604,7 @@ impl App {
                                             installed: &self.installed,
                                             installs: &self.installs,
                                             updatable: &self.updatable(),
-                                            marks: &self.marks,
+                                            marks: self.cover_marks.then_some(&self.marks),
                                             covers: &self.covers,
                                             scrollbar: self.input_mode == InputMode::Keyboard,
                                             focused: self.toolbar_focus[tab_slot(Tab::Collections)]
@@ -3685,16 +3802,17 @@ fn capitalize(text: &str) -> String {
 
 /// A button on a tab's toolbar and what pressing it does.
 struct ToolbarStop {
-    label: &'static str,
+    /// What the footer says Confirm does.
+    hint: &'static str,
     /// Its work is under way; pressing it does nothing.
     busy: bool,
     action: Action,
 }
 
 impl ToolbarStop {
-    fn new(label: &'static str, action: Action) -> Self {
+    fn new(hint: &'static str, action: Action) -> Self {
         Self {
-            label,
+            hint,
             busy: false,
             action,
         }
