@@ -1,4 +1,4 @@
-.PHONY: build release run run-verbose run-handheld run-tv shot shots check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
+.PHONY: build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -21,6 +21,8 @@ help:
 	@echo "make shot         launch, write a screenshot to \$$SHOT ($(SHOT)), exit"
 	@echo "                  SCRIPT=\"down,right,enter\" plays input first"
 	@echo "make shots        the same at 640x480, 1280x720 and 1920x1080, to /tmp/zitch-*.png"
+	@echo "make shots-baseline  capture every scene to target/shots/baseline"
+	@echo "make shots-check     capture again and compare against the baseline"
 	@echo "make check        format, lint, and type-check without running"
 	@echo "make clean        remove build output"
 	@echo "make sync-butler  regenerate src/butlerd/types.rs from \$$BUTLER_DIR ($(BUTLER_DIR))"
@@ -66,6 +68,13 @@ shots: build
 	for size in 640x480 1280x720 1920x1080; do \
 		./target/debug/zitch --app-name $(APP) --emulate $$size --screenshot /tmp/zitch-$$size.png $(if $(SCRIPT),--screenshot-script "$(SCRIPT)") $(ARGS); \
 	done
+
+# Screenshot regression: capture every scene, or capture again and compare.
+shots-baseline: build
+	APP=$(APP) scripts/shots.sh baseline
+
+shots-check: build
+	APP=$(APP) scripts/shots.sh check
 
 check:
 	cargo fmt
