@@ -28,6 +28,8 @@ const TILE_HOVER: Color32 = Color32::from_gray(0x2a);
 pub const TEXT: Color32 = Color32::from_rgb(0xff, 0xff, 0xf0);
 const ACCENT: Color32 = Color32::from_rgb(0xfa, 0x5c, 0x5c);
 const DIM: Color32 = Color32::from_gray(0xba);
+/// Text on a control that cannot be used right now.
+const DISABLED: Color32 = Color32::from_gray(0x6e);
 /// Text on a button that is not the main one.
 const TEXT_SOFT: Color32 = Color32::from_rgb(0xe8, 0xe2, 0xdf);
 const GREEN: Color32 = Color32::from_rgb(0xb9, 0xe8, 0xa1);
@@ -2432,11 +2434,13 @@ fn status_readout(ui: &mut Ui, m: &Metrics, text: &str) {
 }
 
 fn pill(ui: &mut Ui, m: &Metrics, label: &str, focused: bool, primary: bool) -> egui::Response {
-    pill_with(ui, m, label, focused, primary, false)
+    pill_with(ui, m, label, focused, primary, false, false)
 }
 
 /// `busy` puts a spinner before the label and dims it: the button's work
-/// is under way and pressing it again does nothing.
+/// is under way and pressing it again does nothing. `disabled` dims it
+/// further with no spinner: nothing can be done here for now, though it
+/// still takes focus so the footer can say why.
 fn pill_with(
     ui: &mut Ui,
     m: &Metrics,
@@ -2444,6 +2448,7 @@ fn pill_with(
     focused: bool,
     primary: bool,
     busy: bool,
+    disabled: bool,
 ) -> egui::Response {
     let galley = ui
         .painter()
@@ -2496,7 +2501,9 @@ fn pill_with(
             (SURFACE, BORDER)
         };
         fill_squircle(ui, rect, radii, fill, Stroke::new(border.width, edge));
-        if busy {
+        if disabled {
+            DISABLED
+        } else if busy {
             DIM
         } else if focused {
             TEXT
@@ -2530,7 +2537,7 @@ fn pill_with(
         galley,
         color,
     );
-    if busy {
+    if busy || disabled {
         response
     } else {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2594,6 +2601,8 @@ pub enum ToolbarControl {
         label: &'static str,
         /// Its work is under way; drawn with a spinner and inert.
         busy: bool,
+        /// Nothing can be done here for now; drawn dimmed and inert.
+        disabled: bool,
     },
     /// Joined filter options, each with whether it is on.
     Filters(Vec<(&'static str, bool)>),
@@ -2630,12 +2639,17 @@ pub fn toolbar(
                 .filter(|&f| f >= first && f < first + control.stops())
                 .map(|f| f - first);
             match control {
-                ToolbarControl::Button { label, busy } => {
-                    let response = pill_with(ui, m, label, local.is_some(), false, *busy);
+                ToolbarControl::Button {
+                    label,
+                    busy,
+                    disabled,
+                } => {
+                    let response =
+                        pill_with(ui, m, label, local.is_some(), false, *busy, *disabled);
                     if response.hovered() && pointer_moved && local.is_none() {
                         out.hovered = Some(first);
                     }
-                    if response.clicked() && !busy {
+                    if response.clicked() && !busy && !disabled {
                         out.clicked = Some(first);
                     }
                 }
@@ -3522,6 +3536,8 @@ pub struct MenuItem {
     pub action: Action,
     /// Its work is under way; drawn with a spinner.
     pub busy: bool,
+    /// Nothing can be done here for now; drawn dimmed.
+    pub disabled: bool,
 }
 
 /// The menu drawer: a list down the left edge over a dimmed page, sliding
@@ -3575,12 +3591,18 @@ pub fn drawer(
                         ACCENT,
                     );
                 }
+                let color = match (item.disabled, focused) {
+                    (true, true) => DIM,
+                    (true, false) => DISABLED,
+                    (false, true) => TEXT,
+                    (false, false) => DIM,
+                };
                 let text = ui.painter().text(
                     egui::pos2(row.min.x + pad + m.space(4.0), row.center().y),
                     egui::Align2::LEFT_CENTER,
                     &item.label,
                     bold(m.button),
-                    if focused { TEXT } else { DIM },
+                    color,
                 );
                 if item.busy {
                     let size = m.space(18.0);

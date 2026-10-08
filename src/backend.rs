@@ -24,8 +24,9 @@ use crate::butlerd::types::{
     DownloadsRetryParams, FetchCaveParams, FetchCavesParams, FetchCollectionGamesParams,
     FetchGameUploadsParams, FetchProfileCollectionsParams, FetchProfileOwnedKeysParams,
     InstallLocationsAddParams, InstallLocationsListParams, InstallQueueParams,
-    LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel, PickManifestActionResult,
-    PrereqsFailedResult, ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
+    LaunchGetTargetsParams, LaunchParams, LaunchStrategy, LogLevel,
+    NetworkSetSimulateOfflineParams, PickManifestActionResult, PrereqsFailedResult,
+    ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithDeviceCancelParams, ProfileLoginWithDeviceParams,
     ProfileLoginWithDeviceRequestDeviceInfoResult, ProfileLoginWithDeviceResult,
     ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
@@ -61,6 +62,8 @@ pub struct Config {
     /// Start butler with `--low-power`. Only for a butler we ship, since
     /// one older than the flag refuses to start with it.
     pub low_power: bool,
+    /// Have butler fail every network call, to look at the offline state.
+    pub simulate_offline: bool,
 }
 
 pub enum Command {
@@ -386,6 +389,10 @@ fn run(config: Config, emit: &Emitter, commands: mpsc::Receiver<Command>) -> Res
     match client.call(VersionGetParams {}) {
         Ok(version) => emit.send(Event::ButlerVersion(butler_version_label(&version))),
         Err(error) => log::warn!("butler version: {error:#}"),
+    }
+    if config.simulate_offline {
+        client.call(NetworkSetSimulateOfflineParams { enabled: true })?;
+        log::info!("butler is simulating being offline");
     }
 
     let config = Arc::new(config);
@@ -2338,6 +2345,9 @@ fn await_login(
                 Some(code) if code == Code::OPERATION_CANCELLED.0 => continue,
                 Some(code) if code == Code::PROFILE_LOGIN_WITH_DEVICE_DENIED.0 => {
                     "The sign-in was cancelled on the phone".to_string()
+                }
+                _ if is_offline(&error) => {
+                    "Signing in needs a network connection; connect and retry".to_string()
                 }
                 _ => format!("Signing in: {error:#}"),
             },

@@ -124,6 +124,10 @@ struct Cli {
         hide = true
     )]
     api_url: String,
+
+    /// Have butler act as though there were no network. For development.
+    #[arg(long, hide = true)]
+    offline: bool,
 }
 
 fn parse_size(text: &str) -> Result<(f32, f32), String> {
@@ -191,6 +195,7 @@ fn main() -> anyhow::Result<()> {
         game_env: muos::game_env(),
         // The muxapp bundles its own butler; elsewhere it is the itch app's.
         low_power: muos::available(),
+        simulate_offline: cli.offline,
     };
 
     let script = match cli.screenshot_script.as_deref().map(app::parse_script) {

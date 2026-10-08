@@ -536,13 +536,19 @@ impl App {
     }
 
     /// What Confirm does on the Library page: the focused toolbar stop,
-    /// the focused game, or the focused Downloads button. A busy stop has
-    /// a name and nothing to do.
-    fn confirm_target(&self) -> Option<(&'static str, Option<Action>)> {
+    /// the focused game, or the focused Downloads button.
+    fn confirm_target(&self) -> Option<(&'static str, Press)> {
         let (_, stops) = self.toolbar();
         if let Some(index) = self.toolbar_focus_in(stops.len(), self.rows_empty()) {
             let stop = stops.get(index)?;
-            return Some((stop.hint, (!stop.busy).then(|| stop.action.clone())));
+            let press = if stop.busy {
+                Press::Busy
+            } else if stop.offline {
+                Press::Offline
+            } else {
+                Press::Do(stop.action.clone())
+            };
+            return Some((stop.hint, press));
         }
         match self.tab {
             Tab::Library | Tab::Collections => {
@@ -550,13 +556,13 @@ impl App {
                     .active_rows_ref()
                     .and_then(|rows| rows.focused_game())
                     .filter(|id| self.catalog.contains_key(id))?;
-                Some(("Open", Some(Action::Open(Page::game(id)))))
+                Some(("Open", Press::Do(Action::Open(Page::game(id)))))
             }
             Tab::Downloads => {
                 let rows = self.download_rows();
                 let (row, button) = self.downloads_row_in(&rows);
                 let (label, action) = rows.get(row)?.buttons.get(button)?;
-                Some((label, Some(action.clone())))
+                Some((label, Press::Do(action.clone())))
             }
         }
     }
@@ -701,11 +707,17 @@ impl App {
                 } else {
                     ("Check for updates", false)
                 };
+                let offline = !self.online;
                 push(
-                    ui::ToolbarControl::Button { label, busy },
+                    ui::ToolbarControl::Button {
+                        label,
+                        busy,
+                        disabled: offline,
+                    },
                     vec![ToolbarStop {
                         hint: label,
                         busy,
+                        offline,
                         action: Action::CheckUpdates,
                     }],
                 );
@@ -719,6 +731,7 @@ impl App {
                         ui::ToolbarControl::Button {
                             label: "Update all",
                             busy: false,
+                            disabled: false,
                         },
                         vec![ToolbarStop::new("Update all", Action::UpdateAll)],
                     );
@@ -731,6 +744,7 @@ impl App {
                         ui::ToolbarControl::Button {
                             label: "Clear all",
                             busy: false,
+                            disabled: false,
                         },
                         vec![ToolbarStop::new("Clear all", Action::ClearFinished)],
                     );
@@ -902,15 +916,20 @@ impl App {
             }
             Action::MenuFocus(index) if index < items.len() => self.menu = Some(index),
             Action::Activate => {
-                if let Some(action) = items.into_iter().nth(focus).map(|item| item.action) {
-                    // Quit keeps the drawer in place under the overlay;
-                    // a refresh keeps it to show its progress, a
-                    // toggle its new state.
-                    if !matches!(action, Action::Quit | Action::RefreshLibrary) {
-                        self.menu = None;
-                    }
-                    self.actions.push(action);
+                let Some(item) = items.into_iter().nth(focus) else {
+                    return;
+                };
+                if item.disabled {
+                    return;
                 }
+                let action = item.action;
+                // Quit keeps the drawer in place under the overlay;
+                // a refresh keeps it to show its progress, a
+                // toggle its new state.
+                if !matches!(action, Action::Quit | Action::RefreshLibrary) {
+                    self.menu = None;
+                }
+                self.actions.push(action);
             }
             Action::Back | Action::Menu => self.menu = None,
             Action::Quit => self.quitting = Some(Self::QUIT_FRAMES),
@@ -1204,11 +1223,11 @@ impl App {
                 }
             }
             Action::Activate => match self.page {
-                Page::Library => {
-                    if let Some((_, Some(action))) = self.confirm_target() {
-                        self.actions.push(action);
-                    }
-                }
+                Page::Library => match self.confirm_target() {
+                    Some((_, Press::Do(action))) => self.actions.push(action),
+                    Some((hint, Press::Offline)) => self.notify_offline(hint),
+                    Some((_, Press::Busy)) | None => {}
+                },
                 Page::Game {
                     shot: Some(index), ..
                 } => self.actions.push(Action::ViewScreenshot(index)),
@@ -2892,6 +2911,11 @@ impl App {
         self.notice = Some((message, Instant::now()));
     }
 
+    /// The press on a control that needs the network while there is none.
+    fn notify_offline(&mut self, what: &str) {
+        self.notify(format!("{what}: not available offline"));
+    }
+
     /// The game page's More button: what else there is to do with the
     /// installed game, as a list.
     fn open_game_options(&mut self, cave_id: &str) {
@@ -3097,8 +3121,11 @@ impl App {
         self.rebuild_rows();
     }
 
-    /// What the menu drawer offers, top to bottom.
+    /// What the menu drawer offers, top to bottom. Rows that need the
+    /// network are disabled while offline rather than left out, so the
+    /// drawer keeps its shape and says why.
     fn menu_items(&self) -> Vec<ui::MenuItem> {
+        let offline = !self.online;
         let mut items = vec![ui::MenuItem {
             label: if self.refreshing {
                 "Refreshing…".into()
@@ -3107,30 +3134,37 @@ impl App {
             },
             action: Action::RefreshLibrary,
             busy: self.refreshing,
+            disabled: offline,
         }];
         if self.profile.is_some() {
+            // Signing out leaves the sign-in page, which needs itch.io.
             items.push(ui::MenuItem {
                 label: "Change user".into(),
                 action: Action::ChangeUser,
                 busy: false,
+                disabled: offline,
             });
         }
         if let Some(update) = &self.self_update {
+            let downloading = matches!(update.state(), self_update::State::Downloading { .. });
             items.push(ui::MenuItem {
                 label: "Check for zitch update".into(),
                 action: Action::SelfUpdate,
-                busy: matches!(update.state(), self_update::State::Downloading { .. }),
+                busy: downloading,
+                disabled: offline,
             });
         }
         items.push(ui::MenuItem {
             label: "Settings".into(),
             action: Action::Open(Page::Settings { row: 0 }),
             busy: false,
+            disabled: false,
         });
         items.push(ui::MenuItem {
             label: "Quit".into(),
             action: Action::Quit,
             busy: false,
+            disabled: false,
         });
         items
     }
@@ -3172,7 +3206,7 @@ impl App {
             if items.len() > 1 {
                 hints.push((vec![Glyph::Navigate], "Choose".to_string()));
             }
-            if let Some(item) = items.get(focus) {
+            if let Some(item) = items.get(focus).filter(|item| !item.disabled) {
                 hints.push((vec![Glyph::Confirm], item.label.to_string()));
             }
             hints.push((vec![Glyph::Back], "Close".to_string()));
@@ -3253,8 +3287,14 @@ impl App {
                 let rows_empty = self.rows_empty();
                 let on_toolbar = self.toolbar_focus_in(stops.len(), rows_empty).is_some();
                 let mut hints = Vec::new();
-                // Confirm names what the focused control does.
-                let confirm = self.confirm_target().map(|(label, _)| label);
+                // Confirm names what the focused control does; a control
+                // with nothing to do while offline goes unnamed, the
+                // header's Offline mark standing in.
+                let confirm = match self.confirm_target() {
+                    Some((_, Press::Offline)) => None,
+                    Some((label, _)) => Some(label),
+                    None => None,
+                };
                 if !rows_empty || stops.len() > 1 {
                     hints.push((vec![Glyph::Navigate], "Browse".to_string()));
                 }
@@ -3541,15 +3581,18 @@ impl App {
                         if let Some(reading) = self.battery.reading() {
                             ui::battery(ui, &m, reading);
                         }
-                        if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref()) {
-                            // Elide rather than wrap: on a 640-wide screen a
-                            // long display name meets the tab strip.
-                            ui::subtle_truncated(ui, &m, user.name());
-                        }
+                        // The network mark goes before the name: the name
+                        // is what gives way when the row is short, and
+                        // it elides rather than wrapping into the tabs.
                         if !self.online {
                             ui::offline(ui, &m);
                         } else if self.syncing {
                             ui::syncing(ui, &m);
+                        }
+                        if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref())
+                            && ui.available_width() >= m.space(48.0)
+                        {
+                            ui::subtle_truncated(ui, &m, user.name());
                         }
                     });
                 });
@@ -3883,6 +3926,8 @@ struct ToolbarStop {
     hint: &'static str,
     /// Its work is under way; pressing it does nothing.
     busy: bool,
+    /// It needs the network and there is none; pressing it says so.
+    offline: bool,
     action: Action,
 }
 
@@ -3891,9 +3936,19 @@ impl ToolbarStop {
         Self {
             hint,
             busy: false,
+            offline: false,
             action,
         }
     }
+}
+
+/// What Confirm does on the Library page, by the footer's name for it.
+enum Press {
+    Do(Action),
+    /// The control's work is under way; nothing more to do.
+    Busy,
+    /// The control needs the network and there is none.
+    Offline,
 }
 
 /// The player's report on a game, and whether it was of a build
