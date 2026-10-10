@@ -198,30 +198,59 @@ two additions to their environment (`muos::game_env`):
 
 - `SDL_DYNAMIC_API` naming `libzitch-sdl.so`, built from
   `handheld/sdl-dynapi.c` by `make handheld` and deployed next to the
-  binary. Games carry their own SDL2, built with the X11, Wayland and
-  KMSDRM backends the device lacks, so they can't open the screen. SDL2's
-  dynamic API lets that copy hand every call to another library instead;
-  the shim points it at the firmware's libSDL2, whose `mali` backend can.
-  The firmware library's jump table doesn't match upstream's order, so
-  entries are matched by name: the shim reads each SDL stub in the game
-  to find its slot, checks that against `handheld/sdl-dynapi-procs.h`
-  (`make handheld-sdl-procs` refreshes it from SDL's source), and fills
-  the rest from that list. It refuses a game whose stubs disagree, and a
-  dynamically linked SDL2 asking to be replaced by itself. It opens the
-  firmware's library at `/usr/lib` or `/usr/lib/aarch64-linux-gnu`;
-  `ZITCH_SDL_LIB` names another.
-  The shim also answers the game's lookups of `glShaderSource`,
-  `glLinkProgram` and `glDeleteShader` with wrappers. FNA games hand the
-  driver GLSL ES 1.00 shaders, which have one color target; one that
-  writes to `gl_FragData[1]` or higher is rewritten as GLSL ES 3.00 on
-  an ES 3 context, and so are the shaders it is linked with, since a
-  program holds one version.
+  binary. What it does is under "The SDL shim" below.
 - `LANG=en_US.UTF-8` when unset. The firmware sets no locale and games
   read it without checking.
 
 Only an SDL2 built with the dynamic API on (the default) can be routed.
 A game with it off, or on SDL3 or another windowing library, still
 fails to open a display. Quit with the game's own quit.
+
+### The SDL shim
+
+Games carry their own SDL2, built with the X11, Wayland and KMSDRM
+backends the device lacks, so they can't open the screen. SDL2's dynamic
+API lets that copy hand every call to another library instead; the shim
+points it at the firmware's libSDL2, whose `mali` backend can. It opens
+the firmware's library at `/usr/lib` or `/usr/lib/aarch64-linux-gnu`;
+`ZITCH_SDL_LIB` names another.
+
+Each thing it does was added for a particular game. Name the game, with
+its itch.io URL, when adding another.
+
+- McPixel 3 (https://devolverdigital.itch.io/mcpixel-3): the routing.
+  SDL 2.24 built into an unstripped static executable. The firmware
+  library's jump table doesn't match upstream's order, so entries are
+  matched by name: the shim reads each SDL stub in the game to find its
+  slot, checks that against `handheld/sdl-dynapi-procs.h`
+  (`make handheld-sdl-procs` refreshes it from SDL's source), and fills
+  the rest from that list. It refuses a game whose stubs disagree. SDL2
+  built into one of the game's own libraries rather than the executable
+  is routed the same way.
+- Anodyne (https://han-tani.itch.io/anodyne): two-target shaders. The
+  shim answers lookups of `glShaderSource`, `glLinkProgram` and
+  `glDeleteShader` with wrappers. FNA hands the driver GLSL ES 1.00
+  shaders, which have one color target; one that writes to
+  `gl_FragData[1]` or higher is rewritten as GLSL ES 3.00 on an ES 3
+  context, and so are the shaders it is linked with, since a program
+  holds one version.
+- Undrium (https://bitglint.itch.io/undrium): MonoGame. A .NET game has
+  no SDL2 of its own and loads the firmware's, which asks the shim too.
+  That one keeps its own entries, with only `SDL_GL_GetProcAddress`
+  swapped, so the GL wrappers above apply to it (and to LÖVE). MonoGame's
+  DesktopGL build reads the first digits of the version string, takes
+  "OpenGL ES 3.2 ..." for GL 1.1 and refuses to start without framebuffer
+  objects, so next to a `MonoGame.Framework.dll` the shim reports
+  "3.2 OpenGL ES 3.2 ..." instead, and fills in `glPolygonMode`,
+  `glDepthRange`, `glClearDepth`, `glDrawBuffer`, `glGetTexImage` and
+  `glMapBuffer`, which ES lacks. Its shaders are the GLSL ES ones it
+  ships for phones, so nothing else needs translating.
+
+`ZITCH_SDL_TRACE=1` in the game's environment logs every GL lookup and
+prints a backtrace on a crash. A GL function the game uses and ES lacks
+shows up as a lookup returning `(nil)` and then a segfault in JIT code.
+SIGTERM crashes a .NET game in the Mali driver while the runtime tears
+down, so quit through the game's own menu when checking its exit code.
 
 ## Sign in
 

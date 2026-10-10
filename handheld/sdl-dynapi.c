@@ -14,10 +14,15 @@
  * code says which; that is checked against the upstream order, which
  * also names the slots that have no stub (the varargs functions). A
  * stripped binary is trusted to follow the upstream order.
+ *
+ * A game with no SDL2 of its own calls the firmware's, which asks to be
+ * overridden too; that one keeps its own entries, and only its GL
+ * loader goes through here, for the fixes below.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <elf.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <link.h>
 #include <stdint.h>
@@ -26,6 +31,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include "sdl-dynapi-procs.h"
@@ -471,9 +477,223 @@ static void delete_shader(unsigned shader)
     real_delete_shader(shader);
 }
 
+/* MonoGame's DesktopGL build runs on the firmware's SDL2 and so lands
+   on this ES context, but reads the version string as desktop GL
+   ("3.2 ...") and takes 1.1 from "OpenGL ES 3.2 ...", then gives up
+   for want of framebuffer objects. Its shaders are the GLSL ES ones it
+   ships for phones, so past that check it only calls a few desktop
+   entry points ES lacks. */
+
+static int desktop_gl_game(void)
+{
+    static int known = -1;
+    if (known < 0) {
+        char exe[4096];
+        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        known = 0;
+        if (len > 0) {
+            exe[len] = '\0';
+            char *slash = strrchr(exe, '/');
+            if (slash && (size_t)(slash - exe) + sizeof("/MonoGame.Framework.dll") <= sizeof(exe)) {
+                strcpy(slash + 1, "MonoGame.Framework.dll");
+                known = access(exe, F_OK) == 0;
+            }
+        }
+        if (!known) {
+            known = access("MonoGame.Framework.dll", F_OK) == 0;
+        }
+    }
+    return known;
+}
+
+static const char *(*real_get_string)(unsigned name);
+static void (*real_depth_rangef)(float near, float far);
+static void (*real_clear_depthf)(float depth);
+static void (*real_draw_buffers)(int count, const unsigned *buffers);
+
+static const char *get_string(unsigned name)
+{
+    static char version[128];
+    const char *real = real_get_string(name);
+    if (name != GL_VERSION_ || !real || strncmp(real, "OpenGL ES ", 10) != 0) {
+        return real;
+    }
+    if (!version[0]) {
+        snprintf(version, sizeof(version), "%.3s %s", real + 10, real);
+    }
+    return version;
+}
+
+static void polygon_mode(unsigned face, unsigned mode)
+{
+    (void)face;
+    (void)mode;
+}
+
+static void depth_range(double near, double far)
+{
+    real_depth_rangef((float)near, (float)far);
+}
+
+static void clear_depth(double depth)
+{
+    real_clear_depthf((float)depth);
+}
+
+static void draw_buffer(unsigned mode)
+{
+    real_draw_buffers(1, &mode);
+}
+
+#define GL_READ_FRAMEBUFFER_ 0x8CA8
+#define GL_READ_FRAMEBUFFER_BINDING_ 0x8CAA
+#define GL_COLOR_ATTACHMENT0_ 0x8CE0
+#define GL_TEXTURE_BINDING_2D_ 0x8069
+#define GL_TEXTURE_WIDTH_ 0x1000
+#define GL_TEXTURE_HEIGHT_ 0x1001
+#define GL_BUFFER_SIZE_ 0x8764
+#define GL_READ_ONLY_ 0x88B8
+#define GL_WRITE_ONLY_ 0x88B9
+#define GL_MAP_READ_BIT_ 0x1
+#define GL_MAP_WRITE_BIT_ 0x2
+
+static void (*gl_get_integerv)(unsigned, int *);
+static void (*gl_get_tex_level_parameteriv)(unsigned, int, unsigned, int *);
+static void (*gl_gen_framebuffers)(int, unsigned *);
+static void (*gl_delete_framebuffers)(int, const unsigned *);
+static void (*gl_bind_framebuffer)(unsigned, unsigned);
+static void (*gl_framebuffer_texture2d)(unsigned, unsigned, unsigned, unsigned, int);
+static void (*gl_read_pixels)(int, int, int, int, unsigned, unsigned, void *);
+static void (*gl_get_buffer_parameteriv)(unsigned, unsigned, int *);
+static void *(*gl_map_buffer_range)(unsigned, intptr_t, intptr_t, unsigned);
+
+/* ES reads a texture back through a framebuffer. */
+static void get_tex_image(unsigned target, int level, unsigned format, unsigned type, void *pixels)
+{
+    int texture = 0, previous = 0, width = 0, height = 0;
+    unsigned fbo = 0;
+    gl_get_integerv(GL_TEXTURE_BINDING_2D_, &texture);
+    gl_get_integerv(GL_READ_FRAMEBUFFER_BINDING_, &previous);
+    gl_get_tex_level_parameteriv(target, level, GL_TEXTURE_WIDTH_, &width);
+    gl_get_tex_level_parameteriv(target, level, GL_TEXTURE_HEIGHT_, &height);
+    gl_gen_framebuffers(1, &fbo);
+    gl_bind_framebuffer(GL_READ_FRAMEBUFFER_, fbo);
+    gl_framebuffer_texture2d(GL_READ_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, target, texture, level);
+    gl_read_pixels(0, 0, width, height, format, type, pixels);
+    gl_bind_framebuffer(GL_READ_FRAMEBUFFER_, previous);
+    gl_delete_framebuffers(1, &fbo);
+}
+
+static void *map_buffer(unsigned target, unsigned access)
+{
+    int size = 0;
+    gl_get_buffer_parameteriv(target, GL_BUFFER_SIZE_, &size);
+    unsigned bits = access == GL_READ_ONLY_    ? GL_MAP_READ_BIT_
+                    : access == GL_WRITE_ONLY_ ? GL_MAP_WRITE_BIT_
+                                               : GL_MAP_READ_BIT_ | GL_MAP_WRITE_BIT_;
+    return gl_map_buffer_range(target, 0, size, bits);
+}
+
+static int load_gl(void **slot, const char *name)
+{
+    if (!*slot) {
+        *slot = real_get_proc(name);
+    }
+    return *slot != NULL;
+}
+
+static void *desktop_gl_proc(const char *name, void *fn)
+{
+    if (strcmp(name, "glGetString") == 0) {
+        real_get_string = fn;
+        return (void *)get_string;
+    }
+    if (fn) {
+        return fn;
+    }
+    if (strcmp(name, "glPolygonMode") == 0) {
+        return (void *)polygon_mode;
+    }
+    if (strcmp(name, "glDepthRange") == 0 && (real_depth_rangef = real_get_proc("glDepthRangef"))) {
+        return (void *)depth_range;
+    }
+    if (strcmp(name, "glClearDepth") == 0 && (real_clear_depthf = real_get_proc("glClearDepthf"))) {
+        return (void *)clear_depth;
+    }
+    if (strcmp(name, "glDrawBuffer") == 0 && (real_draw_buffers = real_get_proc("glDrawBuffers"))) {
+        return (void *)draw_buffer;
+    }
+    if (strcmp(name, "glGetTexImage") == 0 && load_gl((void **)&gl_get_integerv, "glGetIntegerv")
+        && load_gl((void **)&gl_get_tex_level_parameteriv, "glGetTexLevelParameteriv")
+        && load_gl((void **)&gl_gen_framebuffers, "glGenFramebuffers")
+        && load_gl((void **)&gl_delete_framebuffers, "glDeleteFramebuffers")
+        && load_gl((void **)&gl_bind_framebuffer, "glBindFramebuffer")
+        && load_gl((void **)&gl_framebuffer_texture2d, "glFramebufferTexture2D")
+        && load_gl((void **)&gl_read_pixels, "glReadPixels")) {
+        return (void *)get_tex_image;
+    }
+    if (strcmp(name, "glMapBuffer") == 0
+        && load_gl((void **)&gl_get_buffer_parameteriv, "glGetBufferParameteriv")
+        && load_gl((void **)&gl_map_buffer_range, "glMapBufferRange")) {
+        return (void *)map_buffer;
+    }
+    return NULL;
+}
+
+static struct sigaction next_segv;
+
+static void print_frame(uintptr_t pc)
+{
+    Dl_info sym = {0};
+    dladdr((void *)pc, &sym);
+    fprintf(stderr, "  %#lx %s+%#lx (%s)\n", pc, sym.dli_sname ? sym.dli_sname : "?",
+            sym.dli_saddr ? pc - (uintptr_t)sym.dli_saddr : 0, sym.dli_fname ? sym.dli_fname : "?");
+}
+
+/* Walks frame pointers; .NET's JIT keeps them where libunwind has no
+   tables. */
+static void on_segv(int sig, siginfo_t *info, void *context)
+{
+    const mcontext_t *regs = &((ucontext_t *)context)->uc_mcontext;
+    fprintf(stderr, "sdl-dynapi: SIGSEGV reading %p, x0 %#llx\n", info->si_addr, regs->regs[0]);
+    print_frame(regs->pc);
+    uintptr_t *fp = (uintptr_t *)regs->regs[29];
+    for (int i = 0; fp && i < 32; i++) {
+        print_frame(fp[1]);
+        fp = (uintptr_t *)fp[0];
+    }
+    if (next_segv.sa_flags & SA_SIGINFO) {
+        next_segv.sa_sigaction(sig, info, context);
+    } else if (next_segv.sa_handler != SIG_DFL && next_segv.sa_handler != SIG_IGN) {
+        next_segv.sa_handler(sig);
+    } else {
+        sigaction(SIGSEGV, &next_segv, NULL);
+    }
+}
+
+/* ZITCH_SDL_TRACE: every GL lookup on stderr, and a backtrace on a crash. */
+static int tracing(void)
+{
+    static int known = -1;
+    if (known < 0) {
+        known = getenv("ZITCH_SDL_TRACE") != NULL;
+        if (known) {
+            struct sigaction act = {.sa_sigaction = on_segv, .sa_flags = SA_SIGINFO | SA_NODEFER};
+            sigaction(SIGSEGV, &act, &next_segv);
+        }
+    }
+    return known;
+}
+
 static void *get_proc(const char *name)
 {
     void *fn = real_get_proc(name);
+    if (desktop_gl_game()) {
+        fn = desktop_gl_proc(name, fn);
+    }
+    if (tracing()) {
+        fprintf(stderr, "sdl-dynapi: GL %s -> %p\n", name, fn);
+    }
     if (!fn) {
         return NULL;
     }
@@ -500,14 +720,46 @@ static void free_names(const char **names, uint32_t count)
     free(names);
 }
 
+/* A game with no SDL2 of its own (a .NET one) calls the firmware
+   library directly, and that library asks to be overridden on its first
+   call. Its own exported entry fills the table it passed, which is the
+   one its stubs read; GL loading is then routed through this shim by
+   swapping one slot, found the same way as a game's. */
+static int32_t hook_firmware_sdl(const struct sdl_image *image, uint32_t apiver, void *table,
+                                 uint32_t tablesize)
+{
+    void *lib = dlopen(image->path, RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+        return -1;
+    }
+    int32_t (*own_entry)(uint32_t, void *, uint32_t) = dlsym(lib, "SDL_DYNAPI_entry");
+    void *get_proc_stub = dlsym(lib, "SDL_GL_GetProcAddress");
+    if (!own_entry || own_entry(apiver, table, tablesize) < 0) {
+        return -1;
+    }
+    uintptr_t slot = get_proc_stub ? stub_slot((uintptr_t)get_proc_stub) : 0;
+    if (slot < (uintptr_t)table || slot >= (uintptr_t)table + tablesize) {
+        fprintf(stderr, "sdl-dynapi: no SDL_GL_GetProcAddress slot in %s\n", image->path);
+        return 0;
+    }
+    void **entry = (void **)slot;
+    real_get_proc = *entry;
+    *entry = (void *)get_proc;
+    fprintf(stderr, "sdl-dynapi: GL loading of %s routed through the shim\n", image->path);
+    return 0;
+}
+
 int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
 {
     if (apiver != 1) {
         return -1;
     }
     struct sdl_image image = {.table = (uintptr_t)table};
-    if (!dl_iterate_phdr(find_image, &image) || is_firmware_sdl(image.path)) {
+    if (!dl_iterate_phdr(find_image, &image)) {
         return -1;
+    }
+    if (is_firmware_sdl(image.path)) {
+        return hook_firmware_sdl(&image, apiver, table, tablesize);
     }
 
     uint32_t count = tablesize / sizeof(void *);
