@@ -549,6 +549,10 @@ static void draw_buffer(unsigned mode)
 #define GL_READ_FRAMEBUFFER_BINDING_ 0x8CAA
 #define GL_COLOR_ATTACHMENT0_ 0x8CE0
 #define GL_TEXTURE_BINDING_2D_ 0x8069
+#define GL_TEXTURE_BINDING_CUBE_MAP_ 0x8514
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X_ 0x8515
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z_ 0x851A
+#define GL_FRAMEBUFFER_COMPLETE_ 0x8CD5
 #define GL_TEXTURE_WIDTH_ 0x1000
 #define GL_TEXTURE_HEIGHT_ 0x1001
 #define GL_BUFFER_SIZE_ 0x8764
@@ -564,6 +568,7 @@ static void (*gl_delete_framebuffers)(int, const unsigned *);
 static void (*gl_bind_framebuffer)(unsigned, unsigned);
 static void (*gl_framebuffer_texture2d)(unsigned, unsigned, unsigned, unsigned, int);
 static void (*gl_read_pixels)(int, int, int, int, unsigned, unsigned, void *);
+static unsigned (*gl_check_framebuffer_status)(unsigned);
 static void (*gl_get_buffer_parameteriv)(unsigned, unsigned, int *);
 static void *(*gl_map_buffer_range)(unsigned, intptr_t, intptr_t, unsigned);
 
@@ -572,14 +577,20 @@ static void get_tex_image(unsigned target, int level, unsigned format, unsigned 
 {
     int texture = 0, previous = 0, width = 0, height = 0;
     unsigned fbo = 0;
-    gl_get_integerv(GL_TEXTURE_BINDING_2D_, &texture);
+    int cube = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X_ && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z_;
+    gl_get_integerv(cube ? GL_TEXTURE_BINDING_CUBE_MAP_ : GL_TEXTURE_BINDING_2D_, &texture);
     gl_get_integerv(GL_READ_FRAMEBUFFER_BINDING_, &previous);
     gl_get_tex_level_parameteriv(target, level, GL_TEXTURE_WIDTH_, &width);
     gl_get_tex_level_parameteriv(target, level, GL_TEXTURE_HEIGHT_, &height);
     gl_gen_framebuffers(1, &fbo);
     gl_bind_framebuffer(GL_READ_FRAMEBUFFER_, fbo);
     gl_framebuffer_texture2d(GL_READ_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_, target, texture, level);
-    gl_read_pixels(0, 0, width, height, format, type, pixels);
+    if (gl_check_framebuffer_status(GL_READ_FRAMEBUFFER_) == GL_FRAMEBUFFER_COMPLETE_) {
+        gl_read_pixels(0, 0, width, height, format, type, pixels);
+    } else {
+        fprintf(stderr, "sdl-dynapi: glGetTexImage: texture %d target %#x is not readable\n",
+                texture, target);
+    }
     gl_bind_framebuffer(GL_READ_FRAMEBUFFER_, previous);
     gl_delete_framebuffers(1, &fbo);
 }
@@ -629,7 +640,8 @@ static void *desktop_gl_proc(const char *name, void *fn)
         && load_gl((void **)&gl_delete_framebuffers, "glDeleteFramebuffers")
         && load_gl((void **)&gl_bind_framebuffer, "glBindFramebuffer")
         && load_gl((void **)&gl_framebuffer_texture2d, "glFramebufferTexture2D")
-        && load_gl((void **)&gl_read_pixels, "glReadPixels")) {
+        && load_gl((void **)&gl_read_pixels, "glReadPixels")
+        && load_gl((void **)&gl_check_framebuffer_status, "glCheckFramebufferStatus")) {
         return (void *)get_tex_image;
     }
     if (strcmp(name, "glMapBuffer") == 0
@@ -650,6 +662,21 @@ static void print_frame(uintptr_t pc)
             sym.dli_saddr ? pc - (uintptr_t)sym.dli_saddr : 0, sym.dli_fname ? sym.dli_fname : "?");
 }
 
+/* Whether a frame record can be read, asked of the kernel so a bad
+   chain does not fault inside the handler. */
+static int readable(const uintptr_t *fp)
+{
+    static int probe[2] = {-1, -1};
+    uintptr_t drained[2];
+    if (probe[0] < 0 && pipe(probe) < 0) {
+        return 0;
+    }
+    if ((uintptr_t)fp % sizeof(uintptr_t) || write(probe[1], fp, sizeof(drained)) != sizeof(drained)) {
+        return 0;
+    }
+    return read(probe[0], drained, sizeof(drained)) == sizeof(drained);
+}
+
 /* Walks frame pointers; .NET's JIT keeps them where libunwind has no
    tables. */
 static void on_segv(int sig, siginfo_t *info, void *context)
@@ -657,10 +684,10 @@ static void on_segv(int sig, siginfo_t *info, void *context)
     const mcontext_t *regs = &((ucontext_t *)context)->uc_mcontext;
     fprintf(stderr, "sdl-dynapi: SIGSEGV reading %p, x0 %#llx\n", info->si_addr, regs->regs[0]);
     print_frame(regs->pc);
-    uintptr_t *fp = (uintptr_t *)regs->regs[29];
-    for (int i = 0; fp && i < 32; i++) {
+    const uintptr_t *fp = (const uintptr_t *)regs->regs[29];
+    for (int i = 0; readable(fp) && i < 32; i++) {
         print_frame(fp[1]);
-        fp = (uintptr_t *)fp[0];
+        fp = (const uintptr_t *)fp[0];
     }
     if (next_segv.sa_flags & SA_SIGINFO) {
         next_segv.sa_sigaction(sig, info, context);
@@ -794,7 +821,11 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
             fprintf(stderr, "sdl-dynapi: %s has no %s\n", path, name);
         }
         if (fn && strcmp(name, "SDL_GL_GetProcAddress") == 0) {
-            real_get_proc = fn;
+            /* The firmware's own stub, which reads the slot get_proc
+               may already sit in. */
+            if (!real_get_proc) {
+                real_get_proc = fn;
+            }
             fn = (void *)get_proc;
         }
         slots[i] = fn ? fn : (void *)unknown_entry;
