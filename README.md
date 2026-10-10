@@ -65,6 +65,59 @@ says why when it can't run: 32-bit or x86, SDL2 built without the
 dynamic API, SDL3, GLFW or raw X11, or a glibc newer than the
 firmware's. Details in [handheld/README.md](handheld/README.md).
 
+### Building a Linux build that runs on handhelds
+
+If you're a developer looking to target zitch compatibility here's a short guide:
+
+- Use SDL2 and leave the dynamic API on (it is by default). Any SDL2
+  from 2.0 to 2.28 works, static or shared, in the executable or in a
+  bundled library. SDL3, GLFW, raw X11/Wayland and Godot's own display
+  code can't be redirected to the screen.
+- The GL context is OpenGL ES 3.2 whatever profile you ask for. Parse
+  the version string with the `OpenGL ES` prefix in mind. Shaders need
+  to be GLSL ES 1.00 or 3.00. Multiple color targets need `#version 300
+  es` with `layout(location = N) out`, not `gl_FragData[1]`. Avoid
+  desktop-only calls: `glPolygonMode`, `glGetTexImage`, `glMapBuffer`,
+  `glDrawBuffer`, and the double versions of `glClearDepth` and
+  `glDepthRange`. Read textures back through a framebuffer and
+  `glReadPixels`. Requesting `SDL_GL_CONTEXT_PROFILE_ES` on every
+  platform and keeping one renderer is the simplest way to get this.
+- arm64 only, built against glibc 2.38 or older (what the muOS versions
+  we currently target ship; zitch checks this and refuses newer). Bundle
+  or statically link everything but libc and libm. The firmware has
+  libSDL2, libopenal.so.1, libGLESv2 and libEGL and not much else.
+  Nothing in the build should need libX11, libpulse or libasound.
+- Audio through SDL or OpenAL, both work. Don't use PulseAudio directly.
+- Input through SDL's GameController API, the pad shows up as a
+  standard controller.
+- `LANG` is unset, don't crash on it. Use `SDL_WINDOW_FULLSCREEN_DESKTOP`
+  and take whatever size you get. Exit 0 on a normal quit, a non-zero
+  status is reported as a crash.
+- Ship one folder, no installer, with the executable bit kept (zips made
+  on Windows lose it, `butler push` or a tar.gz keep it). Put `arm64` or
+  `aarch64` in the upload's file name, zitch picks uploads by name
+  rather than itch's platform tags.
+
+Tested so far: LÖVE runs without the shim (the firmware has the
+runtime), FNA and plain SDL2 + GL ES games run as is, MonoGame
+DesktopGL runs with the shim. Godot, Unity and GameMaker don't: no SDL
+path, or no arm64 Linux export.
+
+### Designing for handhelds
+
+- 640x480 is the target minimum resolution, but resolution can also be high
+  DPI. (eg. TrimUI Brick Pro is 1024x768). Preferably you game can adapt to
+  various resolutions starting from the minimum.
+- Everything has to work on a pad. There's no mouse, no keyboard and no
+  text entry
+- Have a quit option in the game. There's no window close button
+- Low-power ARM chips, games on an SD card. Test on device and optimize
+- Prefer saves under `$HOME` or `$XDG_DATA_HOME`. Files a game writes into its
+  install folder survive updates (butler keeps anything it didn't
+  install itself) but go with an uninstall.
+- Should support offline play, not require internet connection
+- Consider an autosave, as players may power off mid-game
+
 ## Credits
 
 Button glyphs are from Kenney's [Input Prompts](https://kenney.nl/assets/input-prompts) pack (CC0); see `assets/prompts/LICENSE-kenney.txt`.
