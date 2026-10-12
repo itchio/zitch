@@ -226,7 +226,9 @@ its itch.io URL, when adding another.
   (`make handheld-sdl-procs` refreshes it from SDL's source), and fills
   the rest from that list. It refuses a game whose stubs disagree. SDL2
   built into one of the game's own libraries rather than the executable
-  is routed the same way.
+  is routed the same way. Cro-Mag Rally (https://jorio.itch.io/cromagrally)
+  ships an SDL2 built without optimization, whose stubs add the table's
+  page offset in a separate instruction; the reader follows that too.
 - Anodyne (https://han-tani.itch.io/anodyne): two-target shaders. The
   shim answers lookups of `glShaderSource`, `glLinkProgram` and
   `glDeleteShader` with wrappers. FNA hands the driver GLSL ES 1.00

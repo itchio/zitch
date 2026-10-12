@@ -112,8 +112,9 @@ static int is_firmware_sdl(const char *path)
 }
 
 /* A stub is `adrp xN, page; ldr xN, [xN, #off]; ...; br x16`, sometimes
-   with a few register moves in between. Returns the address the ldr
-   reads, the table slot, or 0 for code of another shape. */
+   with a few register moves in between, and in an unoptimized build an
+   `add xN, xN, #lo` between the adrp and the ldr. Returns the address
+   the ldr reads, the table slot, or 0 for code of another shape. */
 static uintptr_t stub_slot(uintptr_t pc)
 {
     const uint32_t *code = (const uint32_t *)pc;
@@ -125,6 +126,10 @@ static uintptr_t stub_slot(uintptr_t pc)
             int64_t imm = (int64_t)((((insn >> 5) & 0x7ffff) << 2) | ((insn >> 29) & 3));
             imm = (imm << 43) >> 43;
             page = ((pc + 4 * i) & ~(uintptr_t)0xfff) + (uintptr_t)(imm << 12);
+            reg = insn & 31;
+        } else if ((insn & 0xff800000) == 0x91000000 && ((insn >> 5) & 31) == reg) {
+            uintptr_t imm = (insn >> 10) & 0xfff;
+            page += (insn & (1u << 22)) ? imm << 12 : imm;
             reg = insn & 31;
         } else if ((insn & 0xffc00000) == 0xf9400000 && ((insn >> 5) & 31) == reg) {
             return page + ((insn >> 10) & 0xfff) * 8;
