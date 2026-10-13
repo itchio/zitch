@@ -60,6 +60,9 @@ handle more cases:
   and answers the few desktop GL calls MonoGame makes on what is really
   an ES context.
 
+- Celeste 64 (https://maddymakesgamesinc.itch.io/celeste64): a desktop
+  core profile. Foster asks for OpenGL 3.3 core; the shim hands it the
+  ES 3.2 context instead.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The firmware only has GLES, so zitch ships gl4es as the `libGL` a
   Linux build links against, and the shim starts it on the firmware's
@@ -83,8 +86,9 @@ If you're a developer looking to target zitch compatibility here's a short guide
   code can't be redirected to the screen.
 - The GL context is OpenGL ES 3.2 whatever profile you ask for. Parse
   the version string with the `OpenGL ES` prefix in mind. A build that
-  links `libGL` gets gl4es, which covers OpenGL 1.x and 2.x, at a cost;
-  GLES directly is faster. Shaders need
+  asks for a desktop core profile gets ES 3.2. A build that links `libGL`
+  gets gl4es, which covers OpenGL 1.x and 2.x, at a cost; GLES directly
+  is faster. Shaders need
   to be GLSL ES 1.00 or 3.00. Multiple color targets need `#version 300
   es` with `layout(location = N) out`, not `gl_FragData[1]`. Avoid
   desktop-only calls: `glPolygonMode`, `glGetTexImage`, `glMapBuffer`,

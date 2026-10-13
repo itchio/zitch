@@ -422,17 +422,21 @@ pub fn game_env() -> Vec<(String, OsString)> {
         .ok()
         .and_then(|exe| Some(exe.parent()?.join(GL4ES_DIR)))
         .filter(|dir| dir.join("libGL.so.1").is_file());
+    // The frontend's own library path and cursor preload come with the
+    // launch. Its gl4es crashes, and libmucursor's SDL_Init override
+    // fails a game whose SDL lives in a bundled shared library.
+    let inherited = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&inherited)
+        .filter(|dir| dir != Path::new("/usr/lib/gl4es") && !dir.starts_with("/opt/muos/frontend"))
+        .collect();
     match gl4es {
-        Some(dir) => {
-            let mut path = dir.into_os_string();
-            if let Some(rest) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
-                path.push(":");
-                path.push(rest);
-            }
-            env.push(("LD_LIBRARY_PATH".to_string(), path));
-        }
+        Some(dir) => dirs.insert(0, dir),
         None => log::warn!("{GL4ES_DIR}/libGL.so.1 is missing; desktop GL builds will not start"),
     }
+    if let Ok(path) = std::env::join_paths(&dirs) {
+        env.push(("LD_LIBRARY_PATH".to_string(), path));
+    }
+    env.push(("LD_PRELOAD".to_string(), OsString::new()));
     if std::env::var_os("LANG").is_none() {
         env.push(("LANG".to_string(), "en_US.UTF-8".into()));
     }

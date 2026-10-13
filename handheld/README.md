@@ -259,6 +259,20 @@ its itch.io URL, when adding another.
   `glDepthRange`, `glClearDepth`, `glDrawBuffer`, `glGetTexImage` and
   `glMapBuffer`, which ES lacks. Its shaders are the GLSL ES ones it
   ships for phones, so nothing else needs translating.
+- Celeste 64 (https://maddymakesgamesinc.itch.io/celeste64): a desktop
+  core profile and GLSL 330. Foster, its framework, keeps SDL2 inside
+  `libFosterPlatform.so` and asks for a 3.3 core, forward compatible
+  context, which the firmware's EGL refuses. The shim wraps
+  `SDL_GL_SetAttribute`: a core or compatibility profile becomes ES,
+  versions past 3.2 are clamped and the forward compatible flag dropped,
+  and from then on the game counts as desktop GL (the wrappers above
+  apply, and `glDrawBuffers` of `GL_BACK_LEFT` becomes `GL_BACK`).
+  Two more things found with it, both in zitch rather than the shim:
+  muOS starts apps with `LD_PRELOAD=libmucursor.so`, whose `SDL_Init`
+  override returns -1 for an SDL it cannot see past, which is any SDL
+  in a bundled shared library, so `muos::game_env` clears it; and its
+  `LD_LIBRARY_PATH` carries the firmware's crashing gl4es and the
+  frontend's libraries, which are dropped too.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The game links `libGL.so.1` and `libOpenGL.so.0`, which the firmware
   lacks. zitch puts its own build of gl4es (`make handheld-gl4es`, in

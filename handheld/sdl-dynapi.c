@@ -482,6 +482,47 @@ static void delete_shader(unsigned shader)
     real_delete_shader(shader);
 }
 
+/* A game that asks for a desktop core or compatibility profile gets
+   the ES 3.2 context the firmware has, with the desktop GL wrappers
+   below. Celeste 64 asks for 3.3 core, forward compatible, which the
+   firmware's EGL rejects. */
+static int desktop_profile;
+static int (*real_set_attribute)(int attr, int value);
+
+static int set_attribute(int attr, int value)
+{
+    enum {
+        CONTEXT_MAJOR_VERSION = 17,
+        CONTEXT_MINOR_VERSION = 18,
+        CONTEXT_FLAGS = 20,
+        CONTEXT_PROFILE_MASK = 21,
+        CONTEXT_PROFILE_ES = 4,
+        CONTEXT_FORWARD_COMPATIBLE = 2
+    };
+    switch (attr) {
+    case CONTEXT_PROFILE_MASK:
+        if (value != CONTEXT_PROFILE_ES) {
+            desktop_profile = 1;
+            value = CONTEXT_PROFILE_ES;
+        }
+        break;
+    case CONTEXT_MAJOR_VERSION:
+        if (value > 3) {
+            value = 3;
+        }
+        break;
+    case CONTEXT_MINOR_VERSION:
+        if (value > 2) {
+            value = 2;
+        }
+        break;
+    case CONTEXT_FLAGS:
+        value &= ~CONTEXT_FORWARD_COMPATIBLE;
+        break;
+    }
+    return real_set_attribute(attr, value);
+}
+
 /* MonoGame's DesktopGL build runs on the firmware's SDL2 and so lands
    on this ES context, but reads the version string as desktop GL
    ("3.2 ...") and takes 1.1 from "OpenGL ES 3.2 ...", then gives up
@@ -492,6 +533,9 @@ static void delete_shader(unsigned shader)
 static int desktop_gl_game(void)
 {
     static int known = -1;
+    if (desktop_profile) {
+        return 1;
+    }
     if (known < 0) {
         char exe[4096];
         ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -548,6 +592,19 @@ static void clear_depth(double depth)
 static void draw_buffer(unsigned mode)
 {
     real_draw_buffers(1, &mode);
+}
+
+/* The default framebuffer's buffers are GL_BACK on ES, not the
+   left/right pairs desktop code names. */
+static void (*real_draw_buffers_n)(int count, const unsigned *buffers);
+
+static void draw_buffers_n(int count, const unsigned *buffers)
+{
+    static const unsigned back = 0x0405;
+    if (count == 1 && buffers[0] >= 0x0400 && buffers[0] <= 0x0408) {
+        buffers = &back;
+    }
+    real_draw_buffers_n(count, buffers);
 }
 
 #define GL_READ_FRAMEBUFFER_ 0x8CA8
@@ -623,6 +680,10 @@ static void *desktop_gl_proc(const char *name, void *fn)
     if (strcmp(name, "glGetString") == 0) {
         real_get_string = fn;
         return (void *)get_string;
+    }
+    if (fn && strcmp(name, "glDrawBuffers") == 0) {
+        real_draw_buffers_n = fn;
+        return (void *)draw_buffers_n;
     }
     if (fn) {
         return fn;
@@ -826,6 +887,13 @@ static int32_t hook_firmware_sdl(const struct sdl_image *image, uint32_t apiver,
         *entry = (void *)create_context;
         real_get_drawable_size = dlsym(lib, "SDL_GL_GetDrawableSize");
     }
+    void *attribute_stub = dlsym(lib, "SDL_GL_SetAttribute");
+    slot = attribute_stub ? stub_slot((uintptr_t)attribute_stub) : 0;
+    if (slot >= (uintptr_t)table && slot < (uintptr_t)table + tablesize) {
+        entry = (void **)slot;
+        real_set_attribute = *entry;
+        *entry = (void *)set_attribute;
+    }
     fprintf(stderr, "sdl-dynapi: GL loading of %s routed through the shim\n", image->path);
     return 0;
 }
@@ -881,6 +949,10 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
                 real_get_proc = fn;
             }
             fn = (void *)get_proc;
+        }
+        if (fn && strcmp(name, "SDL_GL_SetAttribute") == 0) {
+            real_set_attribute = fn;
+            fn = (void *)set_attribute;
         }
         if (fn && strcmp(name, "SDL_GL_CreateContext") == 0) {
             real_create_context = fn;

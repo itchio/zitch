@@ -157,12 +157,12 @@ pub(super) fn launch_love(
         .arg(path)
         .args(args)
         .current_dir(dir)
-        .env("LD_LIBRARY_PATH", &love.libs)
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
         .envs(env)
+        .env("LD_LIBRARY_PATH", love_lib_path(&love.libs, env))
         .stderr(std::process::Stdio::piped());
     let mut child =
         spawn_group(&mut command).with_context(|| format!("running {}", love.binary.display()))?;
@@ -293,4 +293,13 @@ pub(super) fn launch_rom(
         }
         None => bail!("{LAUNCH_SCRIPT} was killed by a signal"),
     }
+}
+
+/// LÖVE's own libraries first, then whatever the game environment adds.
+fn love_lib_path(libs: &Path, env: &HashMap<String, String>) -> std::ffi::OsString {
+    let mut dirs = vec![libs.to_path_buf()];
+    if let Some(rest) = env.get("LD_LIBRARY_PATH") {
+        dirs.extend(std::env::split_paths(rest));
+    }
+    std::env::join_paths(&dirs).unwrap_or_else(|_| libs.into())
 }
