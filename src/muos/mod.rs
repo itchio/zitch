@@ -12,10 +12,12 @@
 //! runtime check for the firmware's script, so the desktop build simply
 //! never takes these paths.
 
+mod appimage;
 mod compat;
 mod firmware;
 mod running;
 
+pub use appimage::*;
 pub use compat::*;
 pub use firmware::*;
 pub use running::*;
@@ -514,6 +516,56 @@ catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom
                 ..Default::default()
             })
             .is_some()
+        );
+    }
+
+    #[test]
+    fn an_appimage_is_offered_as_its_unpacked_apprun() {
+        use crate::butlerd::types::{LaunchStrategy, LaunchTarget, StrategyResult};
+        let native = |path: &str, flavor: Flavor, arch: Option<Arch>| LaunchTarget {
+            strategy: Some(StrategyResult {
+                strategy: LaunchStrategy::Native,
+                full_target_path: format!("/games/x/{path}"),
+                candidate: Some(Candidate {
+                    path: path.to_string(),
+                    flavor,
+                    linux_info: arch.map(|arch| LinuxInfo {
+                        arch: Some(arch),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let image = native("Game.AppImage", Flavor::NativeLinux, Some(Arch::Arm64));
+        let run = native("Game.AppImage.d/AppRun", Flavor::Script, None);
+        let inner = |arch| {
+            native(
+                "Game.AppImage.d/usr/bin/Game",
+                Flavor::NativeLinux,
+                Some(arch),
+            )
+        };
+
+        let (choices, unrunnable) =
+            bare(|| launch_choices(&[image.clone(), run.clone(), inner(Arch::Arm64)]));
+        assert!(unrunnable.is_empty(), "{unrunnable:?}");
+        let labels: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|c| (c.label.as_str(), c.target.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [("Game.AppImage (Linux build)", "Game.AppImage.d/AppRun")]
+        );
+
+        let (choices, unrunnable) = bare(|| launch_choices(&[image, run, inner(Arch::Arm)]));
+        assert!(choices.is_empty());
+        assert_eq!(unrunnable.len(), 1);
+        assert!(
+            unrunnable[0].starts_with("Game.AppImage is a 32-bit"),
+            "{unrunnable:?}"
         );
     }
 }

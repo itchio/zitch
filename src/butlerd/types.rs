@@ -5532,6 +5532,16 @@ pub struct LaunchGetTargetsParams {
     /// the default sniff; leave it off unless the client acts on it.
     #[serde(rename = "deepProbe", default, skip_serializing_if = "Option::is_none")]
     pub deep_probe: Option<bool>,
+    /// The client runs an AppImage from a tree unpacked next to it
+    /// (X.AppImage.d/AppRun) rather than mounting the image. An image
+    /// whose tree has an AppRun is left out of the targets so the AppRun
+    /// is listed in its place.
+    #[serde(
+        rename = "unpackedAppImages",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub unpacked_app_images: Option<bool>,
 }
 
 impl Request for LaunchGetTargetsParams {
@@ -5618,6 +5628,14 @@ pub struct LaunchParams {
     /// target being launched, or the target will not be found.
     #[serde(rename = "runtimes", default, skip_serializing_if = "Option::is_none")]
     pub runtimes: Option<Vec<String>>,
+    /// Pass the same value that produced the target being launched, see
+    /// @@LaunchGetTargetsParams.
+    #[serde(
+        rename = "unpackedAppImages",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub unpacked_app_images: Option<bool>,
     /// Client-supplied defaults for knobs that both the explicit params and
     /// the cave's settings leave unset, typically sourced from a frontend's
     /// global preferences. Resolution order: explicit params, then cave

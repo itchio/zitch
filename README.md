@@ -60,6 +60,9 @@ handle more cases:
   and answers the few desktop GL calls MonoGame makes on what is really
   an ES context.
 
+An AppImage can't mount itself on the firmware (no FUSE 2), so zitch
+unpacks it next to itself on the first Play and runs what's inside.
+
 Before offering a Linux build, zitch checks what butler found in it and
 says why when it can't run: 32-bit or x86, SDL2 built without the
 dynamic API, SDL3, GLFW or raw X11, or a glibc newer than the

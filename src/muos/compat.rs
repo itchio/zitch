@@ -254,8 +254,23 @@ pub struct LaunchChoice {
     pub label: String,
 }
 
+/// The AppImages among the targets, which run unpacked ([`unpack`]).
+pub fn appimages(targets: &[LaunchTarget]) -> Vec<PathBuf> {
+    targets
+        .iter()
+        .filter_map(|t| t.strategy.as_ref())
+        .filter(|s| {
+            s.strategy == LaunchStrategy::Native && is_appimage(Path::new(&s.full_target_path))
+        })
+        .map(|s| PathBuf::from(&s.full_target_path))
+        .collect()
+}
+
 /// Sorts butler's launch targets into what runs here, in the order to
-/// offer them, and why the rest do not. A native build is the developer's
+/// offer them, and why the rest do not. An AppImage is offered as the
+/// `AppRun` of its unpacked tree, under the image's name, and what else
+/// the tree holds is neither offered nor counted against it unless it
+/// cannot run here, which rules the image out. A native build is the developer's
 /// own runtime for the game, which beats ours: a PICO-8 export carries
 /// the real player, where the firmware's fake-08 gets some carts wrong. A
 /// fused LÖVE exe is listed once as a native build and once as the
@@ -268,9 +283,10 @@ pub fn launch_choices(targets: &[LaunchTarget]) -> (Vec<LaunchChoice>, Vec<Strin
             .unwrap_or(path)
             .to_string()
     };
-    let mut natives = Vec::new();
+    let mut natives: Vec<(Option<PathBuf>, LaunchChoice)> = Vec::new();
     let mut payloads: Vec<(String, LaunchChoice)> = Vec::new();
     let mut unrunnable = Vec::new();
+    let mut blocked_images: Vec<PathBuf> = Vec::new();
     for target in targets {
         let Some(strategy) = target.strategy.as_ref() else {
             continue;
@@ -297,20 +313,51 @@ pub fn launch_choices(targets: &[LaunchTarget]) -> (Vec<LaunchChoice>, Vec<Strin
                 Err(reason) => unrunnable.push(reason),
             },
             LaunchStrategy::Native => {
+                if is_appimage(Path::new(&path)) {
+                    continue;
+                }
+                let unpacked = unpacked_from(Path::new(&path));
                 let blocked = candidate.linux_info.as_ref().and_then(native_blocker);
-                match blocked {
-                    Some(reason) => unrunnable.push(format!("{} {reason}", file_name(&path))),
-                    None => natives.push(LaunchChoice {
-                        label: format!("{} (Linux build)", file_name(&path)),
-                        target: action_path,
-                    }),
+                match (unpacked, blocked) {
+                    (Some((image, _)), Some(reason)) => {
+                        unrunnable
+                            .push(format!("{} {reason}", file_name(&image.to_string_lossy())));
+                        blocked_images.push(image);
+                    }
+                    (Some((_, false)), None) => {}
+                    (Some((image, true)), None) => {
+                        let label =
+                            format!("{} (Linux build)", file_name(&image.to_string_lossy()));
+                        natives.push((
+                            Some(image),
+                            LaunchChoice {
+                                label,
+                                target: action_path,
+                            },
+                        ));
+                    }
+                    (None, Some(reason)) => {
+                        unrunnable.push(format!("{} {reason}", file_name(&path)));
+                    }
+                    (None, None) => natives.push((
+                        None,
+                        LaunchChoice {
+                            label: format!("{} (Linux build)", file_name(&path)),
+                            target: action_path,
+                        },
+                    )),
                 }
             }
             _ => {}
         }
     }
-    natives.extend(payloads.into_iter().map(|(_, choice)| choice));
-    (natives, unrunnable)
+    let mut choices: Vec<LaunchChoice> = natives
+        .into_iter()
+        .filter(|(image, _)| !image.as_ref().is_some_and(|i| blocked_images.contains(i)))
+        .map(|(_, choice)| choice)
+        .collect();
+    choices.extend(payloads.into_iter().map(|(_, choice)| choice));
+    (choices, unrunnable)
 }
 
 /// Why a Linux build cannot run here, from what butler read out of its

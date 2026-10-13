@@ -1339,14 +1339,32 @@ fn plan_launch(
         .as_ref()
         .map_or("itch.io", |g| g.title.as_str())
         .to_string();
-    let targets = client
-        .call(LaunchGetTargetsParams {
-            cave_id: cave_id.to_string(),
-            runtimes: Some(crate::muos::runtimes()),
-            deep_probe: Some(true),
-        })
-        .map_err(|error| launch_failure(&error))?
-        .targets;
+    let get_targets = || {
+        client
+            .call(LaunchGetTargetsParams {
+                cave_id: cave_id.to_string(),
+                runtimes: Some(crate::muos::runtimes()),
+                deep_probe: Some(true),
+                unpacked_app_images: Some(crate::muos::available()),
+            })
+            .map(|r| r.targets)
+            .map_err(|error| launch_failure(&error))
+    };
+    let mut targets = get_targets()?;
+    let appimages = crate::muos::appimages(&targets);
+    if !appimages.is_empty() {
+        for appimage in &appimages {
+            let file = appimage
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            emit.status(format!("Unpacking {file}"));
+            log::info!("unpacking {}", appimage.display());
+            crate::muos::unpack(appimage).map_err(|error| failure(format!("{error:#}")))?;
+        }
+        // The unpacked tree is new content for butler to find.
+        targets = get_targets()?;
+    }
 
     let (mut choices, unrunnable) = crate::muos::launch_choices(&targets);
     if choices.is_empty() {
@@ -1484,6 +1502,7 @@ impl LaunchCall<'_> {
             // The firmware's payloads come back to us to run; nothing else
             // but a Linux build has a way onto its screen.
             runtimes: muos.then(crate::muos::runtimes),
+            unpacked_app_images: Some(muos),
             allowed_strategies: muos.then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
             ..Default::default()
         };

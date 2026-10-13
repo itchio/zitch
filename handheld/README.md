@@ -202,6 +202,18 @@ two additions to their environment (`muos::game_env`):
 - `LANG=en_US.UTF-8` when unset. The firmware sets no locale and games
   read it without checking.
 
+An AppImage (Cro-Mag Rally, https://jorio.itch.io/cromagrally) mounts
+itself with FUSE 2, which the firmware lacks. Before the choices are
+made, Play unpacks each one next to itself with its own
+`--appimage-extract` into `<name>.AppImage.d` (`muos::unpack`, once
+per image version, by timestamp) and asks butler for the targets
+again with `unpackedAppImages` set (on both `Launch.GetTargets` and
+`Launch`), which makes dash drop an image whose
+`<name>.AppImage.d/AppRun` is there, so the second listing names the
+`AppRun`, which is offered under the image's name. What else the tree holds is left out, unless butler's
+probe says one of its executables cannot run here, which rules the
+image out with that reason.
+
 Only an SDL2 built with the dynamic API on (the default) can be routed.
 A game with it off, or on SDL3 or another windowing library, still
 fails to open a display. Quit with the game's own quit.
