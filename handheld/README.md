@@ -263,8 +263,12 @@ its itch.io URL, when adding another.
   core profile and GLSL 330. Foster, its framework, keeps SDL2 inside
   `libFosterPlatform.so` and asks for a 3.3 core, forward compatible
   context, which the firmware's EGL refuses. The shim wraps
-  `SDL_GL_SetAttribute`: a core or compatibility profile becomes ES,
-  versions past 3.2 are clamped and the forward compatible flag dropped,
+  `SDL_GL_SetAttribute`: a core profile becomes ES, versions past 3.2
+  are clamped and the forward compatible flag dropped. The desktop
+  flag follows the latest profile asked for, since LÖVE asks for 3.2
+  core, rejects the ES context it gets, then asks for 2.1 and ES in
+  turn, and would write GLSL 120 if the version string still read as
+  desktop GL (a compatibility profile is left to fail, as before),
   and from then on the game counts as desktop GL (the wrappers above
   apply, and `glDrawBuffers` of `GL_BACK_LEFT` becomes `GL_BACK`). A
   shader declaring `#version 130` through `460` is rewritten as
@@ -281,6 +285,14 @@ its itch.io URL, when adding another.
   in a bundled shared library, so `muos::game_env` clears it; and its
   `LD_LIBRARY_PATH` carries the firmware's crashing gl4es and the
   frontend's libraries, which are dropped too.
+- Labyrinth of Legendary Loot
+  (https://dominaxis-games.itch.io/labyrinth-of-legendary-loot): a
+  custom cursor. The firmware's video driver has no cursor support, so
+  `SDL_CreateColorCursor` returns NULL, which LÖVE turns into a fatal
+  "Cannot create cursor" at the game's title screen. The shim answers
+  the three `SDL_Create*Cursor` entries with a stand-in when SDL has
+  none; `SDL_SetCursor` and `SDL_FreeCursor` skip a cursor that is not
+  theirs. There is no mouse to show one anyway.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The game links `libGL.so.1` and `libOpenGL.so.0`, which the firmware
   lacks. zitch puts its own build of gl4es (`make handheld-gl4es`, in

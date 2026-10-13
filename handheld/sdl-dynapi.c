@@ -824,10 +824,14 @@ static void delete_shader(unsigned shader)
     real_delete_shader(shader);
 }
 
-/* A game that asks for a desktop core or compatibility profile gets
-   the ES 3.2 context the firmware has, with the desktop GL wrappers
-   below and the shader rewrite in shader_source. Celeste 64 asks for
-   3.3 core, forward compatible, which the firmware's EGL rejects. */
+/* A game that asks for a desktop core profile gets the ES 3.2 context
+   the firmware has, with the desktop GL wrappers below and the shader
+   rewrite in shader_source. Celeste 64 asks for 3.3 core, forward
+   compatible, which the firmware's EGL rejects. The flag follows the
+   latest profile asked for: LÖVE asks for 3.2 core, rejects the ES
+   context it gets for it, and asks again for 2.1 and then ES, and
+   would write GLSL 120 if the version string still read as desktop
+   GL then. A compatibility profile is left to fail as before. */
 static int desktop_profile;
 static int (*real_set_attribute)(int attr, int value);
 
@@ -838,13 +842,14 @@ static int set_attribute(int attr, int value)
         CONTEXT_MINOR_VERSION = 18,
         CONTEXT_FLAGS = 20,
         CONTEXT_PROFILE_MASK = 21,
+        CONTEXT_PROFILE_CORE = 1,
         CONTEXT_PROFILE_ES = 4,
         CONTEXT_FORWARD_COMPATIBLE = 2
     };
     switch (attr) {
     case CONTEXT_PROFILE_MASK:
-        if (value != CONTEXT_PROFILE_ES) {
-            desktop_profile = 1;
+        desktop_profile = value == CONTEXT_PROFILE_CORE;
+        if (desktop_profile) {
             value = CONTEXT_PROFILE_ES;
         }
         break;
@@ -861,6 +866,9 @@ static int set_attribute(int attr, int value)
     case CONTEXT_FLAGS:
         value &= ~CONTEXT_FORWARD_COMPATIBLE;
         break;
+    }
+    if (tracing()) {
+        fprintf(stderr, "sdl-dynapi: SDL_GL_SetAttribute(%d, %d)\n", attr, value);
     }
     return real_set_attribute(attr, value);
 }
@@ -1101,6 +1109,60 @@ static void *create_context(void *window)
     return context;
 }
 
+/* The firmware's video driver makes no cursors, and there is no mouse
+   to show one. A game that insists on one gets a stand-in, which
+   SDL_SetCursor and SDL_FreeCursor pass over as not one of theirs.
+   LÖVE raises an error when SDL returns none, and Labyrinth of
+   Legendary Loot sets a cursor from its title screen. */
+static int stand_in_cursor;
+static void *(*real_create_cursor)(const void *data, const void *mask, int w, int h, int x,
+                                   int y);
+static void *(*real_create_color_cursor)(void *surface, int x, int y);
+static void *(*real_create_system_cursor)(int id);
+
+static void *create_cursor(const void *data, const void *mask, int w, int h, int x, int y)
+{
+    void *cursor = real_create_cursor(data, mask, w, h, x, y);
+    return cursor ? cursor : &stand_in_cursor;
+}
+
+static void *create_color_cursor(void *surface, int x, int y)
+{
+    void *cursor = real_create_color_cursor(surface, x, y);
+    return cursor ? cursor : &stand_in_cursor;
+}
+
+static void *create_system_cursor(int id)
+{
+    void *cursor = real_create_system_cursor(id);
+    return cursor ? cursor : &stand_in_cursor;
+}
+
+/* Entries swapped the same way whether the SDL is the game's or the
+   firmware's. SDL_GL_GetProcAddress and SDL_GL_CreateContext have
+   their own handling. */
+static const struct {
+    const char *name;
+    void *wrapper;
+    void **real;
+} WRAPPED[] = {
+    {"SDL_GL_SetAttribute", (void *)set_attribute, (void **)&real_set_attribute},
+    {"SDL_CreateCursor", (void *)create_cursor, (void **)&real_create_cursor},
+    {"SDL_CreateColorCursor", (void *)create_color_cursor, (void **)&real_create_color_cursor},
+    {"SDL_CreateSystemCursor", (void *)create_system_cursor, (void **)&real_create_system_cursor},
+};
+
+static void *wrap_entry(const char *name, void *fn)
+{
+    for (size_t i = 0; i < sizeof(WRAPPED) / sizeof(*WRAPPED); i++) {
+        if (strcmp(name, WRAPPED[i].name) == 0) {
+            *WRAPPED[i].real = fn;
+            return WRAPPED[i].wrapper;
+        }
+    }
+    return fn;
+}
+
 static struct sigaction next_segv;
 
 static void print_frame(uintptr_t pc)
@@ -1229,12 +1291,13 @@ static int32_t hook_firmware_sdl(const struct sdl_image *image, uint32_t apiver,
         *entry = (void *)create_context;
         real_get_drawable_size = dlsym(lib, "SDL_GL_GetDrawableSize");
     }
-    void *attribute_stub = dlsym(lib, "SDL_GL_SetAttribute");
-    slot = attribute_stub ? stub_slot((uintptr_t)attribute_stub) : 0;
-    if (slot >= (uintptr_t)table && slot < (uintptr_t)table + tablesize) {
-        entry = (void **)slot;
-        real_set_attribute = *entry;
-        *entry = (void *)set_attribute;
+    for (size_t i = 0; i < sizeof(WRAPPED) / sizeof(*WRAPPED); i++) {
+        void *stub = dlsym(lib, WRAPPED[i].name);
+        slot = stub ? stub_slot((uintptr_t)stub) : 0;
+        if (slot >= (uintptr_t)table && slot < (uintptr_t)table + tablesize) {
+            entry = (void **)slot;
+            *entry = wrap_entry(WRAPPED[i].name, *entry);
+        }
     }
     fprintf(stderr, "sdl-dynapi: GL loading of %s routed through the shim\n", image->path);
     return 0;
@@ -1292,9 +1355,8 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
             }
             fn = (void *)get_proc;
         }
-        if (fn && strcmp(name, "SDL_GL_SetAttribute") == 0) {
-            real_set_attribute = fn;
-            fn = (void *)set_attribute;
+        if (fn) {
+            fn = wrap_entry(name, fn);
         }
         if (fn && strcmp(name, "SDL_GL_CreateContext") == 0) {
             real_create_context = fn;

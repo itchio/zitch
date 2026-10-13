@@ -63,6 +63,10 @@ handle more cases:
 - Celeste 64 (https://maddymakesgamesinc.itch.io/celeste64): a desktop
   core profile. Foster asks for OpenGL 3.3 core and ships GLSL 330; the
   shim hands it the ES 3.2 context and rewrites the shaders as ES 3.00.
+- Labyrinth of Legendary Loot
+  (https://dominaxis-games.itch.io/labyrinth-of-legendary-loot): a
+  custom cursor. The firmware's driver makes none, and LÖVE stops the
+  game when it gets none, so the shim hands back a stand-in.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The firmware only has GLES, so zitch ships gl4es as the `libGL` a
   Linux build links against, and the shim starts it on the firmware's
