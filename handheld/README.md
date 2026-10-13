@@ -259,6 +259,16 @@ its itch.io URL, when adding another.
   `glDepthRange`, `glClearDepth`, `glDrawBuffer`, `glGetTexImage` and
   `glMapBuffer`, which ES lacks. Its shaders are the GLSL ES ones it
   ships for phones, so nothing else needs translating.
+- Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
+  The game links `libGL.so.1` and `libOpenGL.so.0`, which the firmware
+  lacks. zitch puts its own build of gl4es (`make handheld-gl4es`, in
+  `gl4es/` next to the binary) on `LD_LIBRARY_PATH` under both names,
+  so a Linux build that links either gets it; one that uses GLES never
+  loads it. The firmware's `/usr/lib/gl4es` crashes at the first call
+  (its constructor never ran), so zitch's build is made without one and
+  the shim starts it from its `SDL_GL_CreateContext` wrapper: hands it
+  the firmware's `SDL_GL_GetProcAddress` and drawable size, then
+  `initialize_gl4es`. `LIBGL_ES=2` is set unless the game sets it.
 
 `ZITCH_SDL_TRACE=1` in the game's environment logs every GL lookup and
 prints a backtrace on a crash. A GL function the game uses and ES lacks

@@ -52,6 +52,8 @@ pub(super) struct Love {
 /// Routes a game's own SDL2 into the firmware's; see handheld/sdl-dynapi.c.
 /// Deployed next to our binary.
 pub(super) const SDL_SHIM: &str = "libzitch-sdl.so";
+/// Next to the executable: gl4es as the libGL a Linux build asks for.
+pub(super) const GL4ES_DIR: &str = "gl4es";
 
 /// Something in an install folder the firmware can run.
 #[derive(Clone, Debug, PartialEq, Eq)]

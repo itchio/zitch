@@ -657,6 +657,47 @@ static void *desktop_gl_proc(const char *name, void *fn)
     return NULL;
 }
 
+/* gl4es, when the game loaded it as its libGL: the firmware's build has
+   no constructor and expects the host to hand it the GLES loader and
+   start it once a context is current. */
+static void *(*real_create_context)(void *window);
+static void (*real_get_drawable_size)(void *window, int *w, int *h);
+static void *gl_window;
+
+static void main_fb_size(int *w, int *h)
+{
+    if (gl_window && real_get_drawable_size) {
+        real_get_drawable_size(gl_window, w, h);
+    }
+}
+
+static void *gles_proc(const char *name)
+{
+    return real_get_proc ? real_get_proc(name) : NULL;
+}
+
+static void *create_context(void *window)
+{
+    void *context = real_create_context(window);
+    if (!context) {
+        return NULL;
+    }
+    gl_window = window;
+    void (*set_proc)(void *(*)(const char *)) = dlsym(RTLD_DEFAULT, "set_getprocaddress");
+    void (*set_fb)(void (*)(int *, int *)) = dlsym(RTLD_DEFAULT, "set_getmainfbsize");
+    void (*init)(void) = dlsym(RTLD_DEFAULT, "initialize_gl4es");
+    if (set_proc && init) {
+        setenv("LIBGL_ES", "2", 0);
+        set_proc(gles_proc);
+        if (set_fb) {
+            set_fb(main_fb_size);
+        }
+        init();
+        fprintf(stderr, "sdl-dynapi: gl4es started on the firmware's context\n");
+    }
+    return context;
+}
+
 static struct sigaction next_segv;
 
 static void print_frame(uintptr_t pc)
@@ -777,6 +818,14 @@ static int32_t hook_firmware_sdl(const struct sdl_image *image, uint32_t apiver,
     void **entry = (void **)slot;
     real_get_proc = *entry;
     *entry = (void *)get_proc;
+    void *create_stub = dlsym(lib, "SDL_GL_CreateContext");
+    slot = create_stub ? stub_slot((uintptr_t)create_stub) : 0;
+    if (slot >= (uintptr_t)table && slot < (uintptr_t)table + tablesize) {
+        entry = (void **)slot;
+        real_create_context = *entry;
+        *entry = (void *)create_context;
+        real_get_drawable_size = dlsym(lib, "SDL_GL_GetDrawableSize");
+    }
     fprintf(stderr, "sdl-dynapi: GL loading of %s routed through the shim\n", image->path);
     return 0;
 }
@@ -832,6 +881,11 @@ int32_t SDL_DYNAPI_entry(uint32_t apiver, void *table, uint32_t tablesize)
                 real_get_proc = fn;
             }
             fn = (void *)get_proc;
+        }
+        if (fn && strcmp(name, "SDL_GL_CreateContext") == 0) {
+            real_create_context = fn;
+            real_get_drawable_size = dlsym(lib, "SDL_GL_GetDrawableSize");
+            fn = (void *)create_context;
         }
         slots[i] = fn ? fn : (void *)unknown_entry;
     }

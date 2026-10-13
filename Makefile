@@ -1,4 +1,4 @@
-.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
+.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -27,6 +27,7 @@ help:
 	@echo "make clean        remove build output"
 	@echo "make sync-butler  regenerate src/butlerd/types.rs from \$$BUTLER_DIR ($(BUTLER_DIR))"
 	@echo "make handheld     cross-compile the SDL host for muOS handhelds (make handheld-sysroot once first; see handheld/README.md)"
+	@echo "make handheld-gl4es   cross-compile gl4es, the libGL Linux builds get on the device"
 	@echo "make handheld-deploy  copy it into the muOS Applications menu over ssh (HANDHELD=root@<ip>)"
 	@echo "make handheld-shot    run it on the device headlessly and fetch a screenshot (HANDHELD=root@<ip>)"
 	@echo "make handheld-love    fetch the LÖVE runtime the device builds ship, into target/handheld-love"
@@ -128,6 +129,31 @@ handheld:
 	aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o $(SDL_SHIM) handheld/sdl-dynapi.c -ldl
 	@ls -lh target/$(HANDHELD_TARGET)/release/zitch | awk '{print "target/$(HANDHELD_TARGET)/release/zitch: " $$5}'
 
+# gl4es, a desktop GL to GLES translator, offered to Linux builds as their
+# libGL (see handheld/README.md). Built without its constructor so the
+# SDL shim can start it once the firmware's context is current, and
+# against the device sysroot so it binds to the device's glibc.
+GL4ES_REPO = https://github.com/ptitSeb/gl4es.git
+GL4ES_REV = ec16bedd8819c475326f4f1a3063772c6d986e06
+GL4ES_SRC = target/gl4es-src
+HANDHELD_GL4ES ?= target/handheld-gl4es
+handheld-gl4es: $(HANDHELD_GL4ES)/libGL.so.1
+$(HANDHELD_GL4ES)/libGL.so.1:
+	rm -rf $(GL4ES_SRC)
+	git init -q $(GL4ES_SRC)
+	cd $(GL4ES_SRC) && git fetch -q --depth 1 $(GL4ES_REPO) $(GL4ES_REV) && git checkout -q FETCH_HEAD
+	cmake -S $(GL4ES_SRC) -B $(GL4ES_SRC)/build -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+		-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+		-DNOX11=ON -DNOEGL=ON -DNO_INIT_CONSTRUCTOR=ON -DDEFAULT_ES=2 \
+		-DCMAKE_SHARED_LINKER_FLAGS="-L$(CURDIR)/$(SYSROOT) -Wl,-rpath-link,$(CURDIR)/$(SYSROOT)"
+	cmake --build $(GL4ES_SRC)/build -j$$(nproc)
+	mkdir -p $(HANDHELD_GL4ES)
+	aarch64-linux-gnu-strip -o $(HANDHELD_GL4ES)/libGL.so.1 $(GL4ES_SRC)/lib/libGL.so.1
+	cp $(HANDHELD_GL4ES)/libGL.so.1 $(HANDHELD_GL4ES)/libOpenGL.so.0
+	cp $(GL4ES_SRC)/LICENSE $(HANDHELD_GL4ES)/gl4es.LICENSE
+	@ls -lh $(HANDHELD_GL4ES)/libGL.so.1 | awk '{print "$(HANDHELD_GL4ES)/libGL.so.1: " $$5}'
+
 # LÖVE for the device. muOS has no runtime of its own: the binaries ride
 # inside whichever bundled app is written in LÖVE, and those move between
 # releases, so itch hosts muOS's build as a redist (see itch-redists).
@@ -170,8 +196,9 @@ $(HANDHELD_GLYPH_SVG): handheld/glyph.svg
 
 handheld-glyph: $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
 
-handheld-deploy: handheld-host handheld $(HANDHELD_LOVE)/love $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
-	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs'
+handheld-deploy: handheld-host handheld $(HANDHELD_LOVE)/love $(HANDHELD_GL4ES)/libGL.so.1 $(HANDHELD_GLYPH) $(HANDHELD_GLYPH_SVG)
+	ssh $(HANDHELD) 'mkdir -p $(HANDHELD_APP)/libs $(HANDHELD_APP)/gl4es'
+	scp -q $(HANDHELD_GL4ES)/libGL.so.1 $(HANDHELD_GL4ES)/libOpenGL.so.0 $(HANDHELD):$(HANDHELD_APP)/gl4es/
 	scp -q target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) handheld/mux_launch.sh \
 		$(HANDHELD_LOVE)/love $(HANDHELD_LOVE)/love.LICENSE $(HANDHELD_LOVE)/luajit.LICENSE $(HANDHELD):$(HANDHELD_APP)/
 	scp -q $(HANDHELD_LOVE)/libs/* $(HANDHELD):$(HANDHELD_APP)/libs/
@@ -200,11 +227,13 @@ $(HANDHELD_BUTLER)/butler:
 	cd $(HANDHELD_BUTLER) && unzip -oq butler.zip && rm butler.zip
 	chmod +x $(HANDHELD_BUTLER)/butler
 
-# The files both packages carry: the binary, the SDL shim, butler and LÖVE.
+# The files both packages carry: the binary, the SDL shim, butler, LÖVE and gl4es.
 STAGE = target/handheld-stage
-handheld-stage: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love
+handheld-stage: handheld $(HANDHELD_BUTLER)/butler $(HANDHELD_LOVE)/love $(HANDHELD_GL4ES)/libGL.so.1
 	rm -rf $(STAGE)
-	mkdir -p $(STAGE)/libs $(STAGE)/licenses
+	mkdir -p $(STAGE)/libs $(STAGE)/gl4es $(STAGE)/licenses
+	cp $(HANDHELD_GL4ES)/libGL.so.1 $(HANDHELD_GL4ES)/libOpenGL.so.0 $(STAGE)/gl4es/
+	cp $(HANDHELD_GL4ES)/gl4es.LICENSE $(STAGE)/licenses/
 	cp target/$(HANDHELD_TARGET)/release/zitch $(SDL_SHIM) \
 		$(HANDHELD_BUTLER)/butler $(HANDHELD_BUTLER)/7z.so $(HANDHELD_BUTLER)/libc7zip.so \
 		$(HANDHELD_LOVE)/love $(STAGE)/

@@ -418,6 +418,21 @@ pub fn game_env() -> Vec<(String, OsString)> {
         Some(shim) => env.push(("SDL_DYNAMIC_API".to_string(), shim.into_os_string())),
         None => log::warn!("{SDL_SHIM} is missing; Linux builds will not find the screen"),
     }
+    let gl4es = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(GL4ES_DIR)))
+        .filter(|dir| dir.join("libGL.so.1").is_file());
+    match gl4es {
+        Some(dir) => {
+            let mut path = dir.into_os_string();
+            if let Some(rest) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+                path.push(":");
+                path.push(rest);
+            }
+            env.push(("LD_LIBRARY_PATH".to_string(), path));
+        }
+        None => log::warn!("{GL4ES_DIR}/libGL.so.1 is missing; desktop GL builds will not start"),
+    }
     if std::env::var_os("LANG").is_none() {
         env.push(("LANG".to_string(), "en_US.UTF-8".into()));
     }

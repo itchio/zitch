@@ -60,6 +60,11 @@ handle more cases:
   and answers the few desktop GL calls MonoGame makes on what is really
   an ES context.
 
+- Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
+  The firmware only has GLES, so zitch ships gl4es as the `libGL` a
+  Linux build links against, and the shim starts it on the firmware's
+  context. Games that use GLES directly never load it.
+
 An AppImage can't mount itself on the firmware (no FUSE 2), so zitch
 unpacks it next to itself on the first Play and runs what's inside.
 
@@ -77,7 +82,9 @@ If you're a developer looking to target zitch compatibility here's a short guide
   bundled library. SDL3, GLFW, raw X11/Wayland and Godot's own display
   code can't be redirected to the screen.
 - The GL context is OpenGL ES 3.2 whatever profile you ask for. Parse
-  the version string with the `OpenGL ES` prefix in mind. Shaders need
+  the version string with the `OpenGL ES` prefix in mind. A build that
+  links `libGL` gets gl4es, which covers OpenGL 1.x and 2.x, at a cost;
+  GLES directly is faster. Shaders need
   to be GLSL ES 1.00 or 3.00. Multiple color targets need `#version 300
   es` with `layout(location = N) out`, not `gl_FragData[1]`. Avoid
   desktop-only calls: `glPolygonMode`, `glGetTexImage`, `glMapBuffer`,
