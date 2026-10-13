@@ -61,8 +61,8 @@ handle more cases:
   an ES context.
 
 - Celeste 64 (https://maddymakesgamesinc.itch.io/celeste64): a desktop
-  core profile. Foster asks for OpenGL 3.3 core; the shim hands it the
-  ES 3.2 context instead.
+  core profile. Foster asks for OpenGL 3.3 core and ships GLSL 330; the
+  shim hands it the ES 3.2 context and rewrites the shaders as ES 3.00.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The firmware only has GLES, so zitch ships gl4es as the `libGL` a
   Linux build links against, and the shim starts it on the firmware's
@@ -86,7 +86,9 @@ If you're a developer looking to target zitch compatibility here's a short guide
   code can't be redirected to the screen.
 - The GL context is OpenGL ES 3.2 whatever profile you ask for. Parse
   the version string with the `OpenGL ES` prefix in mind. A build that
-  asks for a desktop core profile gets ES 3.2. A build that links `libGL`
+  asks for a desktop core profile gets ES 3.2 and its `#version 130`
+  to `460` shaders rewritten as ES 3.00, which works for plain in/out
+  GLSL and not for anything past ES 3.2. A build that links `libGL`
   gets gl4es, which covers OpenGL 1.x and 2.x, at a cost; GLES directly
   is faster. Shaders need
   to be GLSL ES 1.00 or 3.00. Multiple color targets need `#version 300

@@ -266,7 +266,15 @@ its itch.io URL, when adding another.
   `SDL_GL_SetAttribute`: a core or compatibility profile becomes ES,
   versions past 3.2 are clamped and the forward compatible flag dropped,
   and from then on the game counts as desktop GL (the wrappers above
-  apply, and `glDrawBuffers` of `GL_BACK_LEFT` becomes `GL_BACK`).
+  apply, and `glDrawBuffers` of `GL_BACK_LEFT` becomes `GL_BACK`). A
+  shader declaring `#version 130` through `460` is rewritten as
+  `300 es`: the version line, default precisions, and integer literals
+  promoted to float where desktop GLSL converts them and ES does not
+  (arguments to the shader's own float parameters, operands beside a
+  float literal, float initializers). Constructors already convert, and
+  built-in calls like `clamp(x, 0, 1)` are left alone until a game
+  needs them. Three of the game's four shaders needed nothing but the
+  version line; the fourth needed `Map(v_world.z, 50, 0, 0, 1)`.
   Two more things found with it, both in zitch rather than the shim:
   muOS starts apps with `LD_PRELOAD=libmucursor.so`, whose `SDL_Init`
   override returns -1 for an SDL it cannot see past, which is any SDL

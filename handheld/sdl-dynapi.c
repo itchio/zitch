@@ -20,6 +20,7 @@
  * loader goes through here, for the fixes below.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <signal.h>
@@ -225,6 +226,7 @@ static void unknown_entry(void)
 #define GL_FRAGMENT_SHADER_ 0x8B30
 
 static void *(*real_get_proc)(const char *name);
+static int tracing(void);
 static void (*real_shader_source)(unsigned shader, int count, const char *const *strings,
                                   const int *lengths);
 static void (*real_link_program)(unsigned program);
@@ -414,6 +416,331 @@ static int rewrite(struct shader *shader)
     return 1;
 }
 
+/* GLSL ES 3.00 has no implicit int to float conversion; desktop GLSL
+   does. Rewrites the integer literals desktop code relies on being
+   promoted: arguments to the source's own float-typed parameters,
+   operands beside a float literal, and float declaration initializers.
+   Constructors convert on their own and are left alone. */
+
+struct glsl_function {
+    const char *name;
+    size_t len;
+    int params;
+    unsigned char is_float[16];
+};
+
+static int word_is(const char *s, size_t len, const char *word)
+{
+    return strlen(word) == len && memcmp(s, word, len) == 0;
+}
+
+static int glsl_float_type(const char *s, size_t len)
+{
+    return word_is(s, len, "float") || word_is(s, len, "vec2") || word_is(s, len, "vec3")
+        || word_is(s, len, "vec4") || word_is(s, len, "mat2") || word_is(s, len, "mat3")
+        || word_is(s, len, "mat4");
+}
+
+static int glsl_return_type(const char *s, size_t len)
+{
+    return glsl_float_type(s, len) || word_is(s, len, "void") || word_is(s, len, "int")
+        || word_is(s, len, "bool");
+}
+
+static int glsl_qualifier(const char *s, size_t len)
+{
+    return word_is(s, len, "in") || word_is(s, len, "out") || word_is(s, len, "inout")
+        || word_is(s, len, "const");
+}
+
+static int glsl_ident(char c)
+{
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static const char *skip_blanks(const char *p)
+{
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    return p;
+}
+
+static const char *read_word(const char *p, const char **word, size_t *len)
+{
+    *word = p;
+    while (glsl_ident(*p)) {
+        p++;
+    }
+    *len = (size_t)(p - *word);
+    return p;
+}
+
+/* The functions the source defines, by their line-initial prototypes. */
+static int glsl_functions(const char *src, struct glsl_function *fns, int max)
+{
+    int count = 0;
+    for (const char *line = src; line && *line && count < max; line = strchr(line, '\n'),
+                    line = line ? line + 1 : NULL) {
+        const char *type, *name;
+        size_t tlen, nlen;
+        const char *p = read_word(skip_blanks(line), &type, &tlen);
+        if (!tlen || *p != ' ') {
+            continue;
+        }
+        p = skip_blanks(read_word(p + 1, &name, &nlen));
+        if (!nlen || *p != '(' || !glsl_return_type(type, tlen)) {
+            continue;
+        }
+        struct glsl_function *fn = &fns[count];
+        fn->name = name;
+        fn->len = nlen;
+        fn->params = 0;
+        p++;
+        while (*p && *p != ')' && fn->params < 16) {
+            const char *ptype;
+            size_t plen;
+            while (*p == ' ' || *p == '\n') {
+                p++;
+            }
+            p = read_word(p, &ptype, &plen);
+            if (glsl_qualifier(ptype, plen)) {
+                p = read_word(skip_blanks(p), &ptype, &plen);
+            }
+            fn->is_float[fn->params++] = glsl_float_type(ptype, plen);
+            while (*p && *p != ',' && *p != ')') {
+                p++;
+            }
+            if (*p == ',') {
+                p++;
+            }
+        }
+        count++;
+    }
+    return count;
+}
+
+/* Whether the literal before `at` (ending just before it, blanks
+   skipped) or after it is a float one. */
+static int float_literal_before(const char *src, const char *at)
+{
+    while (at > src && at[-1] == ' ') {
+        at--;
+    }
+    const char *start = at;
+    while (start > src && (isalnum((unsigned char)start[-1]) || start[-1] == '.')) {
+        start--;
+    }
+    return isdigit((unsigned char)*start) && memchr(start, '.', (size_t)(at - start)) != NULL;
+}
+
+static int float_literal_after(const char *at)
+{
+    at = skip_blanks(at);
+    const char *end = at;
+    while (isalnum((unsigned char)*end) || *end == '.') {
+        end++;
+    }
+    return isdigit((unsigned char)*at) && memchr(at, '.', (size_t)(end - at)) != NULL;
+}
+
+/* Whether `before` ends a `float x =` style declaration head. */
+static int float_declaration_before(const char *src, const char *before)
+{
+    const char *p = before - 1;
+    while (p > src && p[-1] == ' ') {
+        p--;
+    }
+    while (p > src && glsl_ident(p[-1])) {
+        p--;
+    }
+    while (p > src && p[-1] == ' ') {
+        p--;
+    }
+    const char *type = p;
+    while (type > src && glsl_ident(type[-1])) {
+        type--;
+    }
+    return glsl_float_type(type, (size_t)(p - type));
+}
+
+static char *glsl_promote_ints(const char *src)
+{
+    struct glsl_function fns[64];
+    int nfns = glsl_functions(src, fns, 64);
+    char *out = malloc(strlen(src) * 2 + 16);
+    if (!out) {
+        return NULL;
+    }
+    struct {
+        int fn;
+        int arg;
+        int depth;
+    } calls[32];
+    int ncalls = 0, depth = 0, bracket = 0, layout_depth = -1;
+    size_t o = 0;
+    const char *p = src;
+    while (*p) {
+        if (*p == '#' || (*p == '/' && p[1] == '/')) {
+            while (*p && *p != '\n') {
+                out[o++] = *p++;
+            }
+            continue;
+        }
+        if (*p == '/' && p[1] == '*') {
+            while (*p && !(*p == '*' && p[1] == '/')) {
+                out[o++] = *p++;
+            }
+            if (*p) {
+                out[o++] = *p++;
+                out[o++] = *p++;
+            }
+            continue;
+        }
+        if (glsl_ident(*p) && !isdigit((unsigned char)*p)) {
+            const char *id;
+            size_t len;
+            p = read_word(p, &id, &len);
+            memcpy(out + o, id, len);
+            o += len;
+            if (*skip_blanks(p) != '(') {
+                continue;
+            }
+            if (word_is(id, len, "layout")) {
+                layout_depth = depth + 1;
+            }
+            for (int i = 0; i < nfns && ncalls < 32; i++) {
+                if (fns[i].len == len && memcmp(fns[i].name, id, len) == 0) {
+                    calls[ncalls].fn = i;
+                    calls[ncalls].arg = 0;
+                    calls[ncalls].depth = depth + 1;
+                    ncalls++;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1]))) {
+            const char *num = p;
+            int is_float = 0;
+            while (isalnum((unsigned char)*p) || *p == '.') {
+                if (strchr(".eEfFxXuU", *p)) {
+                    is_float = 1;
+                }
+                p++;
+            }
+            memcpy(out + o, num, (size_t)(p - num));
+            o += (size_t)(p - num);
+            if (is_float || bracket || (layout_depth >= 0 && depth >= layout_depth)) {
+                continue;
+            }
+            const char *before = num;
+            while (before > src && (before[-1] == ' ' || before[-1] == '\t')) {
+                before--;
+            }
+            const char *after = skip_blanks(p);
+            int promote = 0;
+            int whole_arg = before > src && (before[-1] == '(' || before[-1] == ',')
+                && (*after == ',' || *after == ')');
+            if (ncalls && calls[ncalls - 1].depth == depth && whole_arg) {
+                struct glsl_function *fn = &fns[calls[ncalls - 1].fn];
+                int arg = calls[ncalls - 1].arg;
+                promote = arg < fn->params && fn->is_float[arg];
+            }
+            if (!promote && before > src && strchr("*/+-", before[-1])) {
+                promote = float_literal_before(src, before - 1);
+            }
+            if (!promote && strchr("*/+-", *after) && after[1] != '=') {
+                promote = float_literal_after(after + 1);
+            }
+            if (!promote && before > src && before[-1] == '=' && (*after == ';' || *after == ',')) {
+                promote = float_declaration_before(src, before);
+            }
+            if (promote) {
+                out[o++] = '.';
+                out[o++] = '0';
+            }
+            continue;
+        }
+        switch (*p) {
+        case '(':
+            depth++;
+            break;
+        case ')':
+            if (ncalls && calls[ncalls - 1].depth == depth) {
+                ncalls--;
+            }
+            if (layout_depth == depth) {
+                layout_depth = -1;
+            }
+            depth--;
+            break;
+        case '[':
+            bracket++;
+            break;
+        case ']':
+            if (bracket) {
+                bracket--;
+            }
+            break;
+        case ',':
+            if (ncalls && calls[ncalls - 1].depth == depth) {
+                calls[ncalls - 1].arg++;
+            }
+            break;
+        }
+        out[o++] = *p++;
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* The GLSL version a desktop shader declares, 130 through 460, or 0. */
+static int desktop_glsl_version(const char *source)
+{
+    while (*source == ' ' || *source == '\t' || *source == '\n' || *source == '\r') {
+        source++;
+    }
+    if (strncmp(source, "#version", 8) != 0) {
+        return 0;
+    }
+    source += 8;
+    int version = (int)strtol(source, (char **)&source, 10);
+    while (*source == ' ' || *source == '\t') {
+        source++;
+    }
+    return version >= 130 && version <= 460 && strncmp(source, "es", 2) != 0 ? version : 0;
+}
+
+/* Desktop GLSL in the in/out style is ES 3.00 but for the version line,
+   the precision it has to declare, and the integer literals it leaves
+   to be promoted. */
+static char *to_es300(const char *source)
+{
+    const char *rest = strchr(source, '\n');
+    rest = rest ? rest + 1 : "";
+    static const char head[] = "#version 300 es\n"
+                               "precision highp float;\n"
+                               "precision highp int;\n"
+                               "precision highp sampler2D;\n"
+                               "precision highp sampler3D;\n"
+                               "precision highp samplerCube;\n"
+                               "precision highp sampler2DArray;\n"
+                               "precision highp sampler2DShadow;\n";
+    char *out = malloc(sizeof(head) + strlen(rest));
+    if (!out) {
+        return NULL;
+    }
+    strcpy(out, head);
+    strcat(out, rest);
+    char *promoted = glsl_promote_ints(out);
+    if (promoted) {
+        free(out);
+        out = promoted;
+    }
+    return out;
+}
+
 static void shader_source(unsigned shader, int count, const char *const *strings,
                           const int *lengths)
 {
@@ -437,6 +764,21 @@ static void shader_source(unsigned shader, int count, const char *const *strings
         used += len;
     }
     source[used] = '\0';
+    if (desktop_glsl_version(source) && has_es3()) {
+        char *modern = to_es300(source);
+        if (modern) {
+            if (tracing()) {
+                fprintf(stderr, "sdl-dynapi: shader %u rewritten as ES 3.00:\n%s\n", shader,
+                        modern);
+            }
+            const char *one = modern;
+            real_shader_source(shader, 1, &one, NULL);
+            free(modern);
+            free(source);
+            free(entry);
+            return;
+        }
+    }
     if (strncmp(source, "#version 100", 12) != 0 || !has_es3()) {
         free(source);
         free(entry);
@@ -484,8 +826,8 @@ static void delete_shader(unsigned shader)
 
 /* A game that asks for a desktop core or compatibility profile gets
    the ES 3.2 context the firmware has, with the desktop GL wrappers
-   below. Celeste 64 asks for 3.3 core, forward compatible, which the
-   firmware's EGL rejects. */
+   below and the shader rewrite in shader_source. Celeste 64 asks for
+   3.3 core, forward compatible, which the firmware's EGL rejects. */
 static int desktop_profile;
 static int (*real_set_attribute)(int attr, int value);
 
