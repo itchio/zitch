@@ -223,8 +223,10 @@ pub struct UploadDetail {
     /// What the upload holds in words, each with whether this device runs
     /// it: from itch.io's scan when there is one, its tags otherwise.
     pub platforms: Vec<(String, bool)>,
-    /// Size, kind, and how sure the platforms are.
+    /// Kind, and how sure the platforms are.
     pub notes: Vec<String>,
+    /// Download size in words, when itch.io knows it.
+    pub size: Option<String>,
 }
 
 pub fn upload_detail(upload: &Upload, scans_decide: bool) -> UploadDetail {
@@ -271,7 +273,7 @@ pub fn upload_detail(upload: &Upload, scans_decide: bool) -> UploadDetail {
         }
     }
     if upload.size > 0 {
-        detail.notes.insert(0, human_size(upload.size));
+        detail.size = Some(human_size(upload.size));
     }
     if upload.demo {
         detail.notes.push("demo".to_string());

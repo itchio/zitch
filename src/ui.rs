@@ -2545,7 +2545,8 @@ fn pill_with(
 }
 
 /// A full-width choice with its name over a line of detail: platforms
-/// green where they run here, then the notes.
+/// green where they run here, then the notes. The size sits at the end
+/// of the name line so a long platform list cannot push it out.
 fn choice_card(
     ui: &mut Ui,
     m: &Metrics,
@@ -2556,8 +2557,16 @@ fn choice_card(
     let pad = vec2(m.space(16.0), m.space(9.0));
     let inner = ui.available_width() - 2.0 * pad.x;
     let name_color = if focused { TEXT } else { TEXT_SOFT };
-    let name = one_line(ui, label, bold(m.button), name_color, inner);
     let font = FontId::proportional(m.caption);
+    let size_text = detail
+        .size
+        .as_ref()
+        .map(|size| ui.painter().layout_no_wrap(size.clone(), font.clone(), DIM));
+    let size_gap = m.space(10.0);
+    let name_width = size_text
+        .as_ref()
+        .map_or(inner, |g| inner - g.size().x - size_gap);
+    let name = one_line(ui, label, bold(m.button), name_color, name_width);
     let mut job = platform_job(font.clone(), &detail.platforms);
     if detail.platforms.is_empty() {
         job.append("no platforms listed", 0.0, text_format(&font, DIM));
@@ -2589,6 +2598,13 @@ fn choice_card(
     let top = rect.min + pad;
     let name_height = name.size().y;
     ui.painter().galley(top, name, name_color);
+    if let Some(size_text) = size_text {
+        let pos = pos2(
+            rect.max.x - pad.x - size_text.size().x,
+            top.y + name_height - size_text.size().y,
+        );
+        ui.painter().galley(pos, size_text, DIM);
+    }
     ui.painter()
         .galley(top + vec2(0.0, name_height + gap), info, DIM);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)

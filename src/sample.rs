@@ -27,7 +27,8 @@ pub fn prompt(choice: Option<usize>) -> Prompt {
             details: (1..=count)
                 .map(|i| UploadDetail {
                     platforms: vec![("Linux ARM64".into(), i == 1), ("Linux x64".into(), false)],
-                    notes: vec!["135.9 MB".into()],
+                    notes: Vec::new(),
+                    size: Some("135.9 MB".into()),
                 })
                 .collect(),
             progress: None,
