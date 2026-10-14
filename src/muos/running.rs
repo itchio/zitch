@@ -152,6 +152,7 @@ pub(super) fn launch_love(
 ) -> Result<()> {
     let love = love().context("no LÖVE on this device")?;
     let dir = love.binary.parent().unwrap_or(Path::new("/"));
+    let game_env = super::game_env();
     let mut command = Command::new(&love.binary);
     command
         .arg(path)
@@ -161,8 +162,12 @@ pub(super) fn launch_love(
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
+        .envs(game_env.iter().map(|(name, value)| (name, value)))
+        // Asks for ES outright, so the shim never has to interpret
+        // the desktop probes LÖVE makes first otherwise.
+        .env("LOVE_GRAPHICS_USE_OPENGLES", "1")
         .envs(env)
-        .env("LD_LIBRARY_PATH", love_lib_path(&love.libs, env))
+        .env("LD_LIBRARY_PATH", love_lib_path(&love.libs, &game_env, env))
         .stderr(std::process::Stdio::piped());
     let mut child =
         spawn_group(&mut command).with_context(|| format!("running {}", love.binary.display()))?;
@@ -295,9 +300,18 @@ pub(super) fn launch_rom(
     }
 }
 
-/// LÖVE's own libraries first, then whatever the game environment adds.
-fn love_lib_path(libs: &Path, env: &HashMap<String, String>) -> std::ffi::OsString {
+/// LÖVE's own libraries first, then whatever the game environments add.
+fn love_lib_path(
+    libs: &Path,
+    game_env: &[(String, std::ffi::OsString)],
+    env: &HashMap<String, String>,
+) -> std::ffi::OsString {
     let mut dirs = vec![libs.to_path_buf()];
+    for (name, value) in game_env {
+        if name == "LD_LIBRARY_PATH" {
+            dirs.extend(std::env::split_paths(value));
+        }
+    }
     if let Some(rest) = env.get("LD_LIBRARY_PATH") {
         dirs.extend(std::env::split_paths(rest));
     }

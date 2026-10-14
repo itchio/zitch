@@ -247,7 +247,9 @@ its itch.io URL, when adding another.
   shaders, which have one color target; one that writes to
   `gl_FragData[1]` or higher is rewritten as GLSL ES 3.00 on an ES 3
   context, and so are the shaders it is linked with, since a program
-  holds one version.
+  holds one version. One that enables `GL_EXT_draw_buffers` itself,
+  as LÖVE's multi-canvas shaders do, compiles as it is and is left
+  alone.
 - Undrium (https://bitglint.itch.io/undrium): MonoGame. A .NET game has
   no SDL2 of its own and loads the firmware's, which asks the shim too.
   That one keeps its own entries, with only `SDL_GL_GetProcAddress`
@@ -292,7 +294,11 @@ its itch.io URL, when adding another.
   "Cannot create cursor" at the game's title screen. The shim answers
   the three `SDL_Create*Cursor` entries with a stand-in when SDL has
   none; `SDL_SetCursor` and `SDL_FreeCursor` skip a cursor that is not
-  theirs. There is no mouse to show one anyway.
+  theirs. There is no mouse to show one anyway. For this to reach a
+  LÖVE game, `launch_love` now applies `muos::game_env` like butler's
+  launches do, so LÖVE runs under the shim and without the frontend's
+  preload, with `LOVE_GRAPHICS_USE_OPENGLES=1` so it asks for ES
+  outright instead of probing core and 2.1 first.
 - Cro-Mag Rally (https://jorio.itch.io/cromagrally): desktop OpenGL.
   The game links `libGL.so.1` and `libOpenGL.so.0`, which the firmware
   lacks. zitch puts its own build of gl4es (`make handheld-gl4es`, in

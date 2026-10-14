@@ -280,6 +280,11 @@ static int has_es3(void)
 static int writes_more_targets(const char *source)
 {
     static const char FRAG_DATA[] = "gl_FragData[";
+    /* A shader that enables the extension (LÖVE's multi-canvas ones)
+       already compiles as it is. */
+    if (strstr(source, "GL_EXT_draw_buffers")) {
+        return 0;
+    }
     for (const char *at = source; (at = strstr(at, FRAG_DATA));) {
         at += sizeof(FRAG_DATA) - 1;
         if (*at >= '1' && *at <= '9') {
