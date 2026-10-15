@@ -29,8 +29,8 @@ please open an issue here requesting it so we can gauge interest.
 
 Testing is being done of the following handhelds:
 
-* Ambernic RG35XX H
-* Ambernic RG40XX H
+* Anbernic RG35XX H
+* Anbernic RG40XX H
 * TrimUI Brick Pro
 
 See [handheld/README.md](handheld/README.md) for building, deploying and
