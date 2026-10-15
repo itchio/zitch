@@ -10,8 +10,8 @@ use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
 use crate::model::human_size;
 use crate::model::{
-    Cave, Game, GameUpdate, InstallState, LaunchFailure, Mark, Prompt, UploadExt, human_duration,
-    human_duration_seconds,
+    Cave, Game, GameUpdate, InstallState, LaunchFailure, Mark, Prompt, UploadExt, game_price,
+    human_duration, human_duration_seconds,
 };
 use crate::page_info::PageInfo;
 use crate::playable::{
@@ -1698,6 +1698,8 @@ pub struct GameView<'a> {
     /// The player's compatibility report, and whether it was of the build
     /// installed now.
     pub reported: Option<(&'a SavedReport, bool)>,
+    /// Whether the game is in the library; `None` until that has loaded.
+    pub owned: Option<bool>,
 }
 
 /// Where the game page scrolls when focus moves between its parts.
@@ -1844,6 +1846,7 @@ fn game_summary(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Acti
         failure,
         install_failure,
         reported,
+        owned,
         ..
     } = view;
     let buttons = game_buttons(game, caves, install, running, update, online);
@@ -1989,6 +1992,18 @@ fn game_summary(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Acti
                 }
                 (None, None) if online => subtle(ui, m, "Not installed"),
                 (None, None) => subtle(ui, m, "Not installed; offline"),
+            }
+            if install.is_none()
+                && caves.is_empty()
+                && owned == Some(false)
+                && let Some(price) = game_price(game)
+            {
+                let line = if game.has_demo == Some(true) {
+                    format!("Not in your library; {price} on itch.io, demo available")
+                } else {
+                    format!("Not in your library; {price} on itch.io")
+                };
+                subtle(ui, m, &line);
             }
             if let Some((saved, current)) = reported {
                 let mut line = format!("You reported: {}", saved.rating.label());

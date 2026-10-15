@@ -3797,6 +3797,10 @@ impl App {
                                         failure,
                                         install_failure,
                                         reported: reported(&self.reports, &self.caves, game.id),
+                                        owned: self
+                                            .owned
+                                            .get()
+                                            .map(|games| games.iter().any(|g| g.id == game.id)),
                                         info: info.as_deref(),
                                         info_loading,
                                         focused_shot: shot,

@@ -39,6 +39,12 @@ impl UploadExt for Upload {
     }
 }
 
+/// The game's minimum price as "$4.00", when it costs anything.
+pub fn game_price(game: &Game) -> Option<String> {
+    let cents = game.min_price.filter(|&cents| cents > 0)?;
+    Some(format!("${}.{:02}", cents / 100, cents % 100))
+}
+
 /// "1.2 GB" style sizes.
 pub fn human_size(bytes: i64) -> String {
     let bytes = bytes.max(0) as f64;

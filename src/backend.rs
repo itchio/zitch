@@ -35,7 +35,7 @@ use crate::butlerd::types::{
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
     Cave, Collection, CollectionGames, Download, DownloadProgress, Game, GameUpdate, LaunchFailure,
-    Launched, Profile, Prompt, PromptOrigin, UploadExt, UserExt,
+    Launched, Profile, Prompt, PromptOrigin, UploadExt, UserExt, game_price,
 };
 use crate::playable::{
     CollectionFilter, UploadDetail, scans_decide, upload_detail, upload_platform_names,
@@ -2031,8 +2031,15 @@ fn queue_install(
         let count = uploads.len();
         (uploads, count)
     };
+    // itch.io lists only the uploads this account may download.
     if uploads.is_empty() {
-        bail!("{} has no download for this device", game.title);
+        match game_price(&game) {
+            Some(price) => bail!(
+                "{} costs {price} and is not in your library; buy it on itch.io to download it",
+                game.title
+            ),
+            None => bail!("{} has no downloads available to this account", game.title),
+        }
     }
     // Always asked, even for one upload, so the user sees what is about
     // to download and can reach the rest.
@@ -2073,6 +2080,17 @@ fn downloads_here(title: &str, count: usize) -> String {
     }
 }
 
+/// A sentence for the picker when a paid game offers this account only
+/// its demos, empty otherwise.
+fn demo_only_note(game: &Game, uploads: &[Upload]) -> String {
+    match game_price(game) {
+        Some(price) if uploads.iter().all(|u| u.demo) => {
+            format!(" Only the demo is in your library; the full game is {price} on itch.io.")
+        }
+        _ => String::new(),
+    }
+}
+
 /// Asks which upload to install. `None` when the user backs out.
 /// `uploads` lists the `likely` ones for this device first; the rest are
 /// offered behind a choice to show everything.
@@ -2088,12 +2106,13 @@ fn pick_upload(
     let details: Vec<UploadDetail> = uploads.iter().map(|u| upload_detail(u, decide)).collect();
     let others = uploads.len() - likely;
     let title = &game.title;
+    let demo_only = demo_only_note(game, uploads);
     if likely > 0 && others > 0 {
         let show_all = format!("Show all {} downloads", uploads.len());
         let mut choices: Vec<&str> = labels[..likely].to_vec();
         choices.push(&show_all);
         choices.push("Cancel");
-        let body = downloads_here(title, likely);
+        let body = format!("{}{demo_only}", downloads_here(title, likely));
         let shown = details[..likely].to_vec();
         let origin = PromptOrigin::UploadPicker {
             game_id: game.id,
@@ -2115,6 +2134,7 @@ fn pick_upload(
     } else {
         format!("{title}: the last {others} downloads were not recognised for this device.")
     };
+    let body = format!("{body}{demo_only}");
     let origin = PromptOrigin::UploadPicker {
         game_id: game.id,
         picks: labels.len(),
