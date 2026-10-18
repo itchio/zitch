@@ -1,4 +1,4 @@
-.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl
+.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl shim-check
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -77,10 +77,23 @@ shots-baseline: build
 shots-check: build
 	APP=$(APP) scripts/shots.sh check
 
-check:
+check: shim-check
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo test
+
+# The shim's desktop GLSL rewrite, run on the host over handheld/glsl-tests
+# and the results validated as ES 3.00. Needs gcc and glslangValidator.
+GLSL_TEST = target/glsl-test
+shim-check:
+	@mkdir -p $(GLSL_TEST)
+	gcc -O0 -Wall -Wextra -Werror -o $(GLSL_TEST)/glsl-test handheld/glsl-test.c -ldl
+	@for src in handheld/glsl-tests/*; do \
+		out=$(GLSL_TEST)/$$(basename $$src); \
+		$(GLSL_TEST)/glsl-test $$src >$$out || exit 1; \
+		glslangValidator $$out >/dev/null || { echo "$$src: rewrite does not compile:"; cat $$out; exit 1; }; \
+	done
+	@echo "shim-check: $$(ls handheld/glsl-tests | wc -l) shaders ok"
 
 fmt:
 	cargo fmt

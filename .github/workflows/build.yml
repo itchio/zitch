@@ -32,7 +32,7 @@ jobs:
       - name: Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libudev-dev libsdl2-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libudev-dev libsdl2-dev glslang-tools
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings -A dead_code
       # The handheld pieces are only ever built for the device; make sure
@@ -41,6 +41,7 @@ jobs:
         run: cargo build --locked --no-default-features --features sdl-host
       - name: SDL shim
         run: gcc -shared -fPIC -O2 -Wall -Wextra -Werror -o /dev/null handheld/sdl-dynapi.c -ldl
+      - run: make shim-check
 
   build:
     name: ${{ matrix.name }}

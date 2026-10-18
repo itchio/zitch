@@ -522,7 +522,51 @@ static int glsl_functions(const char *src, struct glsl_function *fns, int max)
         }
         count++;
     }
+    /* Overloads of one name that differ in parameter types can't be told
+       apart at a call site, so none of them promotes anything. */
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (fns[i].len != fns[j].len || memcmp(fns[i].name, fns[j].name, fns[i].len) != 0) {
+                continue;
+            }
+            if (fns[i].params != fns[j].params
+                || memcmp(fns[i].is_float, fns[j].is_float, (size_t)fns[i].params) != 0) {
+                fns[i].params = fns[j].params = 0;
+            }
+        }
+    }
     return count;
+}
+
+enum { NUMBER_INT, NUMBER_FLOAT, NUMBER_FIXED };
+
+static int glsl_number_start(const char *p)
+{
+    return isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1]));
+}
+
+/* Scans the numeric literal at `p`: an int, a float (a fraction, an
+   exponent with its sign, or an f suffix), or one to leave as it is
+   (unsigned, hex). */
+static int glsl_number(const char *p, const char **end)
+{
+    int kind = NUMBER_INT;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        kind = NUMBER_FIXED;
+    }
+    while (isalnum((unsigned char)*p) || *p == '.') {
+        if (*p == 'u' || *p == 'U') {
+            kind = NUMBER_FIXED;
+        } else if (kind == NUMBER_INT && strchr(".eEfF", *p)) {
+            kind = NUMBER_FLOAT;
+        }
+        if (kind != NUMBER_FIXED && (*p == 'e' || *p == 'E') && (p[1] == '+' || p[1] == '-')) {
+            p++;
+        }
+        p++;
+    }
+    *end = p;
+    return kind;
 }
 
 /* Whether the literal before `at` (ending just before it, blanks
@@ -533,20 +577,26 @@ static int float_literal_before(const char *src, const char *at)
         at--;
     }
     const char *start = at;
-    while (start > src && (isalnum((unsigned char)start[-1]) || start[-1] == '.')) {
-        start--;
+    while (start > src) {
+        char c = start[-1];
+        if (isalnum((unsigned char)c) || c == '.') {
+            start--;
+        } else if ((c == '+' || c == '-') && start - 2 > src && (start[-2] == 'e' || start[-2] == 'E')
+                   && isdigit((unsigned char)start[-3])) {
+            start -= 2;
+        } else {
+            break;
+        }
     }
-    return isdigit((unsigned char)*start) && memchr(start, '.', (size_t)(at - start)) != NULL;
+    const char *end;
+    return glsl_number_start(start) && glsl_number(start, &end) == NUMBER_FLOAT && end == at;
 }
 
 static int float_literal_after(const char *at)
 {
     at = skip_blanks(at);
-    const char *end = at;
-    while (isalnum((unsigned char)*end) || *end == '.') {
-        end++;
-    }
-    return isdigit((unsigned char)*at) && memchr(at, '.', (size_t)(end - at)) != NULL;
+    const char *end;
+    return glsl_number_start(at) && glsl_number(at, &end) == NUMBER_FLOAT;
 }
 
 /* Whether `before` ends a `float x =` style declaration head. */
@@ -625,18 +675,12 @@ static char *glsl_promote_ints(const char *src)
             }
             continue;
         }
-        if (isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1]))) {
+        if (glsl_number_start(p)) {
             const char *num = p;
-            int is_float = 0;
-            while (isalnum((unsigned char)*p) || *p == '.') {
-                if (strchr(".eEfFxXuU", *p)) {
-                    is_float = 1;
-                }
-                p++;
-            }
+            int kind = glsl_number(p, &p);
             memcpy(out + o, num, (size_t)(p - num));
             o += (size_t)(p - num);
-            if (is_float || bracket || (layout_depth >= 0 && depth >= layout_depth)) {
+            if (kind != NUMBER_INT || bracket || (layout_depth >= 0 && depth >= layout_depth)) {
                 continue;
             }
             const char *before = num;
@@ -701,7 +745,7 @@ static char *glsl_promote_ints(const char *src)
 }
 
 /* The GLSL version a desktop shader declares, 130 through 460, or 0. */
-static int desktop_glsl_version(const char *source)
+static int desktop_glsl_version(const char *source, const char **line)
 {
     while (*source == ' ' || *source == '\t' || *source == '\n' || *source == '\r') {
         source++;
@@ -709,6 +753,7 @@ static int desktop_glsl_version(const char *source)
     if (strncmp(source, "#version", 8) != 0) {
         return 0;
     }
+    *line = source;
     source += 8;
     int version = (int)strtol(source, (char **)&source, 10);
     while (*source == ' ' || *source == '\t') {
@@ -720,9 +765,9 @@ static int desktop_glsl_version(const char *source)
 /* Desktop GLSL in the in/out style is ES 3.00 but for the version line,
    the precision it has to declare, and the integer literals it leaves
    to be promoted. */
-static char *to_es300(const char *source)
+static char *to_es300(const char *version_line)
 {
-    const char *rest = strchr(source, '\n');
+    const char *rest = strchr(version_line, '\n');
     rest = rest ? rest + 1 : "";
     static const char head[] = "#version 300 es\n"
                                "precision highp float;\n"
@@ -769,8 +814,9 @@ static void shader_source(unsigned shader, int count, const char *const *strings
         used += len;
     }
     source[used] = '\0';
-    if (desktop_glsl_version(source) && has_es3()) {
-        char *modern = to_es300(source);
+    const char *version_line;
+    if (desktop_glsl_version(source, &version_line) && has_es3()) {
+        char *modern = to_es300(version_line);
         if (modern) {
             if (tracing()) {
                 fprintf(stderr, "sdl-dynapi: shader %u rewritten as ES 3.00:\n%s\n", shader,
@@ -1170,6 +1216,9 @@ static void *wrap_entry(const char *name, void *fn)
 
 static struct sigaction next_segv;
 
+/* Walks frame pointers; .NET's JIT keeps them where libunwind has no
+   tables. */
+#ifdef __aarch64__
 static void print_frame(uintptr_t pc)
 {
     Dl_info sym = {0};
@@ -1193,10 +1242,11 @@ static int readable(const uintptr_t *fp)
     return read(probe[0], drained, sizeof(drained)) == sizeof(drained);
 }
 
-/* Walks frame pointers; .NET's JIT keeps them where libunwind has no
-   tables. */
+#endif
+
 static void on_segv(int sig, siginfo_t *info, void *context)
 {
+#ifdef __aarch64__
     const mcontext_t *regs = &((ucontext_t *)context)->uc_mcontext;
     fprintf(stderr, "sdl-dynapi: SIGSEGV reading %p, x0 %#llx\n", info->si_addr, regs->regs[0]);
     print_frame(regs->pc);
@@ -1205,6 +1255,10 @@ static void on_segv(int sig, siginfo_t *info, void *context)
         print_frame(fp[1]);
         fp = (const uintptr_t *)fp[0];
     }
+#else
+    (void)context;
+    fprintf(stderr, "sdl-dynapi: SIGSEGV reading %p\n", info->si_addr);
+#endif
     if (next_segv.sa_flags & SA_SIGINFO) {
         next_segv.sa_sigaction(sig, info, context);
     } else if (next_segv.sa_handler != SIG_DFL && next_segv.sa_handler != SIG_IGN) {

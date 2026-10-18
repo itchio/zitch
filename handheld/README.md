@@ -277,10 +277,13 @@ its itch.io URL, when adding another.
   `300 es`: the version line, default precisions, and integer literals
   promoted to float where desktop GLSL converts them and ES does not
   (arguments to the shader's own float parameters, operands beside a
-  float literal, float initializers). Constructors already convert, and
-  built-in calls like `clamp(x, 0, 1)` are left alone until a game
-  needs them. Three of the game's four shaders needed nothing but the
-  version line; the fourth needed `Map(v_world.z, 50, 0, 0, 1)`.
+  float literal, float initializers). Constructors already convert,
+  overloads whose parameter types differ are left alone, and so are
+  built-in calls like `clamp(x, 0, 1)` until a game needs them. Three
+  of the game's four shaders needed nothing but the version line; the
+  fourth needed `Map(v_world.z, 50, 0, 0, 1)`. `make shim-check` runs
+  the rewrite on the host over `handheld/glsl-tests` and validates the
+  output with glslangValidator; add a case there for each new pattern.
   Two more things found with it, both in zitch rather than the shim:
   muOS starts apps with `LD_PRELOAD=libmucursor.so`, whose `SDL_Init`
   override returns -1 for an SDL it cannot see past, which is any SDL
