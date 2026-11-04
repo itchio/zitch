@@ -837,6 +837,7 @@ impl Session<'_> {
         let config = Arc::clone(self.config);
         let prompts = self.prompts.clone();
         let launches = self.launches.clone();
+        let link = Arc::clone(self.link);
         let profile_id = self.profile.id;
         self.op(
             format!("launch-{cave_id}"),
@@ -880,8 +881,17 @@ impl Session<'_> {
                     target.as_deref(),
                     &name,
                     emit,
+                    &quit,
                 );
-                // Play time and last-played change with every run.
+                // Play time and last-played change with every run. A quit
+                // closed this connection, so the refresh takes a new one.
+                let fresh;
+                let client = if quit.load(Ordering::Relaxed) {
+                    fresh = connect(&link).context("reconnecting after the quit")?;
+                    &fresh
+                } else {
+                    client
+                };
                 refresh_caves(client, emit);
                 // Ending the connection is how the user quits; the call's
                 // failure is then the expected outcome.
@@ -1405,6 +1415,7 @@ fn launch(
     target: Option<&str>,
     name: &str,
     emit: &Emitter,
+    quit: &AtomicBool,
 ) -> (Result<(), LaunchFailure>, Run) {
     let mut errors: std::collections::VecDeque<String> = Default::default();
     let run = std::cell::RefCell::new(Run::default());
@@ -1420,6 +1431,7 @@ fn launch(
         emit,
         run: &run,
         started: &started,
+        quit,
     };
     let result = launching.run(|line| {
         if errors.len() == LAUNCH_LOG_TAIL {
@@ -1474,6 +1486,8 @@ struct LaunchCall<'a> {
     run: &'a std::cell::RefCell<Run>,
     /// When the game came up.
     started: &'a std::cell::Cell<Option<Instant>>,
+    /// Set when the user ended the run by closing the connection.
+    quit: &'a AtomicBool,
 }
 
 impl LaunchCall<'_> {
@@ -1554,7 +1568,11 @@ impl LaunchCall<'_> {
                     }
                 };
                 if let Err(error) = self.answer(&id, request) {
-                    log::warn!("answering {method}: {error:#}");
+                    if self.quit.load(Ordering::Relaxed) {
+                        log::debug!("answering {method} after the quit: {error:#}");
+                    } else {
+                        log::warn!("answering {method}: {error:#}");
+                    }
                     let _ = client.reply_error(&id, -32603, &format!("{error:#}"));
                 }
             }
