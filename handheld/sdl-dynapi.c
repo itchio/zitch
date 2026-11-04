@@ -1189,6 +1189,35 @@ static void *create_system_cursor(int id)
     return cursor ? cursor : &stand_in_cursor;
 }
 
+/* A firmware SDL2 may be built without sensors or haptics, and then
+   refuses an init that asks for everything, as PICO-8's does. Such an
+   init is retried without them. */
+#define SDL_INIT_HAPTIC 0x00001000u
+#define SDL_INIT_SENSOR 0x00008000u
+static int (*real_init)(uint32_t flags);
+static int (*real_init_subsystem)(uint32_t flags);
+
+static int init_without_extras(int (*init)(uint32_t), uint32_t flags)
+{
+    int result = init(flags);
+    uint32_t extras = flags & (SDL_INIT_HAPTIC | SDL_INIT_SENSOR);
+    if (result < 0 && extras) {
+        fprintf(stderr, "sdl-dynapi: SDL init failed, retrying without %#x\n", extras);
+        result = init(flags & ~extras);
+    }
+    return result;
+}
+
+static int init(uint32_t flags)
+{
+    return init_without_extras(real_init, flags);
+}
+
+static int init_subsystem(uint32_t flags)
+{
+    return init_without_extras(real_init_subsystem, flags);
+}
+
 /* Entries swapped the same way whether the SDL is the game's or the
    firmware's. SDL_GL_GetProcAddress and SDL_GL_CreateContext have
    their own handling. */
@@ -1197,6 +1226,8 @@ static const struct {
     void *wrapper;
     void **real;
 } WRAPPED[] = {
+    {"SDL_Init", (void *)init, (void **)&real_init},
+    {"SDL_InitSubSystem", (void *)init_subsystem, (void **)&real_init_subsystem},
     {"SDL_GL_SetAttribute", (void *)set_attribute, (void **)&real_set_attribute},
     {"SDL_CreateCursor", (void *)create_cursor, (void **)&real_create_cursor},
     {"SDL_CreateColorCursor", (void *)create_color_cursor, (void **)&real_create_color_cursor},

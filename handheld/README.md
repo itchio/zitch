@@ -312,6 +312,12 @@ its itch.io URL, when adding another.
   the shim starts it from its `SDL_GL_CreateContext` wrapper: hands it
   the firmware's `SDL_GL_GetProcAddress` and drawable size, then
   `initialize_gl4es`. `LIBGL_ES=2` is set unless the game sets it.
+- Air Delivery (https://pianoman373.itch.io/air-delivery), a PICO-8
+  export for the Raspberry Pi: its `SDL_Init` asks for every subsystem,
+  and spruce's libSDL2 is built without sensors, so the init fails with
+  "SDL not built with sensor support" and the game exits before it
+  draws. The shim wraps `SDL_Init` and `SDL_InitSubSystem`: an init
+  that fails is retried without the sensor and haptic subsystems.
 
 `ZITCH_SDL_TRACE=1` in the game's environment logs every GL lookup and
 prints a backtrace on a crash. A GL function the game uses and ES lacks
