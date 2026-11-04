@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
@@ -113,8 +114,12 @@ pub fn stop() {
     }
 }
 
-fn kill_term(targets: impl IntoIterator<Item = String>) {
-    match Command::new("kill").arg("-TERM").args(targets).status() {
+/// What a process gets to leave on SIGTERM before SIGKILL, as muOS's
+/// own quit allows; its muxretro takes no notice of SIGTERM.
+const TERM_GRACE: Duration = Duration::from_secs(3);
+
+fn kill(signal: &str, targets: impl IntoIterator<Item = String>) {
+    match Command::new("kill").arg(signal).args(targets).status() {
         Ok(status) if status.success() => {}
         Ok(status) => log::warn!("kill exited with {status}"),
         Err(error) => log::warn!("running kill: {error}"),
@@ -123,33 +128,72 @@ fn kill_term(targets: impl IntoIterator<Item = String>) {
 
 pub(super) fn end_group(group: u32) {
     log::info!("stopping process group {group}");
-    kill_term([format!("-{group}")]);
+    kill("-TERM", [format!("-{group}")]);
+    kill_later(members(group, true));
 }
 
 /// Ends the group's processes but its leader, which goes on to its own
-/// end once the others are gone. The members come from /proc.
+/// end once the others are gone.
 fn end_group_but_leader(group: u32) {
     log::info!("stopping process group {group} but its leader");
-    let members: Vec<String> = std::fs::read_dir("/proc")
+    let members = members(group, false);
+    if !members.is_empty() {
+        kill("-TERM", members.iter().map(u32::to_string));
+        kill_later(members);
+    }
+}
+
+/// Kills what is still up at the end of [`TERM_GRACE`].
+fn kill_later(pids: Vec<u32>) {
+    if pids.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + TERM_GRACE;
+        loop {
+            let alive: Vec<u32> = pids.iter().copied().filter(|pid| is_alive(*pid)).collect();
+            if alive.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                log::warn!("killing {alive:?}, still up after SIGTERM");
+                kill("-KILL", alive.iter().map(u32::to_string));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
+/// The group's processes, from /proc.
+fn members(group: u32, with_leader: bool) -> Vec<u32> {
+    std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| *pid != group)
+        .filter(|pid| with_leader || *pid != group)
         .filter(|pid| process_group(*pid) == Some(group))
-        .map(|pid| pid.to_string())
-        .collect();
-    if !members.is_empty() {
-        kill_term(members);
-    }
+        .collect()
 }
 
-/// A process's group, from the field after the parenthesised name in
-/// its stat line.
-fn process_group(pid: u32) -> Option<u32> {
+/// A process's stat line past the parenthesised name.
+fn stat_after_name(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_name = &stat[stat.rfind(')')? + 1..];
-    after_name.split_whitespace().nth(2)?.parse().ok()
+    Some(stat[stat.rfind(')')? + 1..].to_string())
+}
+
+fn process_group(pid: u32) -> Option<u32> {
+    stat_after_name(pid)?
+        .split_whitespace()
+        .nth(2)?
+        .parse()
+        .ok()
+}
+
+/// Up and not a zombie.
+fn is_alive(pid: u32) -> bool {
+    stat_after_name(pid).is_some_and(|stat| stat.split_whitespace().next() != Some("Z"))
 }
 
 /// Puts the child in a process group of its own and remembers it for
@@ -287,6 +331,32 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tidy");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn stop_kills_what_ignores_term() {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; echo ready; sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        end_group(child.id());
+        while started.elapsed() < TERM_GRACE + std::time::Duration::from_secs(3)
+            && child.try_wait().unwrap().is_none()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(child.try_wait().unwrap().is_some(), "still running");
+        assert!(is_alive(std::process::id()));
     }
 
     #[test]

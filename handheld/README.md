@@ -414,7 +414,9 @@ through `SPRUCE_DEVICE_NAMES`, which `launch.sh` exports), then
 go to `Emu/PICO8` when the user has put the official `pico8_64` and
 `pico8.dat` in `BIOS/`, else to the Fake-08 core in `Emu/FAKE08`.
 Quitting a ROM from zitch ends the emulator and leaves the launch
-script to its housekeeping, on both firmwares.
+script to its housekeeping, on both firmwares. A process still up three
+seconds after SIGTERM is killed, as muOS's own quit does; its muxretro
+takes no notice of SIGTERM.
 
 Device notes, Brick Pro: kernel 4.9, PowerVR GE8300 with GLES through
 `/usr/lib/libEGL.so` and `/dev/dri` present, 1024x768 32bpp `/dev/fb0`
