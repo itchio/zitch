@@ -14,9 +14,9 @@ exec >"$APP_DIR/zitch.log" 2>&1
 SPRUCE_DEVICE_NAMES="$(device_names | tr '\n' ' ')"
 export SPRUCE_DEVICE_NAMES
 
-# Config (butler database, installed games) and the cover cache live next
-# to the binary on the SD card.
-HOME="$APP_DIR/home"
+# Config (login, butler's database, installed games) and the cover cache
+# live in Saves, which an update of the app folder leaves alone.
+HOME="/mnt/SDCARD/Saves/zitch"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_CACHE_HOME="$HOME/.cache"
 export HOME XDG_CONFIG_HOME XDG_CACHE_HOME

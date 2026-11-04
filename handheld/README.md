@@ -366,9 +366,11 @@ exits; spruce's `principal.sh` runs the file with its output discarded
 and brings the menu back when it returns. `handheld/spruce/` holds ours.
 `launch.sh` sources `spruce/scripts/appEnv.sh`, the environment spruce
 promises third-party apps (`CFW=SPRUCE`, `SPRUCE_PLATFORM`,
-`SSL_CERT_FILE`), keeps config under `home/` in the app folder like
-`mux_launch.sh`, reads extra flags from an `args` file, and logs to
-`zitch.log` there. The icon is a 70x70 PNG in the folder, drawn in the
+`SSL_CERT_FILE`), keeps config (the login, butler's database, installed
+games) and the cover cache under `Saves/zitch` on the card, which an
+update of the app folder leaves alone, reads extra flags from an `args`
+file, and logs to `zitch.log` there. The icon is a 70x70 PNG in the
+folder, drawn in the
 SPRUCE theme's gold; a theme can override it under `icons/app/`. The
 script also exports a pad map that names the buttons by label: TrimUI's
 `trimui_inputd` shows the pad as an Xbox 360 controller laid out by
