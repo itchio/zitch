@@ -363,7 +363,11 @@ promises third-party apps (`CFW=SPRUCE`, `SPRUCE_PLATFORM`,
 `SSL_CERT_FILE`), keeps config under `home/` in the app folder like
 `mux_launch.sh`, reads extra flags from an `args` file, and logs to
 `zitch.log` there. The icon is a 70x70 PNG in the folder, drawn in the
-SPRUCE theme's gold; a theme can override it under `icons/app/`.
+SPRUCE theme's gold; a theme can override it under `icons/app/`. The
+script also exports a pad map that names the buttons by label: TrimUI's
+`trimui_inputd` shows the pad as an Xbox 360 controller laid out by
+position, so without one SDL's A is the button labelled B. Other boards
+get spruce's own map through `export_sdl_gamecontroller_map`.
 
 ```
 make spruce-deploy HANDHELD=brick-pro   # copy the stage + launch.sh + config.json + icon into App/zitch

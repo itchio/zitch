@@ -18,6 +18,19 @@ XDG_CACHE_HOME="$HOME/.cache"
 export HOME XDG_CONFIG_HOME XDG_CACHE_HOME
 mkdir -p "$HOME"
 
+# Name the pad's buttons by their labels, as the prompts are. TrimUI's
+# inputd presents an Xbox 360 pad by position, so A/B and X/Y cross over
+# on its Nintendo-labelled boards; the other boards carry spruce's own
+# label-named map.
+case "$SPRUCE_PLATFORM" in
+    Brick | BrickPro | SmartPro | SmartProS)
+        export SDL_GAMECONTROLLERCONFIG="030000005e0400008e02000014010000,TRIMUI Player1,a:b1,b:b0,x:b3,y:b2,back:b6,guide:b8,start:b7,leftshoulder:b4,rightshoulder:b5,leftstick:b9,rightstick:b10,lefttrigger:a2,righttrigger:a5,leftx:a0,lefty:a1,rightx:a3,righty:a4,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,platform:Linux,"
+        ;;
+    *)
+        export_sdl_gamecontroller_map
+        ;;
+esac
+
 # Extra flags for development, e.g. a screenshot script; one line, no quotes.
 ARGS=""
 [ -f "$APP_DIR/args" ] && ARGS=$(cat "$APP_DIR/args")
