@@ -1,10 +1,11 @@
-//! What runs here: the LÖVE we ship, the ROMs and carts the firmware
-//! has cores for, and why a Linux build cannot reach the screen.
+//! What runs here, whatever the firmware: the ROMs and carts it has
+//! emulators for, our LÖVE, and the Linux builds the SDL shim can route
+//! to the screen, with the reasons the rest cannot.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::Result;
 use serde::Deserialize;
 
 use crate::butlerd::types::{
@@ -13,53 +14,120 @@ use crate::butlerd::types::{
 
 use super::*;
 
-/// Why a game cannot run on the LÖVE that is here. The 0.x series is a
-/// different API, so 11.x will not load those at all. A game made for a
-/// newer LÖVE, or one that does not say which it wants, is given a try.
-pub(super) fn love_blocker(wanted: &str, have: &str) -> Option<String> {
-    let (major, _) = parse_version(wanted)?;
-    let runs = parse_version(have).is_some_and(|(m, _)| m <= major);
-    (!runs).then(|| format!("made for LÖVE {wanted}; this device has LÖVE {have}"))
+/// What the handhelds ship, assumed when the host's cannot be read.
+pub(super) const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
+
+/// dash's ROM system ids: what `Launch.GetTargets` runtimes take and
+/// what a ROM payload's `engine.details["system"]` holds.
+pub(super) const ROM_IDS: [&str; 24] = [
+    "nes",
+    "snes",
+    "gb",
+    "gbc",
+    "gba",
+    "nds",
+    "3ds",
+    "md",
+    "32x",
+    "sms",
+    "gg",
+    "pce",
+    "lynx",
+    "ngp",
+    "a26",
+    "c64",
+    "amiga",
+    "n64",
+    "psx",
+    "ps2",
+    "psp",
+    "saturn",
+    "segacd",
+    "dreamcast",
+];
+/// dash's disc formats, and the systems it reads out of their headers.
+/// `.bin` is not one: it needs its `.cue`, and alone it matches far too much.
+pub(super) const DISC_EXTS: [&str; 3] = ["cue", "iso", "chd"];
+pub(super) const DISC_IDS: [&str; 6] = ["psx", "ps2", "psp", "saturn", "segacd", "dreamcast"];
+/// Fantasy consoles: dash names their carts as payloads of their own,
+/// the firmware assigns them like any system.
+pub(super) const PICO8: &str = "pico8";
+pub(super) const TIC80: &str = "tic80";
+
+/// An emulated system the firmware has an emulator for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct System {
+    /// dash's id, e.g. `gba`.
+    pub id: String,
+    /// The firmware's name for the system.
+    pub(crate) name: String,
+    /// The firmware's default launcher for it.
+    pub(crate) launcher: String,
+    /// The core file the launcher loads.
+    pub(crate) core: String,
+    /// The system's display name.
+    pub(crate) label: String,
 }
 
-/// The LÖVE games this device runs, in the words of a game's scanned
-/// platforms: `love:11.0` up to its own version, and the next major one.
-pub fn love_platforms() -> &'static [String] {
-    static PLATFORMS: OnceLock<Vec<String>> = OnceLock::new();
-    PLATFORMS.get_or_init(|| {
-        love()
-            .map(|love| love_platforms_for(&love.version))
-            .unwrap_or_default()
+impl System {
+    /// The system dash's `id` names, if this firmware has one.
+    pub fn for_id(id: &str) -> Option<&'static System> {
+        systems().get(id)
+    }
+
+    /// The system a file is a ROM for, by extension, if it runs here.
+    pub fn for_file(path: &Path) -> Option<&'static System> {
+        System::for_id(id_for_file(path)?)
+    }
+}
+
+/// Every system the firmware resolves, by dash id. Read once.
+pub(super) fn systems() -> &'static HashMap<String, System> {
+    #[cfg(test)]
+    if let Some(fake) = super::fake::firmware() {
+        return fake.systems;
+    }
+    static SYSTEMS: OnceLock<HashMap<String, System>> = OnceLock::new();
+    SYSTEMS.get_or_init(|| firmware().map(|f| f.systems()).unwrap_or_default())
+}
+
+/// The dash id a file's name says it is a ROM for. Only extensions dash
+/// takes on the name alone; `.bin`, `.cue`, `.iso` and `.chd` need a
+/// header and would match too much here.
+pub(super) fn id_for_file(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.ends_with(".p8.png") {
+        return Some(PICO8);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "nes" => "nes",
+        "sfc" | "smc" => "snes",
+        "gb" => "gb",
+        "gbc" => "gbc",
+        "gba" => "gba",
+        "md" | "gen" => "md",
+        "32x" => "32x",
+        "sms" => "sms",
+        "gg" => "gg",
+        "pce" => "pce",
+        "lnx" => "lynx",
+        "ngp" | "ngc" => "ngp",
+        "a26" => "a26",
+        "d64" | "prg" | "t64" => "c64",
+        "adf" => "amiga",
+        "z64" | "n64" | "v64" => "n64",
+        "p8" => PICO8,
+        "tic" => TIC80,
+        _ => return None,
     })
 }
-
-pub(super) fn love_platforms_for(have: &str) -> Vec<String> {
-    let Some((major, minor)) = parse_version(have) else {
-        return Vec::new();
-    };
-    (0..=minor)
-        .map(|n| format!("love:{major}.{n}"))
-        .chain([format!("love:{}.0", major + 1)])
-        .collect()
-}
-
-pub(super) struct Love {
-    pub(super) binary: PathBuf,
-    pub(super) libs: PathBuf,
-    pub(super) version: String,
-}
-
-/// Routes a game's own SDL2 into the firmware's; see handheld/sdl-dynapi.c.
-/// Deployed next to our binary.
-pub(super) const SDL_SHIM: &str = "libzitch-sdl.so";
-/// Next to the executable: gl4es as the libGL a Linux build asks for.
-pub(super) const GL4ES_DIR: &str = "gl4es";
 
 /// Something in an install folder the firmware can run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
-    /// A file RetroArch plays with the system's core; fantasy console
-    /// carts count.
+    /// A file the firmware's emulator plays with the system's core;
+    /// fantasy console carts count.
     Rom {
         path: PathBuf,
         system: &'static System,
@@ -95,73 +163,6 @@ impl Content {
             Content::Rom { path, .. } | Content::Love { path } => path,
         }
     }
-}
-
-/// Ours, deployed next to the binary by handheld-love, else one the
-/// firmware carries. muOS ships no LÖVE of its own: what is there
-/// belongs to whichever bundled app happens to be written in LÖVE, and
-/// those come and go between releases.
-pub(super) fn love() -> Option<&'static Love> {
-    #[cfg(test)]
-    if let Some(fake) = super::fake::firmware() {
-        return fake.love;
-    }
-    static LOVE: OnceLock<Option<Love>> = OnceLock::new();
-    LOVE.get_or_init(|| {
-        let ours = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.join("love")));
-        let apps = APPLICATION_DIRS
-            .iter()
-            .filter_map(|dir| std::fs::read_dir(dir).ok())
-            .flatten()
-            .filter_map(|entry| entry.ok());
-        ours.into_iter()
-            .chain(apps.flat_map(|app| {
-                let app = app.path();
-                [app.join("love"), app.join(".game/bin/love")]
-            }))
-            .find_map(love_at)
-    })
-    .as_ref()
-}
-
-/// The LÖVE version games run on here, if there is one.
-pub fn love_version() -> Option<&'static str> {
-    love().map(|love| love.version.as_str())
-}
-
-/// The runtime around a `love` binary, if it is one: `liblove` sits in a
-/// sibling directory, named for the architecture on newer builds.
-pub(super) fn love_at(binary: PathBuf) -> Option<Love> {
-    if !binary.is_file() {
-        return None;
-    }
-    let parent = binary.parent()?;
-    ["libs", "libs.aarch64"]
-        .iter()
-        .map(|name| parent.join(name))
-        .find_map(|libs| {
-            let version = liblove_version(&libs)?;
-            Some(Love {
-                binary: binary.clone(),
-                libs,
-                version,
-            })
-        })
-}
-
-/// The version out of `liblove-<version>.so`, which is how the firmware
-/// names it and the only place the runtime says what it is.
-pub(super) fn liblove_version(libs: &Path) -> Option<String> {
-    std::fs::read_dir(libs)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let version = name.strip_prefix("liblove-")?.strip_suffix(".so")?;
-            Some(version.to_string())
-        })
 }
 
 /// Whether the firmware can run a file with this name. Used before an

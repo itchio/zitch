@@ -8,11 +8,17 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use sha2::{Digest, Sha256};
 
 const LATEST_URL: &str = "https://api.github.com/repos/itchio/zitch/releases/latest";
-const ARCHIVE_DIR: &str = "/mnt/mmc/ARCHIVE";
 const ASSET_SUFFIX: &str = "-muos.muxapp";
 const SUMS_NAME: &str = "SHA256SUMS";
 /// Downloads go here instead, which also turns updating on off-device.
 const DIR_OVERRIDE: &str = "ZITCH_SELF_UPDATE_DIR";
+
+/// Where downloads go: the override, else the firmware's archive folder.
+fn archive_dir() -> Option<PathBuf> {
+    std::env::var_os(DIR_OVERRIDE)
+        .map(PathBuf::from)
+        .or_else(|| crate::handheld::firmware()?.update_archive_dir())
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
@@ -58,9 +64,9 @@ impl SelfUpdate {
         }
     }
 
-    /// Only muOS has an archive folder to download into.
+    /// Only a firmware with an archive folder to download into.
     pub fn supported() -> bool {
-        crate::muos::available() || std::env::var_os(DIR_OVERRIDE).is_some()
+        archive_dir().is_some()
     }
 
     pub fn state(&self) -> &State {
@@ -96,7 +102,9 @@ impl SelfUpdate {
         };
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
-            let dir = std::env::var_os(DIR_OVERRIDE).map_or(ARCHIVE_DIR.into(), PathBuf::from);
+            let Some(dir) = archive_dir() else {
+                return;
+            };
             let result = download(&release, &dir, |done| {
                 let _ = tx.send(Msg::Progress(done));
                 ctx.request_repaint();

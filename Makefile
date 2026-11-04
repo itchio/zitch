@@ -1,4 +1,4 @@
-.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs run-sdl shim-check
+.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs spruce-icon spruce-deploy spruce-shot spruce-app run-sdl shim-check
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -36,6 +36,9 @@ help:
 	@echo "make handheld-port    package the same as target/zitch.zip, a PortMaster port"
 	@echo "make handheld-port-install  install the port on the device through harbourmaster over ssh"
 	@echo "make handheld-sdl-procs  refresh handheld/sdl-dynapi-procs.h from SDL2's source"
+	@echo "make spruce-deploy    copy it into the spruceOS App folder over ssh (HANDHELD=<host>)"
+	@echo "make spruce-shot      run it on a spruceOS device from its menu and fetch a screenshot"
+	@echo "make spruce-app       package it as target/zitch-spruce.zip, a spruceOS app folder"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
 	@echo "APP picks the config dir under ~/.config (default $(APP)):"
@@ -222,11 +225,20 @@ handheld-deploy: handheld-host handheld $(HANDHELD_LOVE)/love $(HANDHELD_GL4ES)/
 # exists on Jacaranda too, so ask the launch script which names it uses.
 MUOS_GO = if grep -q /tmp/rom_go /opt/muos/script/mux/launch.sh 2>/dev/null; then APP_GO=/tmp/app_go; ACT_GO=/tmp/act_go; SAFE_QUIT=/tmp/safe_quit; else APP_GO=/run/muos/application; ACT_GO=/run/muos/action; SAFE_QUIT=/run/muos/safe_quit; fi
 
+# What a device screenshot run shares, around a firmware's launch
+# snippet $(1) on the app dir $(2): write the args file, launch, wait for
+# zitch to start (a minute at most, in case the launch never happens) and
+# finish, clear the args file either way, print the log.
+define SHOT_RUN
+cat > $(2)/args; rm -f /tmp/zitch.png; $(1); n=0; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ] && [ $$n -lt 120 ]; do sleep 0.5; n=$$((n+1)); done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(2)/args; cat $(2)/zitch.log
+endef
+
 # Launch through the muOS frontend (which it kills to get the screen, as a
 # menu pick would), wait for the screenshot, fetch it to /tmp/zitch-handheld.png.
 # The frontend spins until safe_quit exists, so the kill must be followed by one.
+MUOS_LAUNCH = $(MUOS_GO); echo $(HANDHELD_APP) > $$APP_GO; echo app > $$ACT_GO; kill -9 $$(pidof muxfrontend); touch $$SAFE_QUIT
 handheld-shot: handheld-deploy
-	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) 'cat > $(HANDHELD_APP)/args; $(MUOS_GO); rm -f /tmp/zitch.png; echo $(HANDHELD_APP) > $$APP_GO; echo app > $$ACT_GO; kill -9 $$(pidof muxfrontend); touch $$SAFE_QUIT; while [ ! -f /tmp/zitch.png ] && [ -z "$$(pidof zitch)" ]; do sleep 0.5; done; while pidof zitch >/dev/null; do sleep 0.5; done; rm -f $(HANDHELD_APP)/args; cat $(HANDHELD_APP)/zitch.log'
+	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) '$(call SHOT_RUN,$(MUOS_LAUNCH),$(HANDHELD_APP))'
 	scp -q $(HANDHELD):/tmp/zitch.png /tmp/zitch-handheld.png
 	@echo /tmp/zitch-handheld.png
 
@@ -292,6 +304,45 @@ PORTMASTER_DIR = /mnt/mmc/MUOS/PortMaster
 handheld-port-install: handheld-host handheld-port
 	scp -q $(PORT) $(HANDHELD):/tmp/zitch.zip
 	ssh $(HANDHELD) 'cd $(PORTMASTER_DIR) && PATH=/opt/python/bin:$$PATH LD_LIBRARY_PATH=/opt/python/lib ./harbourmaster --quiet --no-check install /tmp/zitch.zip; status=$$?; rm -f /tmp/zitch.zip; exit $$status'
+
+# --- spruceOS ----------------------------------------------------------------
+# The same binary: spruce overlays glibc 2.38 and an SDL2 with the same
+# soname on the stock rootfs. A spruce app is a folder under App/ on the
+# card with a manifest, an icon and a launch script (see handheld/README.md).
+SPRUCE_APP = /mnt/SDCARD/App/zitch
+SPRUCE_DIR = handheld/spruce
+# The menu's app icons are 70x70 PNGs in the SPRUCE theme's gold.
+SPRUCE_ICON = target/zitch-spruce-icon.png
+$(SPRUCE_ICON): handheld/glyph.svg
+	sed 's|fill="#000"|fill="#d7b45f"|' $< | rsvg-convert -w 70 -h 70 -o $@
+
+spruce-icon: $(SPRUCE_ICON)
+
+spruce-deploy: handheld-host handheld-stage $(SPRUCE_ICON)
+	ssh $(HANDHELD) 'mkdir -p $(SPRUCE_APP)'
+	scp -q -r $(STAGE)/* $(SPRUCE_DIR)/launch.sh $(SPRUCE_DIR)/config.json $(HANDHELD):$(SPRUCE_APP)/
+	scp -q $(SPRUCE_ICON) $(HANDHELD):$(SPRUCE_APP)/itch.png
+
+# Launch it the way a menu pick does: write the command file and end the
+# menu, which must be up (principal.sh runs the file and restarts the menu
+# after); fetch the screenshot to /tmp/zitch-spruce.png.
+SPRUCE_LAUNCH = pid=$$(pidof MainUI) || { echo "the spruce menu is not running"; exit 1; }; echo "cd $(SPRUCE_APP); ./launch.sh" > /tmp/cmd_to_run.sh; chmod +x /tmp/cmd_to_run.sh; kill $$pid
+spruce-shot: spruce-deploy
+	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) '$(call SHOT_RUN,$(SPRUCE_LAUNCH),$(SPRUCE_APP))'
+	scp -q $(HANDHELD):/tmp/zitch.png /tmp/zitch-spruce.png
+	@echo /tmp/zitch-spruce.png
+
+# The app folder as a zip to unpack into App/ on the card.
+SPRUCE_ZIP = target/zitch-spruce.zip
+spruce-app: handheld-stage $(SPRUCE_ICON)
+	rm -rf target/spruce-app $(SPRUCE_ZIP)
+	mkdir -p target/spruce-app
+	cp -r $(STAGE) target/spruce-app/zitch
+	cp $(SPRUCE_DIR)/launch.sh $(SPRUCE_DIR)/config.json target/spruce-app/zitch/
+	cp $(SPRUCE_ICON) target/spruce-app/zitch/itch.png
+	chmod +x target/spruce-app/zitch/launch.sh
+	cd target/spruce-app && zip -rq ../zitch-spruce.zip zitch
+	@ls -lh $(SPRUCE_ZIP) | awk '{print "$(SPRUCE_ZIP): " $$5}'
 
 # SDL2's jump table order on Linux, which the shim checks a game's stubs
 # against and uses to name the slots that have none.

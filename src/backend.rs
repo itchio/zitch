@@ -56,8 +56,8 @@ pub struct Config {
     pub install_dir: PathBuf,
     /// Where butler keeps prerequisite installers (DirectX, .NET, ...).
     pub prereqs_dir: PathBuf,
-    /// Variables for the games butler launches, on top of our own. On
-    /// muOS this is what routes their SDL to the screen (`muos::game_env`).
+    /// Variables for the games butler launches, on top of our own. On a
+    /// handheld this is what routes their SDL to the screen (`handheld::game_env`).
     pub game_env: Vec<(String, OsString)>,
     /// Start butler with `--low-power`. Only for a butler we ship, since
     /// one older than the flag refuses to start with it.
@@ -675,7 +675,7 @@ impl Session<'_> {
             Command::QuitGame { cave_id } => {
                 self.launches.quit(&cave_id);
                 // A payload the firmware runs is our own child, not butler's.
-                crate::muos::stop();
+                crate::handheld::stop();
             }
             Command::CollectionsWanted(ids) => {
                 *self
@@ -832,7 +832,7 @@ impl Session<'_> {
             });
             return;
         }
-        crate::muos::begin();
+        crate::handheld::begin();
         self.launches.begin(&cave_id);
         let config = Arc::clone(self.config);
         let prompts = self.prompts.clone();
@@ -852,7 +852,7 @@ impl Session<'_> {
                 // Every way out undoes what starting did.
                 let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
                     launches.forget(&cave_id);
-                    crate::muos::foreground_back();
+                    crate::handheld::game_ended();
                     emit.send(Event::LaunchFinished {
                         cave_id: cave_id.clone(),
                         outcome,
@@ -1295,7 +1295,7 @@ const LAUNCH_LOG_TAIL: usize = 40;
 
 /// What Play does once butler has said what the install holds.
 enum Plan {
-    /// Let butler launch it. On muOS a payload the firmware runs is named
+    /// Let butler launch it. On a handheld a payload the firmware runs is named
     /// by path, and comes back to us as a `RuntimeLaunch` request.
     Launch {
         target: Option<String>,
@@ -1305,7 +1305,7 @@ enum Plan {
     Cancelled,
 }
 
-/// On muOS, which of the install's contents to launch: a Linux build
+/// On a handheld, which of the install's contents to launch: a Linux build
 /// that can reach the screen, which butler launches through the SDL
 /// shim, or a ROM, cart or `.love` the firmware runs. The user picks
 /// when there are several. When nothing can run, the first reason why is
@@ -1316,7 +1316,7 @@ fn plan_launch(
     cave_id: &str,
     emit: &Emitter,
 ) -> Result<Plan, LaunchFailure> {
-    if !crate::muos::available() {
+    if !crate::handheld::available() {
         return Ok(Plan::Launch {
             target: None,
             name: String::new(),
@@ -1343,15 +1343,15 @@ fn plan_launch(
         client
             .call(LaunchGetTargetsParams {
                 cave_id: cave_id.to_string(),
-                runtimes: Some(crate::muos::runtimes()),
+                runtimes: Some(crate::handheld::runtimes()),
                 deep_probe: Some(true),
-                unpacked_app_images: Some(crate::muos::available()),
+                unpacked_app_images: Some(crate::handheld::available()),
             })
             .map(|r| r.targets)
             .map_err(|error| launch_failure(&error))
     };
     let mut targets = get_targets()?;
-    let appimages = crate::muos::appimages(&targets);
+    let appimages = crate::handheld::appimages(&targets);
     if !appimages.is_empty() {
         for appimage in &appimages {
             let file = appimage
@@ -1360,13 +1360,13 @@ fn plan_launch(
                 .unwrap_or_default();
             emit.status(format!("Unpacking {file}"));
             log::info!("unpacking {}", appimage.display());
-            crate::muos::unpack(appimage).map_err(|error| failure(format!("{error:#}")))?;
+            crate::handheld::unpack(appimage).map_err(|error| failure(format!("{error:#}")))?;
         }
         // The unpacked tree is new content for butler to find.
         targets = get_targets()?;
     }
 
-    let (mut choices, unrunnable) = crate::muos::launch_choices(&targets);
+    let (mut choices, unrunnable) = crate::handheld::launch_choices(&targets);
     if choices.is_empty() {
         return match unrunnable.into_iter().next() {
             Some(reason) => Err(failure(reason)),
@@ -1493,7 +1493,7 @@ impl LaunchCall<'_> {
         } = *self;
         std::fs::create_dir_all(&config.prereqs_dir)
             .with_context(|| format!("creating {}", config.prereqs_dir.display()))?;
-        let muos = crate::muos::available();
+        let handheld = crate::handheld::available();
         let params = LaunchParams {
             cave_id: cave_id.to_string(),
             prereqs_dir: Some(config.prereqs_dir.to_string_lossy().into_owned()),
@@ -1501,9 +1501,10 @@ impl LaunchCall<'_> {
             target: target.map(str::to_string),
             // The firmware's payloads come back to us to run; nothing else
             // but a Linux build has a way onto its screen.
-            runtimes: muos.then(crate::muos::runtimes),
-            unpacked_app_images: Some(muos),
-            allowed_strategies: muos.then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
+            runtimes: handheld.then(crate::handheld::runtimes),
+            unpacked_app_images: Some(handheld),
+            allowed_strategies: handheld
+                .then(|| vec![LaunchStrategy::Native, LaunchStrategy::Runtime]),
             ..Default::default()
         };
         client.call_streaming(params, |incoming| match incoming {
@@ -1514,7 +1515,7 @@ impl LaunchCall<'_> {
                         // Only a game butler runs itself has a pid.
                         if let Some(pid) = n.pid.and_then(|pid| u32::try_from(pid).ok()) {
                             run.borrow_mut().strategy = Some(Strategy::Native);
-                            crate::muos::foreground(pid);
+                            crate::handheld::game_started(pid);
                         }
                         emit.send(Event::LaunchRunning);
                     }
@@ -1578,7 +1579,7 @@ impl LaunchCall<'_> {
                     .as_ref()
                     .context("runtime launch names no payload")?;
                 let content =
-                    crate::muos::content_for(candidate, PathBuf::from(&p.full_target_path))
+                    crate::handheld::content_for(candidate, PathBuf::from(&p.full_target_path))
                         .map_err(anyhow::Error::msg)?;
                 // butler's LaunchRunning came just before this, so the
                 // interface is hiding; the emulator's first frame is later
@@ -1586,7 +1587,7 @@ impl LaunchCall<'_> {
                 let args = p.args.as_deref().unwrap_or(&[]);
                 let env = p.env.clone().unwrap_or_default();
                 let mut seen = Run::default();
-                let launched = crate::muos::launch(name, &content, args, &env, &mut seen);
+                let launched = crate::handheld::launch(name, &content, args, &env, &mut seen);
                 *run.borrow_mut() = seen;
                 match launched {
                     Ok(()) => client.reply(id, RuntimeLaunchResult {}),
@@ -2008,18 +2009,18 @@ fn queue_install(
 ) -> Result<Queued> {
     let location = install_location(client, config)?;
     // butler's compatibility filter goes by platform tags, which a ROM
-    // does not carry; on muOS every upload is fetched and judged here.
-    let muos = crate::muos::available();
+    // does not carry; on a handheld every upload is fetched and judged here.
+    let handheld = crate::handheld::available();
     let uploads = client
         .call(FetchGameUploadsParams {
             game_id: game.id,
-            compatible: !muos,
+            compatible: !handheld,
             fresh: Some(true),
         })?
         .uploads;
-    // The scan and the filename rules can both be wrong, so on muOS the
+    // The scan and the filename rules can both be wrong, so on a handheld the
     // uploads they turn down stay one choice away rather than dropped.
-    let (mut uploads, likely) = if muos {
+    let (mut uploads, likely) = if handheld {
         let decide = scans_decide(&uploads);
         let (mut likely, rest): (Vec<_>, Vec<_>) = uploads
             .into_iter()
@@ -2053,9 +2054,10 @@ fn queue_install(
     }
     let upload = uploads.swap_remove(index);
     // butler knows a few ROM extensions and sniffs the rest as "unknown",
-    // for which it has no installer. A ROM is a file to copy, so on muOS
+    // for which it has no installer. A ROM is a file to copy, so on a handheld
     // an upload that is not an archive is installed as one.
-    let ignore_installers = muos && crate::muos::runs_here(std::path::Path::new(&upload.filename));
+    let ignore_installers =
+        handheld && crate::handheld::runs_here(std::path::Path::new(&upload.filename));
     let queued = client.call(InstallQueueParams {
         game: Some(game.clone()),
         upload: Some(upload),

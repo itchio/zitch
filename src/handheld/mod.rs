@@ -1,26 +1,103 @@
-//! Games on muOS. The handheld firmware ships RetroArch with a core for
-//! each system it knows (PICO-8 and TIC-80 carts among them), and we
-//! ship a LÖVE runtime; most games there are a ROM, a cart or a `.love`.
+//! Games on handheld firmwares. A firmware ships emulators for the
+//! systems it knows (PICO-8 and TIC-80 carts among them), and we ship a
+//! LÖVE runtime; most games there are a ROM, a cart or a `.love`.
 //! butler's launch targets say which an install holds ([`content_for`]),
 //! and this module runs them the way the firmware's own menu does: a ROM
-//! or cart through its launch script and RetroArch, a `.love` through
-//! the LÖVE binary. A Linux build is butler's to launch,
-//! through the SDL shim; [`native_blocker`] says beforehand when one
-//! cannot reach the screen.
+//! or cart through the firmware's launcher, a `.love` through the LÖVE
+//! binary. A Linux build is butler's to launch, through the SDL shim;
+//! [`native_blocker`] says beforehand when one cannot reach the screen.
 //!
-//! Nothing here is compiled out on other systems; [`available`] is a
-//! runtime check for the firmware's script, so the desktop build simply
-//! never takes these paths.
+//! What every firmware shares is here; what differs is behind
+//! [`Firmware`], one implementation per firmware in its own module.
+//! Nothing is compiled out on other systems; [`available`] is a runtime
+//! check, so the desktop build simply never takes these paths.
 
 mod appimage;
-mod compat;
-mod firmware;
+mod content;
+mod love;
+mod muos;
 mod running;
+mod spruce;
+
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use anyhow::{Result, bail};
 
 pub use appimage::*;
-pub use compat::*;
-pub use firmware::*;
+pub use content::*;
+pub use love::*;
 pub use running::*;
+
+/// What a firmware does differently. The defaults are a firmware with
+/// nothing of its own, on which games are our LÖVE and Linux builds.
+pub trait Firmware: Sync {
+    /// Its name in device info, e.g. `muos`.
+    fn name(&self) -> &'static str;
+
+    /// More for device info: the board, a release.
+    fn details(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+
+    /// The systems it has emulators for, by dash id.
+    fn systems(&self) -> HashMap<String, System> {
+        HashMap::new()
+    }
+
+    /// Runs `rom` in its emulator for `system` and returns when that
+    /// exits. `name` is what the firmware shows for the game; `env` is
+    /// the manifest action's. Only reached for a system [`systems`]
+    /// listed.
+    fn launch_rom(
+        &self,
+        _name: &str,
+        system: &System,
+        _rom: &Path,
+        _env: &HashMap<String, String>,
+    ) -> Result<()> {
+        bail!("{} has no launcher for {}", self.name(), system.label)
+    }
+
+    /// LÖVE binaries it carries, tried after ours.
+    fn love_candidates(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    /// Whether a directory inherited on `LD_LIBRARY_PATH` from its
+    /// launcher is safe for games.
+    fn keeps_library_dir(&self, _dir: &Path) -> bool {
+        true
+    }
+
+    /// What it adds to a game's environment.
+    fn game_env(&self, _env: &mut Vec<(String, OsString)>) {}
+
+    /// A game has the screen, with this pid.
+    fn game_started(&self, _pid: u32) {}
+
+    /// The screen is zitch's again.
+    fn game_ended(&self) {}
+
+    /// Where a downloaded release package goes for its installer.
+    fn update_archive_dir(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The firmware this is running on, if any. Each is detected by
+/// something only it has at run time.
+pub fn firmware() -> Option<&'static dyn Firmware> {
+    static FIRMWARE: OnceLock<Option<&'static dyn Firmware>> = OnceLock::new();
+    *FIRMWARE.get_or_init(|| muos::detect().or_else(spruce::detect))
+}
+
+/// Whether this is a handheld firmware zitch knows.
+pub fn available() -> bool {
+    firmware().is_some()
+}
 
 /// A stand-in firmware for tests: what the device has, set per thread so
 /// a test decides instead of the machine it runs on.
@@ -76,7 +153,7 @@ mod tests {
     fn system(id: &str) -> System {
         System {
             id: id.to_string(),
-            assign: id.to_uppercase(),
+            name: id.to_uppercase(),
             launcher: format!("mu-{id}"),
             core: format!("{id}_libretro.so"),
             label: id.to_uppercase(),
@@ -89,178 +166,6 @@ mod tests {
             libs: PathBuf::from("/app/libs"),
             version: "11.5".to_string(),
         }
-    }
-
-    const ASSIGN_JSON: &str = r#"{ "nes": "Nintendo NES - Famicom", "gba": "Nintendo Game Boy Advance",
-  "md": "Sega Mega Drive - Genesis", "a2600": "Atari 2600", "pico8": "PICO-8", "n64": "Nintendo N64" }"#;
-
-    const NES_GLOBAL: &str = "[global]\nname=Nintendo NES - Famicom\ndefault=mu-fceumm\n\
-catalogue=Nintendo NES - Famicom\nlookup=0\n\n[friendly]\nNintendo NES - Famicom\nNES\nFamicom\n";
-
-    const NES_LAUNCHER: &str = "[mu-fceumm]\nname=mu-FCEUmm\ncore=fceumm_libretro.so\n\n\
-[launch]\nprep=\nexec=/opt/muos/script/launch/mu-general.sh\ndone=\n";
-
-    fn fixture() -> HashMap<&'static str, &'static str> {
-        HashMap::from([
-            ("Nintendo NES - Famicom/global.ini", NES_GLOBAL),
-            ("Nintendo NES - Famicom/mu-fceumm.ini", NES_LAUNCHER),
-            (
-                "Atari 2600/global.ini",
-                "[global]\nname=Atari 2600\ndefault=stella\n",
-            ),
-            (
-                "Atari 2600/stella.ini",
-                "[stella]\nname=Stella\ncore=stella_libretro.so\n",
-            ),
-            (
-                "Nintendo Game Boy Advance/global.ini",
-                "[global]\nname=Nintendo Game Boy Advance\ndefault=mgba\n",
-            ),
-        ])
-    }
-
-    fn lookup(id: &str) -> Option<System> {
-        let files = fixture();
-        resolve(id, &parse_assign(ASSIGN_JSON), |rel| {
-            files.get(rel).map(|s| s.to_string())
-        })
-    }
-
-    #[test]
-    fn assign_json_maps_ids_to_folders() {
-        let aliases = parse_assign(ASSIGN_JSON);
-        assert_eq!(aliases["nes"], "Nintendo NES - Famicom");
-        assert_eq!(aliases["md"], "Sega Mega Drive - Genesis");
-        assert!(!aliases.contains_key("nds"));
-        assert!(parse_assign("not json").is_empty());
-    }
-
-    #[test]
-    fn ini_values_come_from_their_section() {
-        assert_eq!(
-            ini_value(NES_GLOBAL, "global", "default"),
-            Some("mu-fceumm")
-        );
-        assert_eq!(
-            ini_value(NES_GLOBAL, "global", "name"),
-            Some("Nintendo NES - Famicom")
-        );
-        assert_eq!(ini_value(NES_GLOBAL, "friendly", "default"), None);
-        assert_eq!(
-            ini_value(NES_LAUNCHER, "mu-fceumm", "core"),
-            Some("fceumm_libretro.so")
-        );
-        assert_eq!(ini_value(NES_LAUNCHER, "launch", "prep"), Some(""));
-        assert_eq!(ini_value(NES_LAUNCHER, "mu-fceumm", "exec"), None);
-    }
-
-    #[test]
-    fn ids_resolve_through_the_assign_metadata() {
-        assert_eq!(
-            lookup("nes"),
-            Some(System {
-                id: "nes".into(),
-                assign: "Nintendo NES - Famicom".into(),
-                launcher: "mu-fceumm".into(),
-                core: "fceumm_libretro.so".into(),
-                label: "Nintendo NES - Famicom".into(),
-            })
-        );
-        // a26 is a2600 in assign.json.
-        let a26 = lookup("a26").unwrap();
-        assert_eq!(a26.id, "a26");
-        assert_eq!(a26.assign, "Atari 2600");
-        assert_eq!(a26.core, "stella_libretro.so");
-        // Not in assign.json at all.
-        assert_eq!(lookup("nds"), None);
-        // In assign.json, but no folder.
-        assert_eq!(lookup("md"), None);
-        // A folder whose default launcher ini is missing.
-        assert_eq!(lookup("gba"), None);
-    }
-
-    const LIBRETRO_JSON: &str = r#"{
-      "Nintendo Game Boy Advance": {
-        "name": "Nintendo Game Boy Advance",
-        "default": "mgba",
-        "friendly": ["gba"],
-        "bios": [{"file": "gba_bios.bin"}],
-        "cores": {
-          "gpsp": {"name": "gpSP", "core": "gpsp_libretro.so"},
-          "mgba": {"name": "mGBA", "core": "mgba_libretro.so", "governor": "performance"}
-        }
-      },
-      "Nintendo NES - Famicom": {"default": "nestopia", "cores": {}}
-    }"#;
-
-    const EXTERNAL_JSON: &str = r#"{
-      "Nintendo N64": {
-        "default": "mupen64plus - standalone - glide",
-        "cores": {
-          "mupen64plus - standalone - glide": {"core": "ext-mupen64plus-gliden64", "launcher": "mupen64plus.sh"}
-        }
-      }
-    }"#;
-
-    #[test]
-    fn ids_resolve_through_the_manifests() {
-        let aliases = parse_assign(ASSIGN_JSON);
-        let manifests = vec![
-            (
-                "mu-",
-                parse_manifest("libretro.json", LIBRETRO_JSON).unwrap(),
-            ),
-            (
-                "ext-",
-                parse_manifest("external.json", EXTERNAL_JSON).unwrap(),
-            ),
-        ];
-        assert_eq!(
-            resolve_manifest("gba", &aliases, &manifests, None),
-            Some(System {
-                id: "gba".into(),
-                assign: "Nintendo Game Boy Advance".into(),
-                launcher: "mu-mgba".into(),
-                core: "mgba_libretro.so".into(),
-                label: "Nintendo Game Boy Advance".into(),
-            })
-        );
-        // Only in the second manifest.
-        let n64 = resolve_manifest("n64", &aliases, &manifests, None).unwrap();
-        assert_eq!(n64.core, "ext-mupen64plus-gliden64");
-        assert_eq!(n64.launcher, "ext-mupen64plus - standalone - glide");
-        // Not in assign.json at all.
-        assert_eq!(resolve_manifest("nds", &aliases, &manifests, None), None);
-        // In assign.json, in no manifest.
-        assert_eq!(resolve_manifest("md", &aliases, &manifests, None), None);
-        // Listed, but its default core is not.
-        assert_eq!(resolve_manifest("nes", &aliases, &manifests, None), None);
-        assert!(parse_manifest("x.json", "not json").is_none());
-    }
-
-    #[test]
-    fn a_core_for_other_boards_is_left_out() {
-        let aliases = parse_assign(r#"{"3ds": "Nintendo 3DS"}"#);
-        let external = r#"{
-          "Nintendo 3DS": {
-            "default": "azahar - standalone",
-            "cores": {
-              "azahar - standalone": {
-                "core": "ext-azahar",
-                "launcher": "azahar.sh",
-                "require": {"device": ["rg-vita-pro"]}
-              }
-            }
-          }
-        }"#;
-        let manifests = vec![("ext-", parse_manifest("external.json", external).unwrap())];
-        assert_eq!(
-            resolve_manifest("3ds", &aliases, &manifests, Some("rg40xx-h")),
-            None
-        );
-        assert_eq!(resolve_manifest("3ds", &aliases, &manifests, None), None);
-        let vita = resolve_manifest("3ds", &aliases, &manifests, Some("rg-vita-pro")).unwrap();
-        assert_eq!(vita.core, "ext-azahar");
     }
 
     #[test]

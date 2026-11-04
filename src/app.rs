@@ -3179,7 +3179,7 @@ impl App {
                 action: Action::SetCoverMarks(!self.cover_marks),
             },
         }];
-        if crate::muos::available() {
+        if crate::handheld::available() {
             rows.push(ui::SettingRow {
                 group: "Library",
                 label: "Playable types",

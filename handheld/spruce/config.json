@@ -1,0 +1,16 @@
+{
+  "label": "itch.io",
+  "icon": "itch.png",
+  "launch": "launch.sh",
+  "description": "Your itch.io library: install and play your games",
+  "devices": [
+    "TRIMUI_A133P",
+    "TRIMUI_SMART_PRO_S",
+    "MIYOO_FLIP",
+    "GKD_PIXEL2",
+    "ANBERNIC_RGXX",
+    "DARKMOSS",
+    "MAGICX_A133P"
+  ],
+  "hideInSimpleMode": false
+}

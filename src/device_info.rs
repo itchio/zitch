@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value, json};
 
-use crate::muos;
+use crate::handheld;
 
 /// The screen the interface last drew to, width in the high word, height
 /// in the low, or 0 before the first frame. Set by the interface thread,
@@ -37,7 +37,7 @@ pub fn gather() -> String {
 pub fn for_report() -> String {
     let mut info = fields();
     info.insert("zitch".into(), json!(env!("ZITCH_VERSION")));
-    if let Some(love) = muos::love_version() {
+    if let Some(love) = handheld::love_version() {
         info.insert("love".into(), json!(love));
     }
     Value::Object(info).to_string()
@@ -45,19 +45,18 @@ pub fn for_report() -> String {
 
 fn fields() -> Map<String, Value> {
     let mut info = Map::new();
-    let on_muos = muos::available();
+    let firmware = handheld::firmware();
     info.insert(
         "platform".into(),
-        json!(if on_muos { "muos" } else { "desktop" }),
+        json!(firmware.map_or("desktop", |f| f.name())),
     );
     info.insert("os".into(), json!(std::env::consts::OS));
     info.insert("arch".into(), json!(std::env::consts::ARCH));
-    if on_muos {
-        if let Some(board) = muos::board() {
-            info.insert("board".into(), json!(board));
+    if let Some(firmware) = firmware {
+        for (key, value) in firmware.details() {
+            info.insert(key.into(), json!(value));
         }
-        info.insert("release".into(), json!(muos::release().name()));
-        let (major, minor) = muos::glibc_version();
+        let (major, minor) = handheld::glibc_version();
         info.insert("glibc".into(), json!(format!("{major}.{minor}")));
     }
     if let Some(resolution) = resolution() {
@@ -84,7 +83,7 @@ mod tests {
         assert_eq!(info["os"], std::env::consts::OS);
         assert_eq!(info["arch"], std::env::consts::ARCH);
         assert_eq!(info["resolution"], "640x480");
-        // Off-device the muOS fields stay out rather than default.
+        // Off-device the firmware fields stay out rather than default.
         if info["platform"] == "desktop" {
             assert!(info.get("board").is_none());
             assert!(info.get("release").is_none());

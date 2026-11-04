@@ -27,11 +27,15 @@ console emulation, and a framework for installing "apps" into the device
 (muxapp). We hope to support many more custom firmwares. If you have on in mind
 please open an issue here requesting it so we can gauge interest.
 
+[spruceOS](https://github.com/spruceUI/spruceOS) is the second firmware:
+zitch installs there as a spruce app (`handheld/spruce/`) and runs LÖVE
+games and Linux builds.
+
 Testing is being done of the following handhelds:
 
 * Anbernic RG35XX H
 * Anbernic RG40XX H
-* TrimUI Brick Pro
+* TrimUI Brick Pro (muOS and spruceOS)
 
 See [handheld/README.md](handheld/README.md) for building, deploying and
 testing on devices.

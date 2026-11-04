@@ -6,6 +6,7 @@ mod butlerd;
 mod device_info;
 mod gamepad;
 mod glyphs;
+mod handheld;
 #[cfg(feature = "sdl-host")]
 mod host_sdl;
 mod http;
@@ -13,7 +14,6 @@ mod images;
 mod intro;
 mod json_file;
 mod model;
-mod muos;
 mod page_info;
 mod playable;
 mod qr;
@@ -192,9 +192,9 @@ fn main() -> anyhow::Result<()> {
         // Same layout as the itch app, so a shared config dir shares games.
         install_dir: config_dir.join("apps"),
         prereqs_dir: config_dir.join("prereqs"),
-        game_env: muos::game_env(),
+        game_env: handheld::game_env(),
         // The muxapp bundles its own butler; elsewhere it is the itch app's.
-        low_power: muos::available(),
+        low_power: handheld::available(),
         simulate_offline: cli.offline,
     };
 

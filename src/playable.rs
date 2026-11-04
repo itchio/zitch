@@ -1,17 +1,17 @@
 //! What runs on this device: which games and uploads the "Playable here"
 //! filter keeps, the types it can leave out, and how a game's platforms
-//! read on the page. On muOS the firmware's emulators and our LÖVE
+//! read on the page. On a handheld the firmware's emulators and our LÖVE
 //! decide; elsewhere the uploads' platform tags do.
 
 use crate::butlerd::types::{CollectionGamesFilters, Game, Platforms, Upload};
 use crate::model::human_size;
 
-/// Whether the game has an upload for this operating system. On muOS the
+/// Whether the game has an upload for this operating system. On a handheld the
 /// platform tags say nothing (a ROM is tagged for nothing, or for whatever
 /// the page's web player runs on), so every game is worth trying and the
 /// install decides once it sees the files.
 pub fn playable_here(game: &Game) -> bool {
-    crate::muos::available() || runs_here(&game.platforms)
+    crate::handheld::available() || runs_here(&game.platforms)
 }
 
 /// Whether itch.io's scan of the game's uploads found something this
@@ -19,13 +19,13 @@ pub fn playable_here(game: &Game) -> bool {
 /// filter. Not every upload gets scanned, so a miss here is a reason to
 /// hide, not to refuse an install.
 pub fn known_playable_here(game: &Game, hidden: &[String]) -> bool {
-    if crate::muos::available() {
+    if crate::handheld::available() {
         game.scanned_platforms.as_deref().is_some_and(|scanned| {
             any_runs_here(
                 scanned,
                 device_platforms(),
                 hidden,
-                crate::muos::love_platforms(),
+                crate::handheld::love_platforms(),
             )
         })
     } else {
@@ -56,11 +56,11 @@ impl CollectionFilter {
             ..Default::default()
         };
         if self.playable {
-            if crate::muos::available() {
+            if crate::handheld::available() {
                 filters.scanned_platforms = Some(wanted_platforms(
                     device_platforms(),
                     &self.hidden,
-                    crate::muos::love_platforms(),
+                    crate::handheld::love_platforms(),
                 ));
             } else {
                 filters.platform = Some(os_platform().to_string());
@@ -75,7 +75,7 @@ impl CollectionFilter {
 pub fn device_platforms() -> &'static [String] {
     static PLATFORMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     PLATFORMS.get_or_init(|| {
-        let mut platforms = crate::muos::runtimes();
+        let mut platforms = crate::handheld::runtimes();
         platforms.push("linux-arm64-handheld".to_string());
         platforms
     })
@@ -176,13 +176,13 @@ fn any_runs_here(
     scanned.iter().any(|p| wanted.contains(p))
 }
 
-/// Whether an upload is built for this device: on muOS something the
+/// Whether an upload is built for this device: on a handheld something the
 /// firmware or the SDL shim can run, going by itch.io's scan of its files
 /// when it has one and its name otherwise; elsewhere an upload tagged for
 /// the OS. With `scans_decide`, an unscanned upload
 /// does not count.
 pub fn upload_runs_here(upload: &Upload, scans_decide: bool) -> bool {
-    if crate::muos::available() {
+    if crate::handheld::available() {
         if let Some(runs) = scan_runs_here(upload) {
             return runs;
         }
@@ -196,16 +196,16 @@ pub fn upload_runs_here(upload: &Upload, scans_decide: bool) -> bool {
         // is.
         let foreign = (upload.platforms.windows.is_some() || upload.platforms.osx.is_some())
             && upload.platforms.linux.is_none();
-        crate::muos::runs_here(path) || (is_archive(path) && !foreign)
+        crate::handheld::runs_here(path) || (is_archive(path) && !foreign)
     } else {
         runs_here(&upload.platforms)
     }
 }
 
 /// Whether itch.io's scans alone decide which of a game's uploads run
-/// here, leaving out the unscanned ones: on muOS, once any is scanned.
+/// here, leaving out the unscanned ones: on a handheld, once any is scanned.
 pub fn scans_decide<'a>(uploads: impl IntoIterator<Item = &'a Upload>) -> bool {
-    crate::muos::available() && uploads.into_iter().any(|u| u.launch_targets.is_some())
+    crate::handheld::available() && uploads.into_iter().any(|u| u.launch_targets.is_some())
 }
 
 /// What itch.io's scan of the upload's files says about this device, or
@@ -213,7 +213,8 @@ pub fn scans_decide<'a>(uploads: impl IntoIterator<Item = &'a Upload>) -> bool {
 fn scan_runs_here(upload: &Upload) -> Option<bool> {
     let targets = upload.launch_targets.as_ref()?.as_array()?;
     Some(targets.iter().any(|t| {
-        serde::Deserialize::deserialize(t).is_ok_and(|t| crate::muos::scanned_target_runs_here(&t))
+        serde::Deserialize::deserialize(t)
+            .is_ok_and(|t| crate::handheld::scanned_target_runs_here(&t))
     }))
 }
 
@@ -231,13 +232,13 @@ pub struct UploadDetail {
 
 pub fn upload_detail(upload: &Upload, scans_decide: bool) -> UploadDetail {
     use serde::Deserialize;
-    let muos = crate::muos::available();
+    let handheld = crate::handheld::available();
     let mut detail = UploadDetail::default();
     let scanned = upload.launch_targets.as_ref().and_then(|t| t.as_array());
     match scanned {
         Some(targets) => {
             for target in targets {
-                let Ok(target) = crate::muos::ScannedTarget::deserialize(target) else {
+                let Ok(target) = crate::handheld::ScannedTarget::deserialize(target) else {
                     continue;
                 };
                 let Some((word, here)) = scanned_target_word(&target) else {
@@ -253,15 +254,16 @@ pub fn upload_detail(upload: &Upload, scans_decide: bool) -> UploadDetail {
             }
         }
         None => {
-            let by_name = muos && crate::muos::runs_here(std::path::Path::new(&upload.filename));
+            let by_name =
+                handheld && crate::handheld::runs_here(std::path::Path::new(&upload.filename));
             detail.platforms = platform_words(&upload.platforms)
                 .into_iter()
                 .map(|word| {
-                    let here = !muos && runs_here(&upload.platforms) && word == os_word();
+                    let here = !handheld && runs_here(&upload.platforms) && word == os_word();
                     (word.to_string(), here)
                 })
                 .collect();
-            if muos {
+            if handheld {
                 detail.notes.push(if by_name {
                     "not scanned, file name looks playable".to_string()
                 } else if scans_decide || !upload_runs_here(upload, false) {
@@ -315,7 +317,7 @@ fn os_word() -> &'static str {
 
 /// A scanned launch target in words, with whether it runs here. Native
 /// builds name their architecture, since that decides it on a handheld.
-fn scanned_target_word(target: &crate::muos::ScannedTarget) -> Option<(String, bool)> {
+fn scanned_target_word(target: &crate::handheld::ScannedTarget) -> Option<(String, bool)> {
     use crate::butlerd::types::{Arch, Flavor};
     let arch = target
         .linux_info
@@ -329,8 +331,8 @@ fn scanned_target_word(target: &crate::muos::ScannedTarget) -> Option<(String, b
         _ => ("", ""),
     };
     let here = |platform: &str| {
-        if crate::muos::available() {
-            crate::muos::scanned_target_runs_here(target)
+        if crate::handheld::available() {
+            crate::handheld::scanned_target_runs_here(target)
         } else {
             desktop_runs(platform)
         }
@@ -367,7 +369,7 @@ fn scanned_target_word(target: &crate::muos::ScannedTarget) -> Option<(String, b
             scanned_platform_word(id.as_str()?)?
         }
     };
-    let runs = crate::muos::available() && crate::muos::scanned_target_runs_here(target);
+    let runs = crate::handheld::available() && crate::handheld::scanned_target_runs_here(target);
     Some((word, runs))
 }
 
@@ -429,12 +431,12 @@ fn platform_words(p: &Platforms) -> Vec<&'static str> {
 pub fn scanned_platform_words(game: &Game) -> Option<Vec<(String, bool)>> {
     let scanned = game.scanned_platforms.as_deref()?;
     Some(platform_words_here(scanned, |p| {
-        if crate::muos::available() {
+        if crate::handheld::available() {
             any_runs_here(
                 &[p.to_string()],
                 device_platforms(),
                 &[],
-                crate::muos::love_platforms(),
+                crate::handheld::love_platforms(),
             )
         } else {
             desktop_runs(p)

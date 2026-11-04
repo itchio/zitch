@@ -109,8 +109,8 @@ jobs:
           if-no-files-found: error
 
   muos:
-    name: muOS package
-    # muOS is on glibc 2.38 so we need older linux to build it
+    name: handheld packages
+    # muOS and spruce are on glibc 2.38 so we need older linux to build them
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -125,14 +125,14 @@ jobs:
       - name: Build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev zip
+          sudo apt-get install -y libsdl2-dev zip librsvg2-bin
       - name: Version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; else version=${GITHUB_SHA::7}; fi
           echo "ZITCH_VERSION=$version" >> "$GITHUB_ENV"
-      # both bundle butler and LÖVE
-      - run: make handheld-muxapp handheld-port
-      # check the binary will still load on muOS's glibc 2.38
+      # all bundle butler and LÖVE
+      - run: make handheld-muxapp handheld-port spruce-app
+      # check the binary will still load on the firmwares' glibc 2.38
       - name: glibc check
         run: |
           need=$(objdump -T target/aarch64-unknown-linux-gnu/release/zitch | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
@@ -143,9 +143,10 @@ jobs:
           mkdir -p dist
           cp target/zitch.muxapp dist/zitch-$ZITCH_VERSION-muos.muxapp
           cp target/zitch.zip dist/zitch-$ZITCH_VERSION-portmaster.zip
+          cp target/zitch-spruce.zip dist/zitch-$ZITCH_VERSION-spruce.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: zitch-muos
+          name: zitch-handheld
           path: dist/*
           if-no-files-found: error
 
