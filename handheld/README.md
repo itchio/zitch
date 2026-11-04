@@ -380,14 +380,35 @@ make spruce-app                         # package as target/zitch-spruce.zip, to
 In the code, `src/handheld/` holds what every firmware shares and a
 `Firmware` trait for what differs, one module per firmware:
 `muos.rs` (its launch script runs ROMs, the panic combo reads a process
-name, the Archive Manager installs updates) and `spruce.rs`.
+name, the Archive Manager installs updates) and `spruce.rs` (its
+emulator folders list the systems, one script runs ROMs).
 `handheld::firmware()` detects which this is: muOS by its launch script,
 spruce by `CFW=SPRUCE` in the environment (what `appEnv.sh` sets, so
 running zitch over ssh needs that sourced first). A new firmware is a
 new module with a `detect()` and an `impl Firmware`. LÖVE games and Linux
-builds through the SDL shim and gl4es run on both. spruce launches ROMs
-with `spruce/scripts/emu/standard_launch.sh "<rom>"` and the cores named
-in `Emu/<SYSTEM>/config.json`; PICO-8 has its own `Emu/PICO8` runtime.
+builds through the SDL shim and gl4es run on both.
+
+spruce's emulators are folders under `Emu/` on the card (`GB`, `SFC`,
+`PS`, ...), each with a `config.json` naming the cores it offers and
+the default; `spruce.rs` maps dash's ids to those folders and reads the
+label and the chosen core from each that exists. Every folder names the
+same launcher, `spruce/scripts/emu/standard_launch.sh`, which takes the
+ROM path as its argument and the system from the `Emu/<NAME>/` in its
+own path, so zitch runs it as `Emu/<NAME>/../../spruce/scripts/emu/
+standard_launch.sh "<rom>"`, as the menu does, with HOME set to
+`/mnt/SDCARD` as spruce's launches have it. The ROM stays in zitch's
+install folder. The script picks the user's core, sets the governor,
+runs RetroArch (or the standalone emulator) with spruce's config and
+pad map, and returns when it exits. zitch's own pad map stays out of
+the emulator's environment. The core it reports is the one the script
+will pick: the board's own `Emulator_<PLATFORM>` choice, then the
+`Emulator*` option whose device list names this device (the names come
+through `SPRUCE_DEVICE_NAMES`, which `launch.sh` exports), then
+`Emulator_64`, then `Emulator`, then the folder's default. PICO-8 carts
+go to `Emu/PICO8` when the user has put the official `pico8_64` and
+`pico8.dat` in `BIOS/`, else to the Fake-08 core in `Emu/FAKE08`.
+Quitting a ROM from zitch ends the emulator and leaves the launch
+script to its housekeeping, on both firmwares.
 
 Device notes, Brick Pro: kernel 4.9, PowerVR GE8300 with GLES through
 `/usr/lib/libEGL.so` and `/dev/dri` present, 1024x768 32bpp `/dev/fb0`

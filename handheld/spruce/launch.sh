@@ -10,6 +10,10 @@ exec >"$APP_DIR/zitch.log" 2>&1
 
 . /mnt/SDCARD/spruce/scripts/appEnv.sh
 
+# The names the emulator configs list devices by, e.g. TRIMUI_BRICK_PRO.
+SPRUCE_DEVICE_NAMES="$(device_names | tr '\n' ' ')"
+export SPRUCE_DEVICE_NAMES
+
 # Config (butler database, installed games) and the cover cache live next
 # to the binary on the SD card.
 HOME="$APP_DIR/home"

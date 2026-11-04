@@ -358,7 +358,7 @@ fn launch_rom(
         .env_remove("XDG_CACHE_HOME")
         .env_remove("XDG_DATA_HOME")
         .envs(env);
-    let status = spawn_group(&mut command)
+    let status = spawn_launcher(&mut command)
         .with_context(|| format!("running {LAUNCH_SCRIPT}"))?
         .wait()
         .with_context(|| format!("waiting for {LAUNCH_SCRIPT}"))?;

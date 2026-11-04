@@ -18,7 +18,15 @@ use super::*;
 /// The process group of the content running now, so [`stop`] can end
 /// it: the emulator is a grandchild behind the launch script, so a
 /// group is the only handle on it. One game runs at a time.
-pub(super) static RUNNING: Mutex<Option<u32>> = Mutex::new(None);
+pub(super) static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+pub(super) struct Running {
+    group: u32,
+    /// The group leader is a firmware launch script with housekeeping
+    /// after the emulator, so a stop spares it.
+    launcher: bool,
+}
 /// Set by [`stop`], cleared by [`begin`]. A stop can land while butler
 /// is still deciding what to run, before there is a group to signal;
 /// the spawn that follows checks it and ends the child at once.
@@ -94,29 +102,70 @@ pub fn game_ended() {
 /// Ends whatever [`launch`] is running, or is about to.
 pub fn stop() {
     STOPPED.store(true, Ordering::SeqCst);
-    let group = *RUNNING.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(group) = group {
-        end_group(group);
+    let running = *RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+    match running {
+        Some(Running {
+            group,
+            launcher: true,
+        }) => end_group_but_leader(group),
+        Some(Running { group, .. }) => end_group(group),
+        None => {}
     }
 }
 
-pub(super) fn end_group(group: u32) {
-    log::info!("stopping process group {group}");
-    match Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{group}"))
-        .status()
-    {
+fn kill_term(targets: impl IntoIterator<Item = String>) {
+    match Command::new("kill").arg("-TERM").args(targets).status() {
         Ok(status) if status.success() => {}
         Ok(status) => log::warn!("kill exited with {status}"),
         Err(error) => log::warn!("running kill: {error}"),
     }
 }
 
+pub(super) fn end_group(group: u32) {
+    log::info!("stopping process group {group}");
+    kill_term([format!("-{group}")]);
+}
+
+/// Ends the group's processes but its leader, which goes on to its own
+/// end once the others are gone. The members come from /proc.
+fn end_group_but_leader(group: u32) {
+    log::info!("stopping process group {group} but its leader");
+    let members: Vec<String> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| *pid != group)
+        .filter(|pid| process_group(*pid) == Some(group))
+        .map(|pid| pid.to_string())
+        .collect();
+    if !members.is_empty() {
+        kill_term(members);
+    }
+}
+
+/// A process's group, from the field after the parenthesised name in
+/// its stat line.
+fn process_group(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    after_name.split_whitespace().nth(2)?.parse().ok()
+}
+
 /// Puts the child in a process group of its own and remembers it for
 /// [`stop`]. Nothing here runs anywhere but Linux; the gate keeps the
 /// other builds compiling.
 pub(super) fn spawn_group(command: &mut Command) -> std::io::Result<std::process::Child> {
+    spawn(command, false)
+}
+
+/// [`spawn_group`] for a firmware launch script, which a stop spares so
+/// it can tidy up after the emulator it ran.
+pub(super) fn spawn_launcher(command: &mut Command) -> std::io::Result<std::process::Child> {
+    spawn(command, true)
+}
+
+fn spawn(command: &mut Command, launcher: bool) -> std::io::Result<std::process::Child> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -125,7 +174,12 @@ pub(super) fn spawn_group(command: &mut Command) -> std::io::Result<std::process
     let child = command.spawn()?;
     {
         let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
-        *running = Some(child.id());
+        *running = Some(Running {
+            group: child.id(),
+            launcher,
+        });
+        // A stop that came first: the script has not started anything
+        // yet, so it goes too.
         if STOPPED.load(Ordering::SeqCst) {
             end_group(child.id());
         }
@@ -199,4 +253,44 @@ pub fn game_env() -> Vec<(String, OsString)> {
         env.push(("LANG".to_string(), "en_US.UTF-8".into()));
     }
     env
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A launcher stand-in: a shell that runs a long child and then a
+    /// line of its own. Sparing it means the line still runs.
+    #[test]
+    fn stop_spares_the_launcher() {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait $!; echo tidy"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        let group = child.id();
+        // Give the shell time to fork the sleep.
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(5)
+            && !std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .is_some_and(|pid| pid != group && process_group(pid) == Some(group))
+            })
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        end_group_but_leader(group);
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tidy");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn own_process_group_reads() {
+        assert!(process_group(std::process::id()).is_some());
+    }
 }
