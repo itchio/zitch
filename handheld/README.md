@@ -426,3 +426,67 @@ Device notes, Brick Pro: kernel 4.9, PowerVR GE8300 with GLES through
 `trimui_inputd`, PortMaster preinstalled under
 `/mnt/SDCARD/Persistent/portmaster` with ports in `/mnt/SDCARD/Roms/ports`.
 `/usr/trimui/bin/fbscreencap` dumps the panel.
+
+## BananaOS
+
+Tested on the RG DS Plus (RK3566, Mesa Panfrost GLES, two 1024x768
+panels: the top is `DSI-2`, the bottom `DSI-1` with the touchscreen).
+[BananaOS](https://github.com/JorreFog/BananaLinux) is a Buildroot system
+with glibc 2.41 and SDL2 2.32 (KMSDRM, no X11 or Wayland), both newer than
+the muOS sysroot, so the muOS binary runs as is. Its root filesystem is a
+read-only squashfs; everything writable is under `/data`, an exFAT
+partition (no permissions, but binaries run from it).
+
+zitch is a Ports entry, not a PortMaster port: every `.sh` in
+`/data/roms/ports` is listed under the menu's Ports tile and run by
+`/usr/libexec/banana/run-port`, which gives it the top panel
+(`SDL_KMSDRM_FIRST`), turns the bottom one's backlight off, sets
+`HOME=/data/home`, and takes the panels back when the script exits.
+`handheld/bananaos/itch.io.sh` is ours; the app folder sits beside it as
+`roms/ports/zitch` (it holds no `.sh`, so the menu doesn't list it). The
+script keeps config (the login, butler's database, installed games) and
+the cover cache under `/data/home/zitch`, which a redeploy leaves alone,
+reads extra flags from an `args` file, logs to `zitch.log` in the app
+folder, and exports the RG DS pad's map from SDL_GameControllerDB. The
+device tree puts the A label on `BTN_EAST`, so that map already names
+buttons by their labels.
+
+```
+make bananaos-deploy HANDHELD=root@<ip>   # copy the stage, libmodplug and itch.io.sh into roms/ports
+make bananaos-shot HANDHELD=root@<ip>     # deploy, launch from the menu, fetch /tmp/zitch-bananaos.png
+```
+
+Close zitch before a deploy: its binary and butler's can't be replaced
+while they run ("Text file busy"). ssh is dropbear without an
+sftp-server, so the targets use `scp -O`. Writing a path to
+`/run/banana/launch` makes the menu (`banana-ui`) start it as if it was
+picked, which is how `bananaos-shot` launches zitch; the menu's own log is
+`/data/banana/logs/banana-ui.log`.
+
+BananaOS has no LÖVE, so the bundled one is used, and it needs
+`libmodplug.so.1`, which muOS has and BananaOS doesn't. `bananaos-deploy`
+puts Debian's arm64 build (pinned by SHA-256, public domain) in the app's
+`libs/`.
+
+`bananaos.rs` detects the firmware by `NAME=BananaOS` in `/etc/os-release`
+and `run-port` being there. Its systems come from the menu's
+`/run/banana/systems.conf` (the image's list with the card's merged over
+it): each section's `run` line is the launcher, e.g.
+`/usr/libexec/banana/run-retroarch gpsp %ROM%`, and a ROM is started the
+way `banana-ui` starts it: `%ROM%` and `%SYSTEM%` filled in,
+`BANANA_ROM` and `BANANA_SYSTEM` set, `banana-perf` set to the section's
+governor first and back to `performance` (the port's) after, and
+`run-port`'s and our environment (pad map, `SDL_KMSDRM_FIRST`, XDG dirs,
+`HOME`) taken out. The launchers read the user's choices themselves:
+BananaFront or RetroArch, the core per system, the DS emulator per game.
+The bottom panel is lit while the game runs, as DS games draw on both.
+The menu's DRM lease and Pokémon companion sockets aren't passed on, so
+the DS emulators run without the companion overlay.
+
+Under KMSDRM only the DRM master can flip frames onto a panel, and zitch's
+window stays open behind a game, so a game's SDL got `EACCES` on every
+page flip. On BananaOS (`Firmware::hands_over_display`) zitch drops
+master for the length of a launch (`handheld::begin()` returns a
+`Handover`, `display.rs`): the game's SDL opens the card while there is
+no master and becomes it, and zitch sets master again just before it
+draws, once the game has exited.
