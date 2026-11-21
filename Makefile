@@ -358,9 +358,26 @@ BANANA_DIR = handheld/bananaos
 # dropbear has no sftp-server, so scp speaks the legacy protocol.
 BANANA_SCP = scp -O -q
 
-bananaos-deploy: handheld-host handheld-stage
+# LÖVE's libmodplug, which muOS has and BananaOS doesn't: Debian's arm64
+# build (glibc 2.29 at most, needs only libstdc++), put in LÖVE's libs.
+# Public domain.
+MODPLUG_DEB_URL = https://deb.debian.org/debian/pool/main/libm/libmodplug/libmodplug1_0.8.9.0-3_arm64.deb
+MODPLUG_DEB_SHA256 = 31562caee099234947a228d6392156495b10f4b1960182e419554fe58ee50402
+HANDHELD_MODPLUG ?= target/handheld-modplug
+$(HANDHELD_MODPLUG)/libmodplug.so.1:
+	rm -rf $(HANDHELD_MODPLUG)
+	mkdir -p $(HANDHELD_MODPLUG)/deb
+	curl -sSfL -o $(HANDHELD_MODPLUG)/deb/modplug.deb $(MODPLUG_DEB_URL)
+	echo "$(MODPLUG_DEB_SHA256)  $(HANDHELD_MODPLUG)/deb/modplug.deb" | sha256sum -c --quiet \
+		|| { echo "error: $(MODPLUG_DEB_URL) does not match MODPLUG_DEB_SHA256." >&2; rm -rf $(HANDHELD_MODPLUG); exit 1; }
+	cd $(HANDHELD_MODPLUG)/deb && ar x modplug.deb data.tar.xz && tar -xJf data.tar.xz ./usr/lib/aarch64-linux-gnu/libmodplug.so.1.0.0
+	cp $(HANDHELD_MODPLUG)/deb/usr/lib/aarch64-linux-gnu/libmodplug.so.1.0.0 $(HANDHELD_MODPLUG)/libmodplug.so.1
+	rm -rf $(HANDHELD_MODPLUG)/deb
+
+bananaos-deploy: handheld-host handheld-stage $(HANDHELD_MODPLUG)/libmodplug.so.1
 	ssh $(HANDHELD) 'mkdir -p $(BANANA_APP)'
 	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP)/
+	$(BANANA_SCP) $(HANDHELD_MODPLUG)/libmodplug.so.1 $(HANDHELD):$(BANANA_APP)/libs/
 	$(BANANA_SCP) $(BANANA_DIR)/$(BANANA_SCRIPT) $(HANDHELD):$(BANANA_PORTS)/
 
 # Launch it the way a menu pick does: banana-ui starts the game whose path

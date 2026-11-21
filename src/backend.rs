@@ -832,7 +832,7 @@ impl Session<'_> {
             });
             return;
         }
-        crate::handheld::begin();
+        let handover = crate::handheld::begin();
         self.launches.begin(&cave_id);
         let config = Arc::clone(self.config);
         let prompts = self.prompts.clone();
@@ -853,6 +853,7 @@ impl Session<'_> {
                 // Every way out undoes what starting did.
                 let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
                     launches.forget(&cave_id);
+                    handover.end();
                     crate::handheld::game_ended();
                     emit.send(Event::LaunchFinished {
                         cave_id: cave_id.clone(),

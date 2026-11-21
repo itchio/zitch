@@ -33,9 +33,12 @@ pub(super) struct Running {
 /// the spawn that follows checks it and ends the child at once.
 pub(super) static STOPPED: AtomicBool = AtomicBool::new(false);
 
-/// Marks the start of a launch, so a stop asked for during it counts.
-pub fn begin() {
+/// Marks the start of a launch, so a stop asked for during it counts,
+/// and hands the screen over where the firmware needs it to be; hold the
+/// result until the launch is over.
+pub fn begin() -> Handover {
     STOPPED.store(false, Ordering::SeqCst);
+    Handover::begin(firmware().is_some_and(|f| f.hands_over_display()))
 }
 
 /// Runs the content and returns when it exits. `name` is what the

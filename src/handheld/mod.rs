@@ -13,7 +13,9 @@
 //! check, so the desktop build simply never takes these paths.
 
 mod appimage;
+mod bananaos;
 mod content;
+mod display;
 mod love;
 mod muos;
 mod running;
@@ -28,6 +30,7 @@ use anyhow::{Result, bail};
 
 pub use appimage::*;
 pub use content::*;
+pub use display::Handover;
 pub use love::*;
 pub use running::*;
 
@@ -85,13 +88,28 @@ pub trait Firmware: Sync {
     fn update_archive_dir(&self) -> Option<PathBuf> {
         None
     }
+
+    /// Whether a game can only reach the screen once zitch lets go of
+    /// DRM master: SDL draws through KMS there, and our window stays open
+    /// behind the game. See [`Handover`].
+    fn hands_over_display(&self) -> bool {
+        false
+    }
 }
 
 /// The firmware this is running on, if any. Each is detected by
 /// something only it has at run time.
 pub fn firmware() -> Option<&'static dyn Firmware> {
     static FIRMWARE: OnceLock<Option<&'static dyn Firmware>> = OnceLock::new();
-    *FIRMWARE.get_or_init(|| muos::detect().or_else(spruce::detect))
+    *FIRMWARE.get_or_init(|| {
+        let firmware = muos::detect()
+            .or_else(spruce::detect)
+            .or_else(bananaos::detect);
+        if let Some(firmware) = firmware {
+            log::info!("firmware: {}", firmware.name());
+        }
+        firmware
+    })
 }
 
 /// Whether this is a handheld firmware zitch knows.
