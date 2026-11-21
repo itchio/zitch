@@ -1,4 +1,4 @@
-.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs spruce-icon spruce-deploy spruce-shot spruce-app run-sdl shim-check
+.PHONY: handheld-host build release run run-verbose run-handheld run-tv shot shots shots-baseline shots-check check fmt clean help sync-butler handheld handheld-sysroot handheld-deploy handheld-shot handheld-love handheld-glyph handheld-gl4es handheld-stage handheld-muxapp handheld-port handheld-port-install handheld-sdl-procs spruce-icon spruce-deploy spruce-shot spruce-app bananaos-deploy bananaos-shot run-sdl shim-check
 
 # Extra flags for the app, e.g. make run ARGS="--api-key-file ~/.itch-key"
 ARGS ?=
@@ -39,6 +39,8 @@ help:
 	@echo "make spruce-deploy    copy it into the spruceOS App folder over ssh (HANDHELD=<host>)"
 	@echo "make spruce-shot      run it on a spruceOS device from its menu and fetch a screenshot"
 	@echo "make spruce-app       package it as target/zitch-spruce.zip, a spruceOS app folder"
+	@echo "make bananaos-deploy  copy it into BananaOS's Ports over ssh (HANDHELD=root@<ip>)"
+	@echo "make bananaos-shot    run it on a BananaOS device from its menu and fetch a screenshot"
 	@echo "make run-sdl      the SDL host on the desktop"
 	@echo
 	@echo "APP picks the config dir under ~/.config (default $(APP)):"
@@ -343,6 +345,32 @@ spruce-app: handheld-stage $(SPRUCE_ICON)
 	chmod +x target/spruce-app/zitch/launch.sh
 	cd target/spruce-app && zip -rq ../zitch-spruce.zip zitch
 	@ls -lh $(SPRUCE_ZIP) | awk '{print "$(SPRUCE_ZIP): " $$5}'
+
+# --- BananaOS ----------------------------------------------------------------
+# The same binary: BananaOS's glibc (2.41) and SDL2 (2.32) are newer than
+# the muOS sysroot's. Every script in roms/ports is a Ports entry, run by
+# /usr/libexec/banana/run-port, which hands it the top screen; the app
+# folder sits beside it.
+BANANA_PORTS = /data/roms/ports
+BANANA_APP = $(BANANA_PORTS)/zitch
+BANANA_SCRIPT = itch.io.sh
+BANANA_DIR = handheld/bananaos
+# dropbear has no sftp-server, so scp speaks the legacy protocol.
+BANANA_SCP = scp -O -q
+
+bananaos-deploy: handheld-host handheld-stage
+	ssh $(HANDHELD) 'mkdir -p $(BANANA_APP)'
+	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP)/
+	$(BANANA_SCP) $(BANANA_DIR)/$(BANANA_SCRIPT) $(HANDHELD):$(BANANA_PORTS)/
+
+# Launch it the way a menu pick does: banana-ui starts the game whose path
+# is written to /run/banana/launch (its hook for testing over ssh); fetch
+# the screenshot to /tmp/zitch-bananaos.png.
+BANANA_LAUNCH = pidof banana-ui >/dev/null || { echo "the BananaOS menu is not running"; exit 1; }; echo $(BANANA_PORTS)/$(BANANA_SCRIPT) > /run/banana/launch
+bananaos-shot: bananaos-deploy
+	echo "--screenshot /tmp/zitch.png $(ARGS)" | ssh $(HANDHELD) '$(call SHOT_RUN,$(BANANA_LAUNCH),$(BANANA_APP))'
+	$(BANANA_SCP) $(HANDHELD):/tmp/zitch.png /tmp/zitch-bananaos.png
+	@echo /tmp/zitch-bananaos.png
 
 # SDL2's jump table order on Linux, which the shim checks a game's stubs
 # against and uses to name the slots that have none.
