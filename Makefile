@@ -386,12 +386,12 @@ $(BANANA_BOX): handheld/glyph.svg
 # "Text file busy"; it runs the old build until restarted. The log and the
 # args file aren't the stage's and move across.
 bananaos-deploy: handheld-host handheld-stage $(HANDHELD_MODPLUG)/libmodplug.so.1 $(BANANA_BOX)
-	ssh $(HANDHELD) 'rm -rf $(BANANA_APP).new $(BANANA_APP).old && mkdir -p $(BANANA_APP) $(BANANA_APP).new $(BANANA_PORTS)/media/box'
+	ssh $(HANDHELD) 'rm -rf $(BANANA_APP).new && mkdir -p $(BANANA_APP) $(BANANA_APP).new $(BANANA_PORTS)/media/box'
 	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP).new/
 	$(BANANA_SCP) $(HANDHELD_MODPLUG)/libmodplug.so.1 $(HANDHELD):$(BANANA_APP).new/libs/
 	ssh $(HANDHELD) 'for f in zitch.log args; do [ -e $(BANANA_APP)/$$f ] && cp -p $(BANANA_APP)/$$f $(BANANA_APP).new/; done; \
-		mv $(BANANA_APP) $(BANANA_APP).old && mv $(BANANA_APP).new $(BANANA_APP) || exit 1; \
-		if pidof zitch >/dev/null; then echo "zitch is running the old build until restarted"; else rm -rf $(BANANA_APP).old; fi'
+		mv $(BANANA_APP) $(BANANA_APP).old && mv $(BANANA_APP).new $(BANANA_APP) && rm -rf $(BANANA_APP).old || exit 1; \
+		pidof zitch >/dev/null && echo "zitch is running the old build until restarted" || true'
 	$(BANANA_SCP) $(BANANA_DIR)/$(BANANA_SCRIPT) $(HANDHELD):$(BANANA_PORTS)/
 	$(BANANA_SCP) $(BANANA_BOX) $(HANDHELD):$(BANANA_PORTS)/media/box/$(basename $(BANANA_SCRIPT)).png
 
