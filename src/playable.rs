@@ -528,6 +528,7 @@ fn rom_system_name(system: &str) -> String {
         "ngp" => "Neo Geo Pocket",
         "a26" => "Atari 2600",
         "c64" => "C64",
+        "zx" => "ZX Spectrum",
         "amiga" => "Amiga",
         "psx" => "PlayStation",
         "ps2" => "PlayStation 2",

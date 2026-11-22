@@ -55,6 +55,7 @@ const ARCHIVE_DIR: &str = "/mnt/mmc/ARCHIVE";
 pub(super) fn assign_key(id: &str) -> &str {
     match id {
         "a26" => "a2600",
+        "zx" => "zxs",
         other => other,
     }
 }

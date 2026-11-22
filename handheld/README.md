@@ -161,7 +161,8 @@ while it runs and itself again after.
 
 Files: `.nes`, `.sfc`/`.smc`, `.gb`, `.gbc`, `.gba`, `.md`/`.gen`, `.32x`,
 `.sms`, `.gg`, `.pce`, `.lnx`, `.ngp`/`.ngc`, `.a26`,
-`.prg`/`.d64`/`.t64` (C64), `.adf` (Amiga), `.z64`/`.n64`/`.v64`, and
+`.prg`/`.d64`/`.t64` (C64), `.tap`/`.tzx`/`.z80`/`.sna`/`.szx` (ZX
+Spectrum), `.adf` (Amiga), `.z64`/`.n64`/`.v64`, and
 `.p8`/`.p8.png` PICO-8 carts, which the firmware plays with the fake-08
 core under its `PICO-8` system, no official PICO-8 binary needed, and
 `.tic` TIC-80 carts, played with the tic80 core under `TIC-80`. butler

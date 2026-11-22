@@ -194,6 +194,7 @@ mod tests {
         assert_eq!(id_for_file(Path::new("tobudx.gb")), Some("gb"));
         assert_eq!(id_for_file(Path::new("a/b/game.gbc")), Some("gbc"));
         assert_eq!(id_for_file(Path::new("game.SFC")), Some("snes"));
+        assert_eq!(id_for_file(Path::new("game.tzx")), Some("zx"));
         assert_eq!(id_for_file(Path::new("knuckles.32x")), Some("32x"));
         assert_eq!(id_for_file(Path::new("pitfall.a26")), Some("a26"));
         assert_eq!(id_for_file(Path::new("game.lnx")), Some("lynx"));

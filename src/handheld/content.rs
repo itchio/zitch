@@ -19,7 +19,7 @@ pub(super) const FALLBACK_GLIBC_VERSION: (u32, u32) = (2, 38);
 
 /// dash's ROM system ids: what `Launch.GetTargets` runtimes take and
 /// what a ROM payload's `engine.details["system"]` holds.
-pub(super) const ROM_IDS: [&str; 24] = [
+pub(super) const ROM_IDS: [&str; 25] = [
     "nes",
     "snes",
     "gb",
@@ -36,6 +36,7 @@ pub(super) const ROM_IDS: [&str; 24] = [
     "ngp",
     "a26",
     "c64",
+    "zx",
     "amiga",
     "n64",
     "psx",
@@ -115,6 +116,7 @@ pub(super) fn id_for_file(path: &Path) -> Option<&'static str> {
         "ngp" | "ngc" => "ngp",
         "a26" => "a26",
         "d64" | "prg" | "t64" => "c64",
+        "tzx" | "z80" | "sna" | "szx" => "zx",
         "adf" => "amiga",
         "z64" | "n64" | "v64" => "n64",
         "p8" => PICO8,

@@ -59,6 +59,7 @@ const IDS: &[(&str, &str)] = &[
     ("nds", "nds"),
     ("megadrive", "md"),
     ("c64", "c64"),
+    ("zxspectrum", "zx"),
     ("n64", "n64"),
     ("psx", "psx"),
     ("pico-8", PICO8),

@@ -44,6 +44,7 @@ const FOLDERS: &[(&str, &str)] = &[
     ("ngp", "NGP"),
     ("a26", "ATARI"),
     ("c64", "COMMODORE"),
+    ("zx", "ZXS"),
     ("amiga", "AMIGA"),
     ("n64", "N64"),
     ("psx", "PS"),
