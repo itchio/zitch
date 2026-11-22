@@ -2072,18 +2072,12 @@ fn queue_install(
         return Ok(Queued::Skipped);
     }
     let upload = uploads.swap_remove(index);
-    // butler knows a few ROM extensions and sniffs the rest as "unknown",
-    // for which it has no installer. A ROM is a file to copy, so on a handheld
-    // an upload that is not an archive is installed as one.
-    let ignore_installers =
-        handheld && crate::handheld::runs_here(std::path::Path::new(&upload.filename));
     let queued = client.call(InstallQueueParams {
         game: Some(game.clone()),
         upload: Some(upload),
         install_location_id: Some(location),
         reason: Some(DownloadReason::Install),
         queue_download: Some(true),
-        ignore_installers: ignore_installers.then_some(true),
         ..Default::default()
     })?;
     log::info!("queued {} as download {}", game.title, queued.id);

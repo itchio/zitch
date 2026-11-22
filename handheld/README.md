@@ -151,8 +151,6 @@ deep-probe record is checked before it is offered
 without the dynamic API, SDL3, a GLFW or X11 build, or a glibc newer
 than the firmware's is left out with the reason, which becomes the
 failure when nothing else can run. Every game gets an Install button.
-Bare files butler has no installer for (`.nes`, `.gba`, ...) are queued
-with `ignoreInstallers` so they install as a copy.
 
 Each runtime below is launched without zitch's HOME and XDG variables, or
 it starts with the app's config dir instead of the firmware's. The muOS
