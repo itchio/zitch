@@ -65,6 +65,8 @@ pub struct Policy {
 impl Policy {
     /// Screens shorter than this are treated as handhelds.
     const LOW_SPEC_HEIGHT: f32 = 600.0;
+    /// Width in pixels of the desktop's tile variant.
+    pub const DESKTOP_THUMB_WIDTH: u32 = 400;
 
     /// The policy for a screen this many points tall, unless `low_spec`
     /// forces one.
@@ -86,7 +88,7 @@ impl Policy {
         } else {
             Self {
                 low_spec: false,
-                thumb_width: 400,
+                thumb_width: Self::DESKTOP_THUMB_WIDTH,
                 detail_width: 630,
                 texture_budget: 96 << 20,
                 disk_budget: 200 << 20,

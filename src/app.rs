@@ -3495,9 +3495,15 @@ impl App {
             screen.size() * ui.ctx().pixels_per_point()
         };
         crate::device_info::set_resolution(pixels.x, pixels.y);
-        let policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
+        let mut policy = crate::images::Policy::for_screen(screen.height(), self.low_spec);
         self.handheld = policy.low_spec;
         let m = ui::Metrics::for_screen(screen, self.handheld);
+        if policy.low_spec {
+            // A handheld's tiles get thumbs at the size they are drawn, up
+            // to the desktop's width.
+            let drawn = (m.tile_width * pixels.x / screen.width()).round() as u32;
+            policy.thumb_width = drawn.min(crate::images::Policy::DESKTOP_THUMB_WIDTH);
+        }
         self.covers.set_policy(policy);
         if self.input_mode != InputMode::Touch
             && (self.owned.get().is_some() || self.login.is_some())
