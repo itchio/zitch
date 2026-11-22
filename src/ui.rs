@@ -1863,7 +1863,12 @@ fn game_summary(ui: &mut Ui, m: &Metrics, view: GameView, actions: &mut Vec<Acti
         let (cover, _) = ui.allocate_exact_size(vec2(cover_width, cover_height), Sense::hover());
         let radius = CornerRadius::same(8);
         let url = tile_cover(game);
-        if !url.is_some_and(|url| paint_cover(ui, covers, url, Variant::Detail, cover, radius)) {
+        // The tile's thumb stands in until the larger cover is made.
+        let painted = url.is_some_and(|url| {
+            paint_cover(ui, covers, url, Variant::Detail, cover, radius)
+                || paint_cover(ui, covers, url, Variant::Thumb, cover, radius)
+        });
+        if !painted {
             ui.painter().rect_filled(cover, radius, TILE_BG);
         }
         ui.vertical(|ui| {

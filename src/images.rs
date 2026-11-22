@@ -2,8 +2,8 @@
 //! which upload straight to the GPU; the interface only ever sees finished
 //! textures, so a slow cover can never hold up a frame.
 //!
-//! Each cover is scaled once into JPEG variants on disk, one per width the
-//! policy uses, so later runs decode a small file instead of the original.
+//! Each cover is scaled into a JPEG variant on disk for each width it is
+//! drawn at, so later runs decode a small file instead of the original.
 //! Textures live in a byte-budgeted LRU and the disk cache is pruned by
 //! age, both sized by the [`Policy`] in force.
 //!
@@ -51,6 +51,8 @@ pub struct Policy {
     pub disk_budget: u64,
     /// Largest original the loader will download.
     pub max_download: u64,
+    /// Most memory one decoded image may take.
+    pub max_decode: u64,
     /// Width in pixels screenshots are scaled down to.
     pub screenshot_width: u32,
     pub screenshot_budget: usize,
@@ -75,6 +77,7 @@ impl Policy {
                 texture_budget: 24 << 20,
                 disk_budget: 50 << 20,
                 max_download: 2 << 20,
+                max_decode: 64 << 20,
                 screenshot_width: 560,
                 screenshot_budget: 8 << 20,
                 animate: false,
@@ -88,6 +91,7 @@ impl Policy {
                 texture_budget: 96 << 20,
                 disk_budget: 200 << 20,
                 max_download: 8 << 20,
+                max_decode: 256 << 20,
                 screenshot_width: 1024,
                 screenshot_budget: 32 << 20,
                 animate: true,
@@ -96,8 +100,10 @@ impl Policy {
         }
     }
 
-    fn widths(&self) -> [u32; 2] {
-        [self.thumb_width, self.detail_width]
+    fn limits(&self) -> image::Limits {
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(self.max_decode);
+        limits
     }
 }
 
@@ -731,10 +737,10 @@ impl Inner {
                 .read_to_end(&mut bytes)
                 .map_err(|e| retry(e.to_string()))?;
             if (bytes.len() as u64) < want {
-                return first_frame(&bytes).map_err(retry);
+                return first_frame(&bytes, policy).map_err(retry);
             }
             if bytes.starts_with(b"GIF8")
-                && let Ok(first) = first_frame(&bytes)
+                && let Ok(first) = first_frame(&bytes, policy)
             {
                 return Ok(first);
             }
@@ -748,37 +754,17 @@ impl Inner {
     }
 
     /// The cover scaled to `width`: from its file when there is one, else
-    /// made from the original along with every other width the policy
-    /// uses, so the original is read once.
+    /// made from the original and saved.
     fn variant(&self, url: &str, width: u32, policy: &Policy) -> Result<ColorImage, String> {
         let path = self.variant_path(url, width);
         if let Ok(bytes) = std::fs::read(&path) {
             touch(&path);
-            let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
-                .map_err(|e| e.to_string())?;
+            let decoded = decode(&bytes, image::ImageFormat::Jpeg, policy)?;
             return Ok(to_color_image(decoded));
         }
         let bytes = self.fetch(url, policy)?;
-        let first = first_frame(&bytes)?;
-        let mut wanted = None;
-        for w in policy.widths() {
-            let scaled = scale(&first, w);
-            let jpeg = encode_jpeg(&scaled)?;
-            self.write(&self.variant_path(url, w), &jpeg);
-            if w == width {
-                wanted = Some(scaled);
-            }
-        }
-        // The original only earns its space if it can still animate.
-        let keeps_original = policy.animate
-            && image::guess_format(&bytes).is_ok_and(|f| f == image::ImageFormat::Gif);
-        if !keeps_original {
-            self.remove(&self.original_path(url));
-        }
-        let scaled = match wanted {
-            Some(scaled) => scaled,
-            None => scale(&first, width),
-        };
+        let scaled = scale(&first_frame(&bytes, policy)?, width);
+        self.write(&path, &encode_jpeg(&scaled)?);
         Ok(to_color_image(scaled))
     }
 
@@ -798,7 +784,11 @@ impl Inner {
             .limit(policy.max_download)
             .read_to_vec()
             .map_err(|e| e.to_string())?;
-        self.write(&path, &bytes);
+        // The original only earns its space if it can still animate.
+        if policy.animate && image::guess_format(&bytes).is_ok_and(|f| f == image::ImageFormat::Gif)
+        {
+            self.write(&path, &bytes);
+        }
         Ok(bytes)
     }
 
@@ -835,15 +825,6 @@ impl Inner {
             .disk_budget;
         if used > budget {
             self.prune_disk(budget);
-        }
-    }
-
-    fn remove(&self, path: &Path) {
-        let _guard = self.disk.lock().unwrap_or_else(|p| p.into_inner());
-        if let Ok(meta) = std::fs::metadata(path)
-            && std::fs::remove_file(path).is_ok()
-        {
-            self.disk_used.fetch_sub(meta.len(), Ordering::Relaxed);
         }
     }
 
@@ -912,22 +893,45 @@ fn touch(path: &Path) {
     }
 }
 
+/// Decodes within the policy's memory limit; a small file can claim any
+/// dimensions.
+fn decode(
+    bytes: &[u8],
+    format: image::ImageFormat,
+    policy: &Policy,
+) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(policy.limits());
+    reader.decode().map_err(|e| e.to_string())
+}
+
+fn gif_decoder<'a>(
+    bytes: &'a [u8],
+    policy: &Policy,
+) -> Result<image::codecs::gif::GifDecoder<std::io::Cursor<&'a [u8]>>, String> {
+    use image::ImageDecoder;
+    let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|e| e.to_string())?;
+    decoder
+        .set_limits(policy.limits())
+        .map_err(|e| e.to_string())?;
+    Ok(decoder)
+}
+
 /// The first frame of any supported format. Animated covers can run to
 /// megabytes and hundreds of frames; one frame is all a still needs.
-fn first_frame(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+fn first_frame(bytes: &[u8], policy: &Policy) -> Result<image::DynamicImage, String> {
     use image::AnimationDecoder;
     let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
     if format == image::ImageFormat::Gif {
-        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-            .map_err(|e| e.to_string())?;
-        let frame = decoder
+        let frame = gif_decoder(bytes, policy)?
             .into_frames()
             .next()
             .ok_or("gif has no frames")?
             .map_err(|e| e.to_string())?;
         Ok(image::DynamicImage::ImageRgba8(frame.into_buffer()))
     } else {
-        image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())
+        decode(bytes, format, policy)
     }
 }
 
@@ -937,15 +941,14 @@ fn decode_animation(bytes: &[u8], policy: &Policy) -> Result<Animation, String> 
     use image::AnimationDecoder;
     let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
     if format != image::ImageFormat::Gif {
-        let frame = to_color_image(scale(&first_frame(bytes)?, policy.thumb_width));
+        let frame = to_color_image(scale(&first_frame(bytes, policy)?, policy.thumb_width));
         return Ok(Animation {
             frames: vec![Arc::new(frame)],
             delays: vec![Duration::from_secs(1)],
             total: Duration::from_secs(1),
         });
     }
-    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-        .map_err(|e| e.to_string())?;
+    let decoder = gif_decoder(bytes, policy)?;
     let mut frames = Vec::new();
     let mut delays = Vec::new();
     let mut total = Duration::ZERO;
@@ -1038,6 +1041,18 @@ mod tests {
 
     fn thumb(url: &str) -> Job {
         Job::Texture((url.to_string(), 200))
+    }
+
+    #[test]
+    fn decode_refuses_images_over_the_limit() {
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(64, 64)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut policy = Policy::for_screen(480.0, None);
+        assert!(first_frame(&png, &policy).is_ok());
+        policy.max_decode = 64 * 64 * 4 - 1;
+        assert!(first_frame(&png, &policy).is_err());
     }
 
     #[test]
