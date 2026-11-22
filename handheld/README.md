@@ -489,8 +489,8 @@ the DS emulators run without the companion overlay.
 Under KMSDRM only the DRM master can flip frames onto a panel, and zitch's
 window stays open behind a game, so a game's SDL got `EACCES` on every
 page flip. On BananaOS (`Firmware::hands_over_display`) zitch drops
-master for the length of a launch (`handheld::begin()` returns a
-`Handover`, `display.rs`): the game's SDL opens the card while there is
+master for the length of a launch (`handheld::hand_over()` returns a
+`Handover`, `display.rs`), once the user has picked what to run: the game's SDL opens the card while there is
 no master and becomes it, and zitch sets master again just before it
 draws, once the game has exited. What a game leaves on the panels
 varies: LÖVE's SDL puts back the framebuffer it found, but RetroArch

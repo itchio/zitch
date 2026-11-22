@@ -832,7 +832,7 @@ impl Session<'_> {
             });
             return;
         }
-        let handover = crate::handheld::begin();
+        crate::handheld::begin();
         self.launches.begin(&cave_id);
         let config = Arc::clone(self.config);
         let prompts = self.prompts.clone();
@@ -850,10 +850,13 @@ impl Session<'_> {
                 }
             },
             move |client, emit| {
+                let handover = std::cell::OnceCell::new();
                 // Every way out undoes what starting did.
                 let finish = |emit: &Emitter, outcome: Launched, run: Option<Run>| {
                     launches.forget(&cave_id);
-                    handover.end();
+                    if let Some(handover) = handover.get() {
+                        crate::handheld::Handover::end(handover);
+                    }
                     crate::handheld::game_ended();
                     emit.send(Event::LaunchFinished {
                         cave_id: cave_id.clone(),
@@ -872,6 +875,8 @@ impl Session<'_> {
                         return Ok(());
                     }
                 };
+                // The pick is drawn, so the screen goes only after it.
+                let _ = handover.set(crate::handheld::hand_over());
                 let quit = launches.track(&cave_id, client)?;
                 let (result, run) = launch(
                     client,
