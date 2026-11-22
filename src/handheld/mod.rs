@@ -31,6 +31,8 @@ use anyhow::{Result, bail};
 pub use appimage::*;
 pub use content::*;
 pub use display::Handover;
+#[cfg(feature = "sdl-host")]
+pub use display::handed_over;
 pub use love::*;
 pub use running::*;
 

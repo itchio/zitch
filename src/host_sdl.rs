@@ -357,7 +357,8 @@ pub fn run(
                 log::warn!("opening {}: {error}", url.url);
             }
         }
-        if hidden && !close {
+        // Handed over, the screen is a game's and a flip would fail.
+        if (hidden || crate::handheld::handed_over()) && !close {
             // Nothing is drawn, but egui's textures move on (the font
             // atlas grows, covers arrive) and the painter has to follow or
             // the next visible frame draws with stale ones.

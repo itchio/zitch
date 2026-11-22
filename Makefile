@@ -381,10 +381,17 @@ $(BANANA_BOX): handheld/glyph.svg
 	sed 's|fill="#000"|fill="#fff"|' $< | rsvg-convert -w 1024 -h 1024 \
 		| magick png:- -trim +repage -resize 360x360 -background '#fa5c5c' -gravity center -extent 512x512 $@
 
+# Uploads into a fresh directory and swaps it in, so a running zitch (and
+# its butler) keeps the files it has open instead of failing the copy with
+# "Text file busy"; it runs the old build until restarted. The log and the
+# args file aren't the stage's and move across.
 bananaos-deploy: handheld-host handheld-stage $(HANDHELD_MODPLUG)/libmodplug.so.1 $(BANANA_BOX)
-	ssh $(HANDHELD) 'mkdir -p $(BANANA_APP) $(BANANA_PORTS)/media/box'
-	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP)/
-	$(BANANA_SCP) $(HANDHELD_MODPLUG)/libmodplug.so.1 $(HANDHELD):$(BANANA_APP)/libs/
+	ssh $(HANDHELD) 'rm -rf $(BANANA_APP).new $(BANANA_APP).old && mkdir -p $(BANANA_APP) $(BANANA_APP).new $(BANANA_PORTS)/media/box'
+	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP).new/
+	$(BANANA_SCP) $(HANDHELD_MODPLUG)/libmodplug.so.1 $(HANDHELD):$(BANANA_APP).new/libs/
+	ssh $(HANDHELD) 'for f in zitch.log args; do [ -e $(BANANA_APP)/$$f ] && cp -p $(BANANA_APP)/$$f $(BANANA_APP).new/; done; \
+		mv $(BANANA_APP) $(BANANA_APP).old && mv $(BANANA_APP).new $(BANANA_APP) || exit 1; \
+		if pidof zitch >/dev/null; then echo "zitch is running the old build until restarted"; else rm -rf $(BANANA_APP).old; fi'
 	$(BANANA_SCP) $(BANANA_DIR)/$(BANANA_SCRIPT) $(HANDHELD):$(BANANA_PORTS)/
 	$(BANANA_SCP) $(BANANA_BOX) $(HANDHELD):$(BANANA_PORTS)/media/box/$(basename $(BANANA_SCRIPT)).png
 

@@ -11,6 +11,17 @@
 //! are read before the handover and set again after it where they differ.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set while a [`Handover`] has the screen given away: a flip then fails,
+/// so the host draws nothing until it is back.
+static HANDED_OVER: AtomicBool = AtomicBool::new(false);
+
+/// Whether the screen is a game's now; the host skips drawing while it is.
+#[cfg(feature = "sdl-host")]
+pub fn handed_over() -> bool {
+    HANDED_OVER.load(Ordering::SeqCst)
+}
 
 /// Held for a launch; the screen is zitch's again at [`Handover::end`],
 /// or when it drops.
@@ -23,6 +34,9 @@ pub struct Handover {
 impl Handover {
     pub(super) fn begin(release: bool) -> Self {
         let saved = release.then(kms::release);
+        if saved.is_some() {
+            HANDED_OVER.store(true, Ordering::SeqCst);
+        }
         Handover {
             saved: Mutex::new(saved),
         }
@@ -33,6 +47,7 @@ impl Handover {
         let saved = self.saved.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(saved) = saved {
             kms::reclaim(saved);
+            HANDED_OVER.store(false, Ordering::SeqCst);
         }
     }
 }
