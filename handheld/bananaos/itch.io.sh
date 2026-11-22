@@ -10,13 +10,15 @@ cd "$APP_DIR" || exit 1
 # run-port discards nothing, but nobody sees it either; the log goes here.
 exec >"$APP_DIR/zitch.log" 2>&1
 
-# Config (login, butler's database, installed games) and the cover cache
-# live under /data/home, which a redeploy of the app folder leaves alone.
+# Config (login, butler's database), the cover cache and the installed
+# games live under /data/home, which a redeploy of the app folder leaves
+# alone. Games go in a folder the Files app shows.
 HOME="/data/home/zitch"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_CACHE_HOME="$HOME/.cache"
 XDG_DATA_HOME="$HOME/.local/share"
 export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
+export ZITCH_INSTALL_DIR="$HOME/games"
 mkdir -p "$HOME"
 
 # The RG DS pad (retrogame_joypad), as SDL_GameControllerDB has it. The

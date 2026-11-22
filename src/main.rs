@@ -47,6 +47,11 @@ struct Cli {
     #[arg(long)]
     dbpath: Option<PathBuf>,
 
+    /// Where games are installed when the database has no install location
+    /// yet. Defaults to `apps` in the config directory, as the itch app.
+    #[arg(long, env = "ZITCH_INSTALL_DIR", value_name = "PATH")]
+    install_dir: Option<PathBuf>,
+
     /// Which saved login to use, by butlerd profile id. Defaults to the
     /// most recently used one; an unknown id lists the choices.
     #[arg(long, env = "ZITCH_PROFILE_ID")]
@@ -190,7 +195,10 @@ fn main() -> anyhow::Result<()> {
         profile_id: cli.profile_id,
         api_url: cli.api_url.trim_end_matches('/').to_string(),
         // Same layout as the itch app, so a shared config dir shares games.
-        install_dir: config_dir.join("apps"),
+        install_dir: match cli.install_dir {
+            Some(dir) => std::path::absolute(&dir).unwrap_or(dir),
+            None => config_dir.join("apps"),
+        },
         prereqs_dir: config_dir.join("prereqs"),
         game_env: handheld::game_env(),
         // The muxapp bundles its own butler; elsewhere it is the itch app's.

@@ -441,8 +441,9 @@ zitch is a Ports entry, not a PortMaster port: every `.sh` in
 `HOME=/data/home`, and takes the panels back when the script exits.
 `handheld/bananaos/itch.io.sh` is ours; the app folder sits beside it as
 `roms/ports/zitch` (it holds no `.sh`, so the menu doesn't list it). The
-script keeps config (the login, butler's database, installed games) and
+script keeps config (the login, butler's database) and
 the cover cache under `/data/home/zitch`, which a redeploy leaves alone,
+installs games to `/data/home/zitch/games` (`ZITCH_INSTALL_DIR`),
 reads extra flags from an `args` file, logs to `zitch.log` in the app
 folder, and exports the RG DS pad's map from SDL_GameControllerDB. The
 device tree puts the A label on `BTN_EAST`, so that map already names
