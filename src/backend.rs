@@ -473,6 +473,8 @@ fn session(
         collections_forced: Arc::new(AtomicBool::new(false)),
         collections_wanted: Arc::default(),
         retry: Arc::new(AtomicBool::new(false)),
+        running: Arc::default(),
+        again: Arc::default(),
     };
     sync.spawn(link, emit);
     let mut session = Session {
@@ -608,6 +610,10 @@ impl Session<'_> {
     /// periodic update check.
     fn tick(&mut self) {
         let sync = &self.sync;
+        if sync.again.load(Ordering::Relaxed) && !sync.running.load(Ordering::Relaxed) {
+            sync.again.store(false, Ordering::Relaxed);
+            sync.spawn(self.link, self.emit);
+        }
         let due = !sync.online.load(Ordering::Relaxed) || sync.retry.load(Ordering::Relaxed);
         if due && Instant::now() >= self.next_probe {
             sync.spawn(self.link, self.emit);
@@ -1682,7 +1688,9 @@ impl LaunchCall<'_> {
 /// one after another: butlerd handles requests concurrently and two large
 /// writes at once can fail on a stale sqlite snapshot, which is what
 /// happened when the owned list and the collections refetched side by
-/// side. The only thing alongside is [`poll_owned`], which reads.
+/// side. The only thing alongside is [`poll_owned`], which reads. For the
+/// same reason one run is under way at a time: a run asked for during
+/// another follows it.
 #[derive(Clone)]
 struct Sync {
     profile_id: i64,
@@ -1704,10 +1712,29 @@ struct Sync {
     /// The last run failed for a reason other than being offline, so the
     /// main loop should run it again at the next probe.
     retry: Arc<AtomicBool>,
+    /// A run is under way.
+    running: Arc<AtomicBool>,
+    /// Asked for during a run, so the main loop starts another after it.
+    again: Arc<AtomicBool>,
+}
+
+/// Marks the run over when its thread lets go of it, however it ends.
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Sync {
     fn spawn(&self, link: &Link, emit: &Emitter) {
+        if self.running.swap(true, Ordering::Relaxed) {
+            log::info!("sync under way, another follows it");
+            self.again.store(true, Ordering::Relaxed);
+            return;
+        }
+        let running = Running(Arc::clone(&self.running));
         let sync = self.clone();
         self.retry.store(false, Ordering::Relaxed);
         emit.send(Event::Syncing(true));
@@ -1717,11 +1744,15 @@ impl Sync {
             emit.clone(),
             |error| Event::SyncFailed(format!("{error:#}")),
             move |client, emit| {
+                let _running = running;
                 let result = sync.run(client, emit);
                 if result.is_err() {
                     sync.release_held(emit);
                 }
-                emit.send(Event::Syncing(false));
+                // The run that follows keeps the library showing as busy.
+                if !sync.again.load(Ordering::Relaxed) {
+                    emit.send(Event::Syncing(false));
+                }
                 match result {
                     Ok(()) => Ok(()),
                     Err(error) if is_offline(&error) => {
