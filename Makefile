@@ -120,8 +120,6 @@ handheld-host:
 HANDHELD_TARGET = aarch64-unknown-linux-gnu
 HANDHELD_APP = /mnt/mmc/MUOS/application/zitch
 SYSROOT = target/handheld-sysroot/lib
-# The user-local rustup toolchain that carries the aarch64 std.
-CARGO_CROSS ?= $(HOME)/.cargo/bin/cargo +stable
 # Routes a game's statically linked SDL2 into the firmware's; see handheld/README.md.
 SDL_SHIM = target/$(HANDHELD_TARGET)/release/libzitch-sdl.so
 
@@ -143,7 +141,7 @@ handheld-sysroot: handheld-host
 	echo 'GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( ld-linux-aarch64.so.1 ) )' >$(SYSROOT)/libc.so
 
 handheld:
-	$(CARGO_CROSS) build --release --target $(HANDHELD_TARGET) --no-default-features --features sdl-host
+	cargo build --release --target $(HANDHELD_TARGET) --no-default-features --features sdl-host
 	aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o $(SDL_SHIM) handheld/sdl-dynapi.c -ldl
 	@ls -lh target/$(HANDHELD_TARGET)/release/zitch | awk '{print "target/$(HANDHELD_TARGET)/release/zitch: " $$5}'
 

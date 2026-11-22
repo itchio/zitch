@@ -14,8 +14,7 @@ against the SDL2 that ships with the firmware. Everything else is static.
 - ssh access to the device as root. Pass `HANDHELD=root@<ip>` to the
   device targets.
 - `aarch64-linux-gnu-gcc` and a rustup toolchain with the
-  `aarch64-unknown-linux-gnu` target. `CARGO_CROSS` in the Makefile points at
-  `~/.cargo/bin/cargo +stable`, change it if rustup is your system cargo.
+  `aarch64-unknown-linux-gnu` target.
 - `make handheld-sysroot` pulls libc, libm, the loader, libgcc_s and libSDL2
   off the device into `target/handheld-sysroot/lib`. We link against those
   because the cross package's glibc is newer than the device's (2.38) and
