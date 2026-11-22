@@ -121,17 +121,43 @@ pub fn stop() {
 /// own quit allows; its muxretro takes no notice of SIGTERM.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 
-fn kill(signal: &str, targets: impl IntoIterator<Item = String>) {
-    match Command::new("kill").arg(signal).args(targets).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => log::warn!("kill exited with {status}"),
-        Err(error) => log::warn!("running kill: {error}"),
+#[derive(Clone, Copy)]
+enum Signal {
+    Term,
+    Kill,
+}
+
+/// Sends the signal to each target: a pid, or a process group as its
+/// negated id. 0 and -1 (our own group, every process) are refused.
+fn kill(signal: Signal, targets: impl IntoIterator<Item = i32>) {
+    for target in targets {
+        if target.abs() <= 1 {
+            log::warn!("not signalling {target}");
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            let number = match signal {
+                Signal::Term => libc::SIGTERM,
+                Signal::Kill => libc::SIGKILL,
+            };
+            // SAFETY: kill takes two integers and touches no memory.
+            if unsafe { libc::kill(target, number) } != 0 {
+                let error = std::io::Error::last_os_error();
+                // Already gone is what we wanted.
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    log::warn!("signalling {target}: {error}");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = signal;
     }
 }
 
 pub(super) fn end_group(group: u32) {
     log::info!("stopping process group {group}");
-    kill("-TERM", [format!("-{group}")]);
+    kill(Signal::Term, [-(group as i32)]);
     kill_later(members(group, true));
 }
 
@@ -141,7 +167,7 @@ fn end_group_but_leader(group: u32) {
     log::info!("stopping process group {group} but its leader");
     let members = members(group, false);
     if !members.is_empty() {
-        kill("-TERM", members.iter().map(u32::to_string));
+        kill(Signal::Term, members.iter().map(|pid| *pid as i32));
         kill_later(members);
     }
 }
@@ -160,7 +186,7 @@ fn kill_later(pids: Vec<u32>) {
             }
             if Instant::now() >= deadline {
                 log::warn!("killing {alive:?}, still up after SIGTERM");
-                kill("-KILL", alive.iter().map(u32::to_string));
+                kill(Signal::Kill, alive.iter().map(|pid| *pid as i32));
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));

@@ -834,7 +834,12 @@ pub fn library(
                     PREFETCH_TILES as f32 * stride,
                     tile_height + m.header_height,
                 ));
-                for col in first.saturating_sub(PREFETCH_TILES)..(last + PREFETCH_TILES).min(count)
+                for (col, id) in section
+                    .games
+                    .iter()
+                    .enumerate()
+                    .take(last + PREFETCH_TILES)
+                    .skip(first.saturating_sub(PREFETCH_TILES))
                 {
                     let rect = Rect::from_min_size(
                         strip_rect.min + vec2(ring + col as f32 * stride, ring),
@@ -842,8 +847,7 @@ pub fn library(
                     );
                     if !ui.is_rect_visible(rect)
                         && near.intersects(rect)
-                        && let Some(url) =
-                            games.get(&section.games[col]).and_then(|g| tile_cover(g))
+                        && let Some(url) = games.get(id).and_then(|g| tile_cover(g))
                     {
                         covers.prefetch(ui.ctx(), url);
                     }
@@ -863,8 +867,8 @@ pub fn library(
                     ui.painter().rect_filled(rect, m.space(6.0), TILE_BG);
                     spinner_at(ui, rect.center(), m.space(28.0), DIM);
                 }
-                for col in first..last.min(count) {
-                    let Some(game) = games.get(&section.games[col]) else {
+                for (col, id) in section.games.iter().enumerate().take(last).skip(first) {
+                    let Some(game) = games.get(id) else {
                         continue;
                     };
                     let rect = Rect::from_min_size(
