@@ -1692,10 +1692,11 @@ impl App {
         sections.extend(self.section(|_| "Recently played".into(), played));
 
         // The owned library, one row per kind of thing.
+        let owned = self.owned_ids();
         for kind in Kind::ALL {
-            let games: Vec<i64> = self
-                .owned_ids()
-                .into_iter()
+            let games: Vec<i64> = owned
+                .iter()
+                .copied()
                 .filter(|id| self.catalog.get(id).is_some_and(|g| kind.matches(g)))
                 .collect();
             sections.extend(self.section(|n| format!("{} · {n}", kind.label()), games));

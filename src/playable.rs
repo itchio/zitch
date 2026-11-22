@@ -166,14 +166,25 @@ fn wanted_platforms(device: &[String], hidden: &[String], love: &[String]) -> Ve
         .collect()
 }
 
+/// Whether any of `scanned` is one of [`wanted_platforms`], without
+/// building the list: the filter asks this of every game in the library.
 fn any_runs_here(
     scanned: &[String],
     device: &[String],
     hidden: &[String],
     love: &[String],
 ) -> bool {
-    let wanted = wanted_platforms(device, hidden, love);
-    scanned.iter().any(|p| wanted.contains(p))
+    let all_hidden = device.iter().all(|p| hidden.contains(p));
+    let shown = |id: &str| {
+        device.iter().any(|p| p == id) && (all_hidden || !hidden.iter().any(|h| h == id))
+    };
+    scanned.iter().any(|p| {
+        if love.contains(p) {
+            shown("love")
+        } else {
+            p != "love" && shown(p)
+        }
+    })
 }
 
 /// Whether an upload is built for this device: on a handheld something the
@@ -583,6 +594,28 @@ mod tests {
             wanted_platforms(&device, &strings(&["love"]), &love),
             ["rom:gba"]
         );
+    }
+
+    #[test]
+    fn any_runs_here_agrees_with_wanted_platforms() {
+        let device = strings(&["love", "rom:gba", "linux-arm64-handheld"]);
+        let love = strings(&["love:11.4", "love:11.5"]);
+        let scans = ["love", "love:11.4", "love:12.0", "rom:gba", "rom:snes"];
+        for hidden in [
+            strings(&[]),
+            strings(&["love"]),
+            strings(&["rom:gba"]),
+            strings(&["love", "rom:gba", "linux-arm64-handheld"]),
+        ] {
+            let wanted = wanted_platforms(&device, &hidden, &love);
+            for scan in scans {
+                assert_eq!(
+                    any_runs_here(&strings(&[scan]), &device, &hidden, &love),
+                    wanted.iter().any(|w| w == scan),
+                    "{scan} with {hidden:?} hidden"
+                );
+            }
+        }
     }
 
     #[test]
