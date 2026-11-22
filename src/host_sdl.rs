@@ -43,6 +43,18 @@ struct FrameStats {
     input: u32,
     /// Who asked for each pass, by where the request was made.
     causes: std::collections::BTreeMap<String, u32>,
+    /// Time in the interface, tessellating, painting and flipping.
+    ui: Duration,
+    tessellate: Duration,
+    paint: Duration,
+    swap: Duration,
+    /// Waiting for the GPU to finish what a frame painted.
+    gpu: Duration,
+    /// Meshes and vertices painted.
+    meshes: usize,
+    vertices: usize,
+    /// The longest drawn frame, start to flip.
+    longest: Duration,
 }
 
 impl FrameStats {
@@ -54,6 +66,14 @@ impl FrameStats {
             polls: 0,
             input: 0,
             causes: Default::default(),
+            ui: Duration::ZERO,
+            tessellate: Duration::ZERO,
+            paint: Duration::ZERO,
+            swap: Duration::ZERO,
+            gpu: Duration::ZERO,
+            meshes: 0,
+            vertices: 0,
+            longest: Duration::ZERO,
         }
     }
 
@@ -67,12 +87,21 @@ impl FrameStats {
             .iter()
             .map(|(cause, count)| format!("{cause} x{count}"))
             .collect();
+        let per = |total: Duration, count: u32| total.as_secs_f32() * 1000.0 / count.max(1) as f32;
         log::info!(
-            "frames: {:.1}/s drawn, {:.1}/s passes, {:.1}/s polls, {} with input; asked by: {}",
+            "frames: {:.1}/s drawn, {:.1}/s passes, {:.1}/s polls, {} with input; ms each: ui {:.1}, tessellate {:.1}, paint {:.1}, gpu {:.1}, swap {:.1}, longest {:.1}; {} meshes, {} vertices a frame; asked by: {}",
             self.drawn as f32 / secs,
             self.passes as f32 / secs,
             self.polls as f32 / secs,
             self.input,
+            per(self.ui, self.passes),
+            per(self.tessellate, self.drawn),
+            per(self.paint, self.drawn),
+            per(self.gpu, self.drawn),
+            per(self.swap, self.drawn),
+            self.longest.as_secs_f32() * 1000.0,
+            self.meshes / self.drawn.max(1) as usize,
+            self.vertices / self.drawn.max(1) as usize,
             if causes.is_empty() {
                 "nothing".to_string()
             } else {
@@ -172,6 +201,17 @@ pub fn run(
             video.gl_get_proc_address(name) as *const _
         })
     };
+    if window.frame_stats {
+        use egui_glow::glow::{self, HasContext as _};
+        unsafe {
+            log::info!(
+                "gl: {} | {} | {}",
+                gl.get_parameter_string(glow::VENDOR),
+                gl.get_parameter_string(glow::RENDERER),
+                gl.get_parameter_string(glow::VERSION),
+            );
+        }
+    }
     let mut painter = egui_glow::Painter::new(Arc::new(gl), "", None, false)
         .map_err(|e| anyhow!("setting up the egui painter: {e}"))?;
     video.text_input().start();
@@ -301,11 +341,13 @@ pub fn run(
             focused: true,
             ..Default::default()
         };
+        let frame_started = Instant::now();
         let output = ctx.run_ui(raw, |ui| {
             app.update_logic(ui.ctx());
             app.update_ui(ui);
         });
         if let Some(stats) = &mut stats {
+            stats.ui += frame_started.elapsed();
             for cause in ctx.repaint_causes() {
                 let file = cause.file.rsplit('/').next().unwrap_or(cause.file);
                 *stats
@@ -372,13 +414,18 @@ pub fn run(
             }
             continue;
         }
+        let tessellate_started = Instant::now();
         let primitives = ctx.tessellate(shapes, pixels_per_point);
+        if let Some(stats) = &mut stats {
+            stats.tessellate += tessellate_started.elapsed();
+        }
         if std::mem::take(&mut scrub) {
             for _ in 0..2 {
                 painter.clear([pw, ph], SCRUB_COLOR);
                 sdl_window.gl_swap_window();
             }
         }
+        let paint_started = Instant::now();
         painter.clear([pw, ph], [0.0, 0.0, 0.0, 1.0]);
         painter.paint_and_update_textures(
             [pw, ph],
@@ -386,6 +433,22 @@ pub fn run(
             &primitives,
             &mut textures_delta,
         );
+        if let Some(stats) = &mut stats {
+            stats.paint += paint_started.elapsed();
+            let gpu_started = Instant::now();
+            unsafe {
+                egui_glow::glow::HasContext::finish(&**painter.gl());
+            }
+            stats.gpu += gpu_started.elapsed();
+            stats.meshes += primitives.len();
+            stats.vertices += primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                    egui::epaint::Primitive::Callback(_) => 0,
+                })
+                .sum::<usize>();
+        }
         for data in shots.drain(..) {
             let image = painter.read_screen_rgba([pw, ph]);
             input.events.push(egui::Event::Screenshot {
@@ -395,9 +458,12 @@ pub fn run(
             });
             wait = Duration::ZERO;
         }
+        let swap_started = Instant::now();
         sdl_window.gl_swap_window();
         if let Some(stats) = &mut stats {
             stats.drawn += 1;
+            stats.swap += swap_started.elapsed();
+            stats.longest = stats.longest.max(frame_started.elapsed());
         }
         if close {
             break;
