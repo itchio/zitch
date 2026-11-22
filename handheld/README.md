@@ -489,4 +489,9 @@ page flip. On BananaOS (`Firmware::hands_over_display`) zitch drops
 master for the length of a launch (`handheld::begin()` returns a
 `Handover`, `display.rs`): the game's SDL opens the card while there is
 no master and becomes it, and zitch sets master again just before it
-draws, once the game has exited.
+draws, once the game has exited. What a game leaves on the panels
+varies: LÖVE's SDL puts back the framebuffer it found, but RetroArch
+leaves the CRTCs with none, and a page flip onto a CRTC without a
+framebuffer fails with `EBUSY` for good. So the CRTCs (framebuffer,
+mode, connectors) are read before the handover, and any that changed are
+set again after it, through the `drm` crate (a Linux-only dependency).

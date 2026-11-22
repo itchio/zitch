@@ -51,3 +51,8 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Hands the screen to a game and back on handhelds where SDL draws
+# through KMS (DRM master, and the CRTC a game's exit may leave bare).
+drm = "0.15"
