@@ -374,11 +374,19 @@ $(HANDHELD_MODPLUG)/libmodplug.so.1:
 	cp $(HANDHELD_MODPLUG)/deb/usr/lib/aarch64-linux-gnu/libmodplug.so.1.0.0 $(HANDHELD_MODPLUG)/libmodplug.so.1
 	rm -rf $(HANDHELD_MODPLUG)/deb
 
-bananaos-deploy: handheld-host handheld-stage $(HANDHELD_MODPLUG)/libmodplug.so.1
-	ssh $(HANDHELD) 'mkdir -p $(BANANA_APP)'
+# The entry's art on the Ports shelf: the menu reads media/box/<name>.png
+# beside the script. The glyph in white on itch.io red.
+BANANA_BOX = target/zitch-bananaos-box.png
+$(BANANA_BOX): handheld/glyph.svg
+	sed 's|fill="#000"|fill="#fff"|' $< | rsvg-convert -w 1024 -h 1024 \
+		| magick png:- -trim +repage -resize 360x360 -background '#fa5c5c' -gravity center -extent 512x512 $@
+
+bananaos-deploy: handheld-host handheld-stage $(HANDHELD_MODPLUG)/libmodplug.so.1 $(BANANA_BOX)
+	ssh $(HANDHELD) 'mkdir -p $(BANANA_APP) $(BANANA_PORTS)/media/box'
 	$(BANANA_SCP) -r $(STAGE)/* $(HANDHELD):$(BANANA_APP)/
 	$(BANANA_SCP) $(HANDHELD_MODPLUG)/libmodplug.so.1 $(HANDHELD):$(BANANA_APP)/libs/
 	$(BANANA_SCP) $(BANANA_DIR)/$(BANANA_SCRIPT) $(HANDHELD):$(BANANA_PORTS)/
+	$(BANANA_SCP) $(BANANA_BOX) $(HANDHELD):$(BANANA_PORTS)/media/box/$(basename $(BANANA_SCRIPT)).png
 
 # Launch it the way a menu pick does: banana-ui starts the game whose path
 # is written to /run/banana/launch (its hook for testing over ssh); fetch

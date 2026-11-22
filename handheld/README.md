@@ -451,8 +451,12 @@ folder, and exports the RG DS pad's map from SDL_GameControllerDB. The
 device tree puts the A label on `BTN_EAST`, so that map already names
 buttons by their labels.
 
+A home-row tile that starts on one press needs an `[app]` line in
+BananaOS's read-only `rnds/systems.cfg`, so zitch stays in Ports until
+BananaOS has one for it.
+
 ```
-make bananaos-deploy HANDHELD=root@<ip>   # copy the stage, libmodplug and itch.io.sh into roms/ports
+make bananaos-deploy HANDHELD=root@<ip>   # copy the stage, libmodplug, itch.io.sh and its art (media/box) into roms/ports
 make bananaos-shot HANDHELD=root@<ip>     # deploy, launch from the menu, fetch /tmp/zitch-bananaos.png
 ```
 
