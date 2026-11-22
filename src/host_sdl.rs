@@ -201,22 +201,27 @@ pub fn run(
             video.gl_get_proc_address(name) as *const _
         })
     };
-    if window.frame_stats {
+    let (renderer, version) = {
         use egui_glow::glow::{self, HasContext as _};
         unsafe {
-            log::info!(
-                "gl: {} | {} | {}",
-                gl.get_parameter_string(glow::VENDOR),
+            (
                 gl.get_parameter_string(glow::RENDERER),
                 gl.get_parameter_string(glow::VERSION),
-            );
+            )
         }
+    };
+    if window.frame_stats {
+        log::info!("gl: {renderer} | {version}");
     }
     let mut painter = egui_glow::Painter::new(Arc::new(gl), "", None, false)
         .map_err(|e| anyhow!("setting up the egui painter: {e}"))?;
     video.text_input().start();
 
     let ctx = egui::Context::default();
+    if slow_small_triangles(&renderer, &version) {
+        log::info!("{renderer} on {version} is slow with small triangles; edge smoothing is off");
+        ctx.tessellation_options_mut(|o| o.feathering = false);
+    }
     // The backend and the cover loader wake the frame loop through `wake`;
     // a delayed request is served by the loop's own timeout.
     let wake = Arc::new(Wake::default());
@@ -472,6 +477,19 @@ pub fn run(
     app.on_close();
     painter.destroy();
     Ok(())
+}
+
+/// Mesa 25.0 and 25.1 sort triangles into bins too big for a Mali with
+/// two tiler levels (G31, G52 r1), and each small triangle costs a bin's
+/// worth of tiles. Smoothed edges are most of our small triangles.
+fn slow_small_triangles(renderer: &str, version: &str) -> bool {
+    let two_levels = ["Mali-G31", "Mali-G52 r1"]
+        .iter()
+        .any(|gpu| renderer.contains(gpu));
+    let mesa = version.split_once("Mesa ").map_or("", |(_, mesa)| mesa);
+    renderer.contains("Panfrost")
+        && two_levels
+        && (mesa.starts_with("25.0.") || mesa.starts_with("25.1."))
 }
 
 /// Keyboard and mouse state between frames, as egui events.
@@ -737,5 +755,31 @@ impl Pads {
             moves.extend(self.triggers.update(self.left_trigger, self.right_trigger));
         }
         moves
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slow_small_triangles;
+
+    #[test]
+    fn smoothing_goes_off_only_on_the_slow_mesa() {
+        let g52 = "Mali-G52 r1 (Panfrost)";
+        assert!(slow_small_triangles(g52, "OpenGL ES 3.1 Mesa 25.0.7"));
+        assert!(slow_small_triangles(g52, "OpenGL ES 3.1 Mesa 25.1.3"));
+        assert!(slow_small_triangles(
+            "Mali-G31 (Panfrost)",
+            "OpenGL ES 3.1 Mesa 25.0.7"
+        ));
+        assert!(!slow_small_triangles(g52, "OpenGL ES 3.1 Mesa 25.2.0"));
+        assert!(!slow_small_triangles(g52, "OpenGL ES 3.1 Mesa 24.3.4"));
+        assert!(!slow_small_triangles(
+            "Mali-G610 (Panfrost)",
+            "OpenGL ES 3.1 Mesa 25.0.7"
+        ));
+        assert!(!slow_small_triangles(
+            "Mali-G31",
+            "OpenGL ES 3.2 v1.r16p0-01rel0.2b9c7c5d0f2b3a5c7e8d9f0a1b2c3d4e"
+        ));
     }
 }
