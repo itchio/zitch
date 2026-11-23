@@ -3756,6 +3756,9 @@ impl App {
     }
 
     pub fn on_close(&mut self) {
+        if self.screens_off {
+            self.wake_screens();
+        }
         self.backend.shutdown();
     }
 }

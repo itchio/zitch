@@ -305,6 +305,8 @@ impl Firmware for BananaOs {
     }
     /// The bottom panel. `run-port` lights it again when zitch exits.
     fn second_screen(&self) -> bool {
+        // A run that was killed while idle left the backlights off.
+        self.screens_lit(true);
         let backlight = light_other_panel();
         *OWN_PANEL.lock().unwrap_or_else(|p| p.into_inner()) = backlight;
         true
