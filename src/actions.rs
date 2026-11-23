@@ -192,8 +192,8 @@ pub enum Action {
     /// Y on a pad: in and out of the filters on the library, the QR code
     /// on a game's page.
     Secondary,
-    /// Slash on a keyboard: the search box on the library, the QR code
-    /// on a game's page.
+    /// X on a pad, Slash on a keyboard: search on the library, the QR
+    /// code on a game's page.
     Search,
     /// Show the open game's page as a QR code.
     ShowQr,
@@ -203,6 +203,11 @@ pub enum Action {
     ViewScreenshot(usize),
     /// Close the full screen screenshot.
     CloseScreenshot,
+    /// Press a key of the on-screen keyboard; the finger is already there.
+    KeyboardKey {
+        row: usize,
+        col: usize,
+    },
     /// Leave the search box, keeping its text; focus goes to the results.
     SearchDone,
     ClearSearch,

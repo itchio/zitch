@@ -564,7 +564,7 @@ pub fn run(
             }
         }
         if let Some(second) = &mut second
-            && app.second_screen_playing()
+            && app.second_screen_live()
         {
             second.owed = second.owed.max(1);
         }
@@ -950,6 +950,7 @@ impl Pads {
             Button::A => PadButton::South,
             Button::B => PadButton::East,
             Button::Y => PadButton::North,
+            Button::X => PadButton::West,
             Button::LeftShoulder => PadButton::LeftBumper,
             Button::RightShoulder => PadButton::RightBumper,
             Button::Guide => PadButton::Guide,

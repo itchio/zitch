@@ -24,6 +24,8 @@ pub enum PadButton {
     East,
     /// Y / Triangle.
     North,
+    /// X / Square.
+    West,
     LeftBumper,
     RightBumper,
     Guide,
@@ -35,6 +37,7 @@ pub fn button_action(button: PadButton) -> Option<Action> {
         PadButton::South => Action::Activate,
         PadButton::East => Action::Back,
         PadButton::North => Action::Secondary,
+        PadButton::West => Action::Search,
         PadButton::LeftBumper => Action::CycleTab(-1),
         PadButton::RightBumper => Action::CycleTab(1),
         PadButton::Guide | PadButton::Start => Action::Menu,
@@ -374,6 +377,7 @@ mod reader {
             Button::South => PadButton::South,
             Button::East => PadButton::East,
             Button::North => PadButton::North,
+            Button::West => PadButton::West,
             // gilrs names the bumpers LeftTrigger/RightTrigger; the triggers
             // proper are the *2 variants, read as held state instead.
             Button::LeftTrigger => PadButton::LeftBumper,

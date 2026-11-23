@@ -28,6 +28,8 @@ pub enum Glyph {
     Secondary,
     /// Start on a pad, Escape on a keyboard.
     Menu,
+    /// X on a pad, Slash on a keyboard.
+    Search,
 }
 
 pub struct Glyphs {
@@ -66,6 +68,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Gamepad, TabRight => "xbox_rb.png",
     Gamepad, Secondary => "xbox_button_color_y.png",
     Gamepad, Menu => "xbox_button_menu.png",
+    Gamepad, Search => "xbox_button_color_x.png",
     Keyboard, Confirm => "keyboard_enter.png",
     Keyboard, Back => "keyboard_escape.png",
     Keyboard, Navigate => "keyboard_arrows_all.png",
@@ -75,6 +78,7 @@ const FILES: &[(InputMode, Glyph, &str, &[u8])] = glyph_files![
     Keyboard, TabRight => "keyboard_e.png",
     Keyboard, Secondary => "keyboard_slash_forward.png",
     Keyboard, Menu => "keyboard_escape.png",
+    Keyboard, Search => "keyboard_slash_forward.png",
 ];
 
 impl Glyphs {

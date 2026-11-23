@@ -10,6 +10,7 @@ use crate::battery::Battery;
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::CoverLoader;
+use crate::keyboard::{Key, Keyboard};
 use crate::model::{
     Cave, CaveExt, CollectionGames, Download, DownloadProgress, DownloadReason, Game, GameUpdate,
     InstallState, Kind, LaunchFailure, Launched, Loadable, Mark, Profile, Prompt, PromptOrigin,
@@ -59,6 +60,15 @@ pub struct App {
     input_seen: bool,
     /// The focused item while the menu drawer is open.
     menu: Option<usize>,
+    /// The on-screen keyboard, while search is being typed into.
+    keyboard: Option<Keyboard>,
+    /// A second screen is up, with the interface on the one that takes
+    /// touches.
+    second_screen: bool,
+    /// How many games the search found, as its row's heading says it.
+    search_found: String,
+    /// The second screen last drew the page, not the logo.
+    second_shows_page: bool,
     /// Frames of black left to show, once the screen has powered off,
     /// before the window is asked to close. The backend join that follows
     /// the close blocks the last frame on screen, so it must be a black
@@ -281,6 +291,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "types" => Ok(Step::Act(Action::Open(Page::PlayableTypes { row: 0 }))),
             "settings" => Ok(Step::Act(Action::Open(Page::Settings { row: 0 }))),
             "guide" => Ok(Step::Act(Action::Menu)),
+            "search" => Ok(Step::Act(Action::Search)),
             // A stand-in question, to look at the modal without a game that
             // asks one.
             "prompt" => Ok(Step::Act(Action::Answer {
@@ -310,6 +321,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
 }
 
 impl App {
+    /// The longest text the on-screen keyboard types.
+    const SEARCH_LENGTH: usize = 40;
     /// Frames the powered-off screen is held before the window closes.
     /// Long enough to paint and to finish a screenshot readback.
     const QUIT_FRAMES: u32 = 3;
@@ -409,6 +422,10 @@ impl App {
             marks: Default::default(),
             reports_path: shot.is_none().then_some(reports_path),
             menu: None,
+            keyboard: None,
+            second_screen: false,
+            search_found: String::new(),
+            second_shows_page: false,
             quitting: None,
             actions: Vec::new(),
             rows: ui::Rows::default(),
@@ -680,6 +697,12 @@ impl App {
             Tab::Library => {
                 push(playable.0, playable.1);
                 push(rating.0, rating.1);
+                if self.second_screen {
+                    push(
+                        ui::ToolbarControl::Search(self.query.clone()),
+                        vec![ToolbarStop::new("Search", Action::Search)],
+                    );
+                }
             }
             Tab::Collections => {
                 let installed = self.collections_installed_only;
@@ -872,6 +895,53 @@ impl App {
             Action::Back if view.picked => view.unpick(),
             Action::Back => self.report = None,
             _ => {}
+        }
+    }
+
+    /// An action while the on-screen keyboard is up.
+    fn apply_in_keyboard(&mut self, action: Action) {
+        let Some(keyboard) = self.keyboard.as_mut() else {
+            return;
+        };
+        let key = match action {
+            Action::MoveFocus(direction) => {
+                keyboard.step(direction);
+                return;
+            }
+            Action::KeyboardKey { row, col } => {
+                keyboard.focus(row, col);
+                keyboard.press();
+                keyboard.focused()
+            }
+            Action::Activate => {
+                keyboard.press();
+                keyboard.focused()
+            }
+            Action::Secondary => Some(Key::Space),
+            Action::CycleTab(_) => Some(Key::Symbols),
+            Action::Menu => Some(Key::Done),
+            // With nothing typed there is nothing to delete, and Back
+            // leaves.
+            Action::Back if self.query.is_empty() => Some(Key::Done),
+            Action::Back => Some(Key::Delete),
+            _ => None,
+        };
+        let before = self.query.len();
+        match key {
+            Some(Key::Char(c)) if before < Self::SEARCH_LENGTH => self.query.push(c),
+            Some(Key::Space) if before < Self::SEARCH_LENGTH => self.query.push(' '),
+            Some(Key::Delete) => {
+                self.query.pop();
+            }
+            Some(Key::Symbols) => keyboard.symbols = !keyboard.symbols,
+            Some(Key::Done) => {
+                self.keyboard = None;
+                self.actions.push(Action::SearchDone);
+            }
+            _ => {}
+        }
+        if self.query.len() != before {
+            self.rebuild_sections();
         }
     }
 
@@ -1151,6 +1221,10 @@ impl App {
             self.apply_in_viewer(action);
             return;
         }
+        if self.keyboard.is_some() {
+            self.apply_in_keyboard(action);
+            return;
+        }
         if self.menu.is_some() {
             self.apply_in_menu(action);
             return;
@@ -1393,6 +1467,9 @@ impl App {
                 Page::PlayableTypes { .. } | Page::Settings { .. } => {}
             },
             Action::Search => match self.page {
+                Page::Library if self.tab == Tab::Library && self.second_screen => {
+                    self.keyboard = Some(Keyboard::default());
+                }
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
@@ -1445,6 +1522,8 @@ impl App {
                 }
             }
             Action::CloseScreenshot => self.viewer = None,
+            // Only the keyboard has keys to press.
+            Action::KeyboardKey { .. } => {}
             Action::SearchDone => {
                 self.blur_search = true;
                 // Search hands control to its results, not back to the
@@ -1659,6 +1738,7 @@ impl App {
                 1 => "1 match".to_string(),
                 n => format!("{n} matches"),
             };
+            self.search_found.clone_from(&title);
             self.rows.set_sections(vec![ui::Section {
                 title,
                 games: matches,
@@ -3201,6 +3281,22 @@ impl App {
 
     /// What the footer offers on the current page, in reading order.
     fn hints(&self) -> Vec<(Vec<Glyph>, String)> {
+        if self.keyboard.is_some() && self.prompt.is_none() {
+            let back = if self.query.is_empty() {
+                "Close"
+            } else {
+                "Delete"
+            };
+            return [
+                (Glyph::Confirm, "Type"),
+                (Glyph::Back, back),
+                (Glyph::Secondary, "Space"),
+                (Glyph::TabLeft, "Symbols"),
+                (Glyph::Menu, "Done"),
+            ]
+            .map(|(glyph, label)| (vec![glyph], label.to_string()))
+            .to_vec();
+        }
         if let Some(focus) = self.menu {
             let items = self.menu_items();
             let mut hints = Vec::new();
@@ -3316,6 +3412,9 @@ impl App {
                     Tab::Library => {
                         if self.input_mode != InputMode::Gamepad && !self.handheld {
                             hints.push((vec![Glyph::Secondary], "Search".to_string()));
+                        }
+                        if self.second_screen {
+                            hints.push((vec![Glyph::Search], "Search".to_string()));
                         }
                         hints.push((vec![Glyph::Menu], "Menu".to_string()));
                     }
@@ -3463,8 +3562,18 @@ impl App {
 
     /// Draws the device's second screen.
     pub fn update_second(&mut self, ui: &mut egui::Ui) {
-        let rest = ui::second_screen(ui, &self.glyphs);
         let screen = ui.max_rect();
+        // While the keyboard has the first screen, the page it searches
+        // is shown here.
+        self.second_shows_page = self.keyboard.is_some();
+        if self.second_shows_page {
+            let m = ui::Metrics::for_screen(screen, self.handheld);
+            egui::CentralPanel::default()
+                .frame(Self::page_frame(&m))
+                .show(ui, |ui| self.draw_page(ui, &m));
+            return;
+        }
+        let rest = ui::second_screen(ui, &self.glyphs);
         if self
             .intro
             .draw_second(ui.ctx(), screen, self.glyphs.logo(), rest)
@@ -3476,13 +3585,18 @@ impl App {
         }
     }
 
-    /// The second screen is animating and wants every frame.
-    pub fn second_screen_playing(&self) -> bool {
-        self.intro.first_screen_dark() || self.quitting.is_some()
+    /// The second screen is animating or following the first, and is
+    /// drawn whenever the first is.
+    pub fn second_screen_live(&self) -> bool {
+        self.intro.first_screen_dark()
+            || self.quitting.is_some()
+            || self.keyboard.is_some()
+            || self.second_shows_page
     }
 
     /// A second screen is up, so the intro plays across both.
     pub fn has_second_screen(&mut self) {
+        self.second_screen = true;
         self.intro.split();
     }
 
@@ -3517,6 +3631,295 @@ impl App {
     const NOTICE_FOR: Duration = Duration::from_secs(8);
     /// How long the update button reports a clean check.
     const UP_TO_DATE_FOR: Duration = Duration::from_secs(4);
+
+    fn page_frame(m: &ui::Metrics) -> egui::Frame {
+        egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin {
+            left: m.margin as i8,
+            right: m.margin as i8,
+            top: m.top as i8,
+            bottom: m.frame(6.0) as i8,
+        })
+    }
+
+    /// The page under the footer: the header, then the tab or the open
+    /// game.
+    fn draw_page(&mut self, ui: &mut egui::Ui, m: &ui::Metrics) {
+        // A row of the strip's height from the start, so the logo
+        // and the right-hand text center on the tabs' line.
+        let row = egui::vec2(ui.available_width(), ui::tab_strip_height(ui, m));
+        let centered = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, centered, |ui| {
+            let home = ui::logo(ui, m, &self.glyphs, !self.intro.carries_logo());
+            self.intro.set_home(home);
+            if self.login.is_some() {
+                ui.allocate_exact_size(
+                    egui::vec2(0.0, ui::tab_strip_height(ui, m)),
+                    egui::Sense::hover(),
+                );
+            } else if self.page.is_library() {
+                let downloading = self
+                    .downloads
+                    .iter()
+                    .filter(|d| d.finished_at.is_none())
+                    .count();
+                if let Some(tab) =
+                    ui::tab_strip(ui, m, &self.glyphs, self.input_mode, self.tab, downloading)
+                {
+                    self.actions.push(Action::SetTab(tab));
+                }
+            } else if self.input_mode != InputMode::Gamepad {
+                // A pointer has no Back key; the strip's slot holds
+                // the way back. The pad's footer hint covers it.
+                if ui::back_button(ui, m).clicked() {
+                    self.actions.push(Action::Back);
+                }
+                let has_url = match self.page {
+                    Page::Game { id, .. } => self.game(id).is_some_and(|g| !g.url.is_empty()),
+                    Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => false,
+                };
+                if has_url && ui::qr_button(ui, m).clicked() {
+                    self.actions.push(Action::ShowQr);
+                }
+            } else {
+                // The strip's slot stays empty at the strip's height,
+                // so the frame around the page does not move.
+                ui.allocate_exact_size(
+                    egui::vec2(0.0, ui::tab_strip_height(ui, m)),
+                    egui::Sense::hover(),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = m.space(12.0);
+                if let Some(reading) = self.battery.reading() {
+                    ui::battery(ui, m, reading);
+                }
+                // The network mark goes before the name: the name
+                // is what gives way when the row is short, and
+                // it elides rather than wrapping into the tabs.
+                if !self.online {
+                    ui::offline(ui, m);
+                } else if self.syncing {
+                    ui::syncing(ui, m);
+                }
+                if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref())
+                    && ui.available_width() >= m.space(48.0)
+                {
+                    ui::subtle_truncated(ui, m, user.name());
+                }
+            });
+        });
+        // The Downloads toolbar scrolls with its list instead.
+        let toolbar_shown = self.page.is_library()
+            && match self.tab {
+                Tab::Library => self.owned.get().is_some(),
+                Tab::Collections => self.collections.get().is_some(),
+                Tab::Downloads => false,
+            };
+        if toolbar_shown {
+            ui.add_space(m.frame(8.0));
+            ui.horizontal(|ui| {
+                let (controls, stops) = self.toolbar();
+                let focused = self.toolbar_focus_in(stops.len(), self.rows_empty());
+                let response = ui::toolbar(ui, m, &controls, focused);
+                if let Some(index) = response.hovered {
+                    self.actions.push(Action::FocusToolbar(index));
+                }
+                if let Some(index) = response.clicked {
+                    self.actions.push(stops[index].action.clone());
+                }
+                if self.tab != Tab::Library || self.handheld {
+                    return;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let id = Self::search_id();
+                    if std::mem::take(&mut self.blur_search) {
+                        ui.memory_mut(|m| m.surrender_focus(id));
+                    }
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.query)
+                            .id(id)
+                            .hint_text(
+                                egui::RichText::new("Search")
+                                    .font(egui::FontId::proportional(m.label)),
+                            )
+                            .desired_width(m.space(200.0))
+                            .font(egui::FontId::proportional(m.label)),
+                    );
+                    if std::mem::take(&mut self.focus_search) {
+                        edit.request_focus();
+                    }
+                    if edit.changed() {
+                        self.rebuild_sections();
+                    }
+                });
+            });
+        }
+        // Under a toolbar; or, on Downloads, above the list's own
+        // ring space so its toolbar sits where the others do.
+        ui.add_space(if self.page.is_library() && self.tab == Tab::Downloads {
+            (m.frame(8.0) - m.ring).max(0.0)
+        } else {
+            m.frame(12.0)
+        });
+        if let Some(login) = &self.login {
+            ui::login(ui, m, login, &mut self.actions);
+            return;
+        }
+        match (&self.owned, self.page) {
+            // These pages stand on their own, whatever the library's state.
+            (_, Page::PlayableTypes { row }) => ui::playable_types(
+                ui,
+                m,
+                crate::playable::playable_types(),
+                &self.playable_hidden,
+                row,
+                &mut self.actions,
+            ),
+            (_, Page::Settings { row }) => {
+                let rows = self.settings_rows();
+                let about = self.about_rows();
+                ui::settings(ui, m, &rows, &about, row, &mut self.actions)
+            }
+            (Loadable::NotLoaded | Loadable::Loading, _) => ui::loading(ui, m, &self.status),
+            (Loadable::Failed(message), _) => ui::failed(ui, m, message),
+            (Loadable::Loaded(_), Page::Library) => match self.tab {
+                Tab::Library => ui::library(
+                    ui,
+                    m,
+                    ui::LibraryView {
+                        games: &self.catalog,
+                        installed: &self.installed,
+                        installs: &self.installs,
+                        updatable: &self.updatable(),
+                        marks: self.cover_marks.then_some(&self.marks),
+                        covers: &self.covers,
+                        scrollbar: self.input_mode == InputMode::Keyboard,
+                        focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
+                    },
+                    &mut self.rows,
+                    &mut self.actions,
+                ),
+                Tab::Collections => match &self.collections {
+                    Loadable::Loaded(collections) if collections.is_empty() => {
+                        ui::placeholder(ui, m, "No collections")
+                    }
+                    Loadable::Failed(_) => ui::placeholder(ui, m, "Couldn't load collections"),
+                    // Scoped so the rows' scroll state does not share
+                    // egui ids with the Library tab's rows.
+                    Loadable::Loaded(_) => {
+                        ui.push_id("collections", |ui| {
+                            ui::library(
+                                ui,
+                                m,
+                                ui::LibraryView {
+                                    games: &self.catalog,
+                                    installed: &self.installed,
+                                    installs: &self.installs,
+                                    updatable: &self.updatable(),
+                                    marks: self.cover_marks.then_some(&self.marks),
+                                    covers: &self.covers,
+                                    scrollbar: self.input_mode == InputMode::Keyboard,
+                                    focused: self.toolbar_focus[tab_slot(Tab::Collections)]
+                                        .is_none(),
+                                },
+                                &mut self.collection_rows,
+                                &mut self.actions,
+                            );
+                        });
+                        self.want_visible_collections();
+                    }
+                    _ => ui::centered_spinner(ui, m),
+                },
+                Tab::Downloads => {
+                    let rows = self.download_rows();
+                    let (row, button) = self.downloads_row_in(&rows);
+                    let (controls, stops) = self.toolbar();
+                    let focus = match self.toolbar_focus_in(stops.len(), rows.is_empty()) {
+                        Some(index) => ui::DownloadFocus::Toolbar(index),
+                        None => ui::DownloadFocus::Row { row, button },
+                    };
+                    let mut actions = Vec::new();
+                    let response = ui::downloads(
+                        ui,
+                        m,
+                        ui::DownloadsView {
+                            rows: &rows,
+                            covers: &self.covers,
+                            toolbar: &controls,
+                            focus,
+                            scrollbar: self.input_mode == InputMode::Keyboard,
+                        },
+                        &mut actions,
+                    );
+                    self.actions.extend(actions);
+                    if let Some(index) = response.hovered {
+                        self.actions.push(Action::FocusToolbar(index));
+                    }
+                    if let Some(index) = response.clicked {
+                        self.actions.push(stops[index].action.clone());
+                    }
+                }
+            },
+            (Loadable::Loaded(_), Page::Game { id, button, shot }) => match self.catalog.get(&id) {
+                Some(game) => {
+                    let caves: Vec<&Cave> = self
+                        .caves
+                        .iter()
+                        .filter(|cave| cave.game_id() == Some(game.id))
+                        .collect();
+                    let running = self.is_running(game.id);
+                    let running_since = caves
+                        .iter()
+                        .find_map(|cave| self.running.get(&cave.id))
+                        .copied();
+                    let update = self.update_for(game.id).cloned();
+                    let failure = caves
+                        .iter()
+                        .find_map(|cave| self.launch_failures.get(&cave.id));
+                    let install_failure = self.install_failures.get(&game.id).map(String::as_str);
+                    let (info, info_loading) =
+                        match self
+                            .page_info
+                            .get(ui.ctx(), game.id, &game.url, self.online)
+                        {
+                            Lookup::Ready(info) => (Some(info), false),
+                            Lookup::Loading => (None, true),
+                            Lookup::Missing => (None, false),
+                        };
+                    ui::game_detail(
+                        ui,
+                        m,
+                        ui::GameView {
+                            game,
+                            covers: &self.covers,
+                            caves: &caves,
+                            install: self.installs.get(&game.id),
+                            running,
+                            running_since,
+                            update: update.as_ref(),
+                            online: self.online,
+                            focused_button: button,
+                            failure,
+                            install_failure,
+                            reported: reported(&self.reports, &self.caves, game.id),
+                            owned: self
+                                .owned
+                                .get()
+                                .map(|games| games.iter().any(|g| g.id == game.id)),
+                            info: info.as_deref(),
+                            info_loading,
+                            focused_shot: shot,
+                            scroll: self.detail_scroll.take(),
+                            visit: self.detail_visit,
+                        },
+                        &mut self.page_scroll,
+                        &mut self.actions,
+                    );
+                }
+                None => self.actions.push(Action::Back),
+            },
+        }
+    }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let screen = ui.max_rect();
@@ -3556,304 +3959,17 @@ impl App {
             );
         }
         let page = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin {
-                left: m.margin as i8,
-                right: m.margin as i8,
-                top: m.top as i8,
-                bottom: m.frame(6.0) as i8,
-            }))
+            .frame(Self::page_frame(&m))
             .show(ui, |ui| {
-                // A row of the strip's height from the start, so the logo
-                // and the right-hand text center on the tabs' line.
-                let row = egui::vec2(ui.available_width(), ui::tab_strip_height(ui, &m));
-                let centered = egui::Layout::left_to_right(egui::Align::Center);
-                ui.allocate_ui_with_layout(row, centered, |ui| {
-                    let home = ui::logo(ui, &m, &self.glyphs, !self.intro.carries_logo());
-                    self.intro.set_home(home);
-                    if self.login.is_some() {
-                        ui.allocate_exact_size(
-                            egui::vec2(0.0, ui::tab_strip_height(ui, &m)),
-                            egui::Sense::hover(),
-                        );
-                    } else if self.page.is_library() {
-                        let downloading = self
-                            .downloads
-                            .iter()
-                            .filter(|d| d.finished_at.is_none())
-                            .count();
-                        if let Some(tab) = ui::tab_strip(
-                            ui,
-                            &m,
-                            &self.glyphs,
-                            self.input_mode,
-                            self.tab,
-                            downloading,
-                        ) {
-                            self.actions.push(Action::SetTab(tab));
-                        }
-                    } else if self.input_mode != InputMode::Gamepad {
-                        // A pointer has no Back key; the strip's slot holds
-                        // the way back. The pad's footer hint covers it.
-                        if ui::back_button(ui, &m).clicked() {
-                            self.actions.push(Action::Back);
-                        }
-                        let has_url = match self.page {
-                            Page::Game { id, .. } => {
-                                self.game(id).is_some_and(|g| !g.url.is_empty())
-                            }
-                            Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => {
-                                false
-                            }
-                        };
-                        if has_url && ui::qr_button(ui, &m).clicked() {
-                            self.actions.push(Action::ShowQr);
-                        }
+                if let Some(keyboard) = &self.keyboard {
+                    let found = if self.query.trim().is_empty() {
+                        ""
                     } else {
-                        // The strip's slot stays empty at the strip's height,
-                        // so the frame around the page does not move.
-                        ui.allocate_exact_size(
-                            egui::vec2(0.0, ui::tab_strip_height(ui, &m)),
-                            egui::Sense::hover(),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = m.space(12.0);
-                        if let Some(reading) = self.battery.reading() {
-                            ui::battery(ui, &m, reading);
-                        }
-                        // The network mark goes before the name: the name
-                        // is what gives way when the row is short, and
-                        // it elides rather than wrapping into the tabs.
-                        if !self.online {
-                            ui::offline(ui, &m);
-                        } else if self.syncing {
-                            ui::syncing(ui, &m);
-                        }
-                        if let Some(user) = self.profile.as_ref().and_then(|p| p.user.as_ref())
-                            && ui.available_width() >= m.space(48.0)
-                        {
-                            ui::subtle_truncated(ui, &m, user.name());
-                        }
-                    });
-                });
-                // The Downloads toolbar scrolls with its list instead.
-                let toolbar_shown = self.page.is_library()
-                    && match self.tab {
-                        Tab::Library => self.owned.get().is_some(),
-                        Tab::Collections => self.collections.get().is_some(),
-                        Tab::Downloads => false,
+                        &self.search_found
                     };
-                if toolbar_shown {
-                    ui.add_space(m.frame(8.0));
-                    ui.horizontal(|ui| {
-                        let (controls, stops) = self.toolbar();
-                        let focused = self.toolbar_focus_in(stops.len(), self.rows_empty());
-                        let response = ui::toolbar(ui, &m, &controls, focused);
-                        if let Some(index) = response.hovered {
-                            self.actions.push(Action::FocusToolbar(index));
-                        }
-                        if let Some(index) = response.clicked {
-                            self.actions.push(stops[index].action.clone());
-                        }
-                        if self.tab != Tab::Library || self.handheld {
-                            return;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let id = Self::search_id();
-                            if std::mem::take(&mut self.blur_search) {
-                                ui.memory_mut(|m| m.surrender_focus(id));
-                            }
-                            let edit = ui.add(
-                                egui::TextEdit::singleline(&mut self.query)
-                                    .id(id)
-                                    .hint_text(
-                                        egui::RichText::new("Search")
-                                            .font(egui::FontId::proportional(m.label)),
-                                    )
-                                    .desired_width(m.space(200.0))
-                                    .font(egui::FontId::proportional(m.label)),
-                            );
-                            if std::mem::take(&mut self.focus_search) {
-                                edit.request_focus();
-                            }
-                            if edit.changed() {
-                                self.rebuild_sections();
-                            }
-                        });
-                    });
-                }
-                // Under a toolbar; or, on Downloads, above the list's own
-                // ring space so its toolbar sits where the others do.
-                ui.add_space(if self.page.is_library() && self.tab == Tab::Downloads {
-                    (m.frame(8.0) - m.ring).max(0.0)
+                    ui::keyboard(ui, &m, keyboard, &self.query, found, &mut self.actions);
                 } else {
-                    m.frame(12.0)
-                });
-                if let Some(login) = &self.login {
-                    ui::login(ui, &m, login, &mut self.actions);
-                    return;
-                }
-                match (&self.owned, self.page) {
-                    // These pages stand on their own, whatever the library's state.
-                    (_, Page::PlayableTypes { row }) => ui::playable_types(
-                        ui,
-                        &m,
-                        crate::playable::playable_types(),
-                        &self.playable_hidden,
-                        row,
-                        &mut self.actions,
-                    ),
-                    (_, Page::Settings { row }) => {
-                        let rows = self.settings_rows();
-                        let about = self.about_rows();
-                        ui::settings(ui, &m, &rows, &about, row, &mut self.actions)
-                    }
-                    (Loadable::NotLoaded | Loadable::Loading, _) => {
-                        ui::loading(ui, &m, &self.status)
-                    }
-                    (Loadable::Failed(message), _) => ui::failed(ui, &m, message),
-                    (Loadable::Loaded(_), Page::Library) => match self.tab {
-                        Tab::Library => ui::library(
-                            ui,
-                            &m,
-                            ui::LibraryView {
-                                games: &self.catalog,
-                                installed: &self.installed,
-                                installs: &self.installs,
-                                updatable: &self.updatable(),
-                                marks: self.cover_marks.then_some(&self.marks),
-                                covers: &self.covers,
-                                scrollbar: self.input_mode == InputMode::Keyboard,
-                                focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
-                            },
-                            &mut self.rows,
-                            &mut self.actions,
-                        ),
-                        Tab::Collections => match &self.collections {
-                            Loadable::Loaded(collections) if collections.is_empty() => {
-                                ui::placeholder(ui, &m, "No collections")
-                            }
-                            Loadable::Failed(_) => {
-                                ui::placeholder(ui, &m, "Couldn't load collections")
-                            }
-                            // Scoped so the rows' scroll state does not share
-                            // egui ids with the Library tab's rows.
-                            Loadable::Loaded(_) => {
-                                ui.push_id("collections", |ui| {
-                                    ui::library(
-                                        ui,
-                                        &m,
-                                        ui::LibraryView {
-                                            games: &self.catalog,
-                                            installed: &self.installed,
-                                            installs: &self.installs,
-                                            updatable: &self.updatable(),
-                                            marks: self.cover_marks.then_some(&self.marks),
-                                            covers: &self.covers,
-                                            scrollbar: self.input_mode == InputMode::Keyboard,
-                                            focused: self.toolbar_focus[tab_slot(Tab::Collections)]
-                                                .is_none(),
-                                        },
-                                        &mut self.collection_rows,
-                                        &mut self.actions,
-                                    );
-                                });
-                                self.want_visible_collections();
-                            }
-                            _ => ui::centered_spinner(ui, &m),
-                        },
-                        Tab::Downloads => {
-                            let rows = self.download_rows();
-                            let (row, button) = self.downloads_row_in(&rows);
-                            let (controls, stops) = self.toolbar();
-                            let focus = match self.toolbar_focus_in(stops.len(), rows.is_empty()) {
-                                Some(index) => ui::DownloadFocus::Toolbar(index),
-                                None => ui::DownloadFocus::Row { row, button },
-                            };
-                            let mut actions = Vec::new();
-                            let response = ui::downloads(
-                                ui,
-                                &m,
-                                ui::DownloadsView {
-                                    rows: &rows,
-                                    covers: &self.covers,
-                                    toolbar: &controls,
-                                    focus,
-                                    scrollbar: self.input_mode == InputMode::Keyboard,
-                                },
-                                &mut actions,
-                            );
-                            self.actions.extend(actions);
-                            if let Some(index) = response.hovered {
-                                self.actions.push(Action::FocusToolbar(index));
-                            }
-                            if let Some(index) = response.clicked {
-                                self.actions.push(stops[index].action.clone());
-                            }
-                        }
-                    },
-                    (Loadable::Loaded(_), Page::Game { id, button, shot }) => {
-                        match self.catalog.get(&id) {
-                            Some(game) => {
-                                let caves: Vec<&Cave> = self
-                                    .caves
-                                    .iter()
-                                    .filter(|cave| cave.game_id() == Some(game.id))
-                                    .collect();
-                                let running = self.is_running(game.id);
-                                let running_since = caves
-                                    .iter()
-                                    .find_map(|cave| self.running.get(&cave.id))
-                                    .copied();
-                                let update = self.update_for(game.id).cloned();
-                                let failure = caves
-                                    .iter()
-                                    .find_map(|cave| self.launch_failures.get(&cave.id));
-                                let install_failure =
-                                    self.install_failures.get(&game.id).map(String::as_str);
-                                let (info, info_loading) = match self.page_info.get(
-                                    ui.ctx(),
-                                    game.id,
-                                    &game.url,
-                                    self.online,
-                                ) {
-                                    Lookup::Ready(info) => (Some(info), false),
-                                    Lookup::Loading => (None, true),
-                                    Lookup::Missing => (None, false),
-                                };
-                                ui::game_detail(
-                                    ui,
-                                    &m,
-                                    ui::GameView {
-                                        game,
-                                        covers: &self.covers,
-                                        caves: &caves,
-                                        install: self.installs.get(&game.id),
-                                        running,
-                                        running_since,
-                                        update: update.as_ref(),
-                                        online: self.online,
-                                        focused_button: button,
-                                        failure,
-                                        install_failure,
-                                        reported: reported(&self.reports, &self.caves, game.id),
-                                        owned: self
-                                            .owned
-                                            .get()
-                                            .map(|games| games.iter().any(|g| g.id == game.id)),
-                                        info: info.as_deref(),
-                                        info_loading,
-                                        focused_shot: shot,
-                                        scroll: self.detail_scroll.take(),
-                                        visit: self.detail_visit,
-                                    },
-                                    &mut self.page_scroll,
-                                    &mut self.actions,
-                                );
-                            }
-                            None => self.actions.push(Action::Back),
-                        }
-                    }
+                    self.draw_page(ui, &m);
                 }
             })
             .response

@@ -13,6 +13,7 @@ mod http;
 mod images;
 mod intro;
 mod json_file;
+mod keyboard;
 mod model;
 mod page_info;
 mod playable;

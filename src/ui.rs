@@ -8,6 +8,7 @@ use egui::{Color32, CornerRadius, FontId, Rect, Sense, Stroke, TextureHandle, Ui
 use crate::actions::{Action, Direction, Page, Tab, wrap_step};
 use crate::glyphs::{Glyph, Glyphs, InputMode};
 use crate::images::{Animation, CoverLoader, Variant};
+use crate::keyboard::{Key, Keyboard};
 use crate::model::human_size;
 use crate::model::{
     Cave, Game, GameUpdate, InstallState, LaunchFailure, Mark, Prompt, UploadExt, game_price,
@@ -2727,12 +2728,14 @@ pub enum ToolbarControl {
     },
     /// Joined filter options, each with whether it is on.
     Filters(Vec<(&'static str, bool)>),
+    /// Opens the on-screen keyboard; holds what is being searched for.
+    Search(String),
 }
 
 impl ToolbarControl {
     fn stops(&self) -> usize {
         match self {
-            Self::Button { .. } => 1,
+            Self::Button { .. } | Self::Search(_) => 1,
             Self::Filters(options) => options.len(),
         }
     }
@@ -2771,6 +2774,22 @@ pub fn toolbar(
                         out.hovered = Some(first);
                     }
                     if response.clicked() && !busy && !disabled {
+                        out.clicked = Some(first);
+                    }
+                }
+                ToolbarControl::Search(query) => {
+                    let label = if query.is_empty() {
+                        "Search".to_string()
+                    } else {
+                        format!("Search: {query}")
+                    };
+                    // Lit like a filter while there is something typed.
+                    let options = [(label.as_str(), !query.is_empty())];
+                    let response = filter_group(ui, m, &options, local);
+                    if response.hovered.is_some() {
+                        out.hovered = Some(first);
+                    }
+                    if response.clicked.is_some() {
                         out.clicked = Some(first);
                     }
                 }
@@ -4099,6 +4118,101 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs, shown: bool) -> Option<Re
     };
     ui.add_space(m.strip_gap);
     Some(rect)
+}
+
+/// The on-screen keyboard, filling the page: the `text` being typed across
+/// the top with a `note` at its right, and the keys under it. A key is
+/// pressed as the finger lands on it.
+pub fn keyboard(
+    ui: &mut Ui,
+    m: &Metrics,
+    keyboard: &Keyboard,
+    text: &str,
+    note: &str,
+    actions: &mut Vec<Action>,
+) {
+    let area = ui.available_rect_before_wrap();
+    let painter = ui.painter().clone();
+    // Square keys: 44 sets of rounded corners are slow to draw.
+    let radius = 0.0;
+    let pad = m.space(14.0);
+    let field = Rect::from_min_size(area.min, vec2(area.width(), m.space(44.0)));
+    painter.rect_filled(field, CornerRadius::same(radius as u8), TILE_BG);
+    let note = painter.layout_no_wrap(note.to_string(), FontId::proportional(m.caption), DIM);
+    let note_left = field.right() - pad - note.size().x;
+    painter.galley(
+        egui::pos2(note_left, field.center().y - note.size().y / 2.0),
+        note,
+        DIM,
+    );
+    let (shown, color) = if text.is_empty() {
+        ("Search your games", DISABLED)
+    } else {
+        (text, TEXT)
+    };
+    let typed = painter.layout_no_wrap(shown.to_string(), bold(m.dialog), color);
+    let cursor = vec2(m.space(3.0), typed.size().y);
+    let gap = m.space(6.0);
+    let room = note_left - pad - field.left() - pad;
+    let width = if text.is_empty() { 0.0 } else { typed.size().x };
+    // The end of a long text stays in view.
+    let left = field.left() + pad - (width + cursor.x + gap - room).max(0.0);
+    let line = field.center().y - typed.size().y / 2.0;
+    let clipped = painter.with_clip_rect(Rect::from_min_max(
+        egui::pos2(field.left() + pad, field.top()),
+        egui::pos2(field.left() + pad + room, field.bottom()),
+    ));
+    // The hint follows the cursor; typed text leads it.
+    let after = if text.is_empty() { cursor.x + gap } else { 0.0 };
+    clipped.galley(egui::pos2(left + after, line), typed, color);
+    clipped.rect_filled(
+        Rect::from_min_size(egui::pos2(left + width, line), cursor),
+        0.0,
+        ACCENT,
+    );
+
+    let top = field.bottom() + m.space(12.0);
+    let cols = crate::keyboard::COLS as f32;
+    let rows = crate::keyboard::ROWS as f32;
+    let key_width = (area.width() - gap * (cols - 1.0)) / cols;
+    let key_height = ((area.bottom() - top - gap * (rows - 1.0)) / rows).min(key_width * 1.25);
+    let pressed = ui.input(|i| i.pointer.any_pressed());
+    for (key, row, cols) in keyboard.keys() {
+        let rect = Rect::from_min_size(
+            egui::pos2(
+                area.left() + cols.start as f32 * (key_width + gap),
+                top + row as f32 * (key_height + gap),
+            ),
+            vec2(cols.len() as f32 * (key_width + gap) - gap, key_height),
+        );
+        let response = ui.allocate_rect(rect, Sense::click());
+        if pressed && response.is_pointer_button_down_on() {
+            actions.push(Action::KeyboardKey {
+                row,
+                col: cols.start,
+            });
+        }
+        let focused = keyboard.has_focus(row, &cols);
+        let fill = if focused { TILE_HOVER } else { TILE_BG };
+        let flash = keyboard.flash(row, &cols);
+        if flash > 0.0 {
+            ui.ctx().request_repaint();
+        }
+        let fill = fill.lerp_to_gamma(FILTER_BORDER, flash);
+        painter.rect_filled(rect, CornerRadius::same(radius as u8), fill);
+        if focused {
+            focus_ring(ui, rect, [radius; 4], m);
+        }
+        let (label, font) = match key {
+            Key::Char(c) => (c.to_string(), bold(m.dialog)),
+            Key::Symbols if keyboard.symbols => ("abc".to_string(), bold(m.button)),
+            Key::Symbols => ("#+=".to_string(), bold(m.button)),
+            Key::Space => ("Space".to_string(), bold(m.button)),
+            Key::Delete => ("Del".to_string(), bold(m.button)),
+            Key::Done => ("Done".to_string(), bold(m.button)),
+        };
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, font, TEXT);
+    }
 }
 
 /// A handheld's second screen: the logo on the page's background.
