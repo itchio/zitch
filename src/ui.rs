@@ -756,23 +756,48 @@ impl Rows {
 
 /// The line above search results: what was typed, and how many matched.
 pub fn search_heading(ui: &mut Ui, m: &Metrics, query: &str, found: &str) {
-    ui.add_space(m.frame(8.0));
-    ui.horizontal(|ui| {
-        let (title, color) = if query.is_empty() {
-            ("Search your games", DIM)
-        } else {
-            (query, TEXT)
-        };
-        ui.label(egui::RichText::new(title).font(bold(m.section)).color(color));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(found)
-                    .font(FontId::proportional(m.body))
-                    .color(DIM),
-            );
+    ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
+        ui.horizontal(|ui| {
+            let title = format!("Results for \u{201c}{}\u{201d}", query.trim());
+            ui.label(egui::RichText::new(title).font(bold(m.section)).color(TEXT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(found)
+                        .font(FontId::proportional(m.body))
+                        .color(DIM),
+                );
+            });
         });
     });
-    ui.add_space(m.frame(8.0));
+}
+
+/// The search page with no games to show: a magnifying glass over two
+/// centered lines.
+pub fn search_empty(ui: &mut Ui, m: &Metrics, title: &str, detail: &str) {
+    let center = ui.available_rect_before_wrap().center();
+    let size = m.space(56.0);
+    let icon = Rect::from_center_size(center - vec2(0.0, m.space(60.0)), vec2(size, size));
+    let stroke = Stroke::new(m.space(5.0), DIM);
+    let radius = size * 0.34;
+    let lens = icon.min + vec2(radius, radius) + vec2(stroke.width, stroke.width) / 2.0;
+    let reach = std::f32::consts::FRAC_1_SQRT_2;
+    ui.painter().circle_stroke(lens, radius, stroke);
+    ui.painter()
+        .line_segment([lens + vec2(reach, reach) * radius, icon.max], stroke);
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        title,
+        bold(m.dialog),
+        TEXT,
+    );
+    ui.painter().text(
+        center + vec2(0.0, m.space(34.0)),
+        egui::Align2::CENTER_CENTER,
+        detail,
+        FontId::proportional(m.body),
+        DIM,
+    );
 }
 
 /// How many tiles fit side by side in `width`.
@@ -4289,8 +4314,10 @@ pub fn tab_strip(
     m: &Metrics,
     glyphs: &Glyphs,
     mode: InputMode,
-    active: Tab,
+    active: Option<Tab>,
     downloading: usize,
+    // The bumpers switch tabs; dimmed while they do something else.
+    bumpers: bool,
 ) -> Option<Tab> {
     let mut picked = None;
     // A row of the strip's full height from the start, so the glyph placed
@@ -4313,15 +4340,17 @@ pub fn tab_strip(
                         17.0
                     };
                     let size = m.icon(base).min(text_height + 2.0 * tab_pad_y(m));
+                    let tint = if bumpers { 255 } else { 50 };
                     ui.add(
                         egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                            .fit_to_exact_size(vec2(size, size)),
+                            .fit_to_exact_size(vec2(size, size))
+                            .tint(Color32::from_white_alpha(tint)),
                     );
                 }
             };
             glyph(ui, Glyph::TabLeft);
             for tab in Tab::ALL {
-                let selected = tab == active;
+                let selected = Some(tab) == active;
                 let color = if selected { TEXT } else { DIM };
                 let galley =
                     ui.painter()

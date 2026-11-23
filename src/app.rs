@@ -69,7 +69,11 @@ pub struct App {
     search_found: String,
     /// The search page is open, or under the game opened from it.
     searching: bool,
+    /// The tab the search was opened from, and goes back to.
+    search_from: Tab,
     search_matches: Vec<i64>,
+    /// Games that match but for the filters.
+    search_filtered: usize,
     search_columns: usize,
     search_rows: ui::Rows,
     /// The second screen last drew the page, not the logo.
@@ -439,7 +443,9 @@ impl App {
             second_screen: false,
             search_found: String::new(),
             searching: false,
+            search_from: Tab::default(),
             search_matches: Vec::new(),
+            search_filtered: 0,
             search_columns: 4,
             search_rows: ui::Rows::default(),
             second_shows_page: false,
@@ -688,6 +694,9 @@ impl App {
     fn rows_empty(&self) -> bool {
         let no_tiles =
             |rows: &ui::Rows| rows.sections.iter().all(|s| s.games.is_empty() && !s.more);
+        if self.searching {
+            return self.search_matches.is_empty();
+        }
         match self.tab {
             Tab::Library => no_tiles(&self.rows),
             Tab::Collections => no_tiles(&self.collection_rows),
@@ -969,10 +978,15 @@ impl App {
     fn open_search(&mut self) {
         if !self.searching {
             self.searching = true;
+            // The search has the Library's filters, whichever tab it
+            // was opened from.
+            self.search_from = self.tab;
+            self.tab = Tab::Library;
             self.query.clear();
             self.search_rows = ui::Rows::default();
         }
         self.page = Page::Search;
+        self.toolbar_focus[tab_slot(Tab::Library)] = None;
         self.keyboard = Some(Keyboard::default());
         self.rebuild_search();
     }
@@ -982,7 +996,9 @@ impl App {
         self.query.clear();
         self.search_matches.clear();
         self.page = Page::Library;
-        self.rows.follow = true;
+        self.tab = self.search_from;
+        self.toolbar_focus[tab_slot(Tab::Library)] = None;
+        self.follow_rows();
     }
 
     /// The games whose titles hold what was typed, owned first then
@@ -990,7 +1006,7 @@ impl App {
     fn rebuild_search(&mut self) {
         let query = self.query.trim().to_lowercase();
         let mut seen = std::collections::HashSet::new();
-        self.search_matches = if query.is_empty() {
+        let titled: Vec<i64> = if query.is_empty() {
             Vec::new()
         } else {
             self.owned_ids()
@@ -1000,10 +1016,16 @@ impl App {
                 .filter(|id| {
                     self.catalog
                         .get(id)
-                        .is_some_and(|g| self.passes(g) && g.title.to_lowercase().contains(&query))
+                        .is_some_and(|g| g.title.to_lowercase().contains(&query))
                 })
                 .collect()
         };
+        self.search_matches = titled
+            .iter()
+            .copied()
+            .filter(|id| self.catalog.get(id).is_some_and(|g| self.passes(g)))
+            .collect();
+        self.search_filtered = titled.len() - self.search_matches.len();
         self.search_found = match self.search_matches.len() {
             _ if query.is_empty() => String::new(),
             0 => "No matches".to_string(),
@@ -1135,6 +1157,7 @@ impl App {
         let stops = self.toolbar().1.len();
         let rows_empty = self.rows_empty();
         let at_first_row = match self.tab {
+            _ if self.searching => self.search_rows.row == 0,
             Tab::Library => self.rows.row == 0,
             Tab::Collections => self.collection_rows.row == 0,
             Tab::Downloads => self.downloads_row_in(&self.download_rows()).0 == 0,
@@ -1308,8 +1331,7 @@ impl App {
         }
         match action {
             Action::MoveFocus(direction) => match self.page {
-                Page::Library => self.move_focus_library(direction),
-                Page::Search => self.search_rows.move_focus(direction),
+                Page::Library | Page::Search => self.move_focus_library(direction),
                 Page::Game { id, button, shot } => {
                     self.move_focus_game(id, button, shot, direction)
                 }
@@ -1367,17 +1389,11 @@ impl App {
                 }
             }
             Action::Activate => match self.page {
-                Page::Library => match self.confirm_target() {
+                Page::Library | Page::Search => match self.confirm_target() {
                     Some((_, Press::Do(action))) => self.actions.push(action),
                     Some((hint, Press::Offline)) => self.notify_offline(hint),
                     Some((_, Press::Busy)) | None => {}
                 },
-                Page::Search => {
-                    let focused = self.search_rows.focused_game();
-                    if let Some(id) = focused.filter(|id| self.catalog.contains_key(id)) {
-                        self.actions.push(Action::Open(Page::game(id)));
-                    }
-                }
                 Page::Game {
                     shot: Some(index), ..
                 } => self.actions.push(Action::ViewScreenshot(index)),
@@ -1523,6 +1539,9 @@ impl App {
                 }
             }
             Action::SetTab(tab) => {
+                if self.page == Page::Search {
+                    self.close_search();
+                }
                 if self.page.is_library() {
                     self.tab = tab;
                     self.blur_search = true;
@@ -1530,7 +1549,12 @@ impl App {
                 }
             }
             Action::CycleTab(step) => match self.page {
-                Page::Library => self.actions.push(Action::SetTab(self.tab.next(step))),
+                Page::Library | Page::Search => {
+                    if self.page == Page::Search {
+                        self.close_search();
+                    }
+                    self.actions.push(Action::SetTab(self.tab.next(step)))
+                }
                 Page::Game { id, .. } => {
                     if let Some(next) = self.game_beside(id, step) {
                         // The row follows, so Back lands on this game.
@@ -1540,12 +1564,10 @@ impl App {
                         self.actions.push(Action::Open(Page::game(next)));
                     }
                 }
-                Page::Search | Page::PlayableTypes { .. } | Page::Settings { .. } => {}
+                Page::PlayableTypes { .. } | Page::Settings { .. } => {}
             },
             Action::Search => match self.page {
-                Page::Library if self.tab == Tab::Library && self.second_screen => {
-                    self.open_search();
-                }
+                Page::Library if self.second_screen => self.open_search(),
                 Page::Search => self.open_search(),
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
@@ -1554,7 +1576,7 @@ impl App {
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
             },
             Action::Secondary => match self.page {
-                Page::Library if self.tab != Tab::Downloads => {
+                Page::Library | Page::Search if self.tab != Tab::Downloads => {
                     let stops = self.toolbar().1.len();
                     let rows_empty = self.rows_empty();
                     let slot = tab_slot(self.tab);
@@ -3473,7 +3495,7 @@ impl App {
         }
         // The tab strip already shows the bumpers, so no hint repeats them.
         match self.page {
-            Page::Library => {
+            Page::Library | Page::Search => {
                 let (_, stops) = self.toolbar();
                 let rows_empty = self.rows_empty();
                 let on_toolbar = self.toolbar_focus_in(stops.len(), rows_empty).is_some();
@@ -3503,6 +3525,10 @@ impl App {
                     }
                 }
                 match self.tab {
+                    _ if self.page == Page::Search => {
+                        hints.push((vec![Glyph::Search], "Search".to_string()));
+                        hints.push((vec![Glyph::Back], "Back".to_string()));
+                    }
                     Tab::Library => {
                         if self.input_mode != InputMode::Gamepad && !self.handheld {
                             hints.push((vec![Glyph::Secondary], "Search".to_string()));
@@ -3513,19 +3539,12 @@ impl App {
                         hints.push((vec![Glyph::Menu], "Menu".to_string()));
                     }
                     Tab::Collections | Tab::Downloads => {
+                        if self.second_screen {
+                            hints.push((vec![Glyph::Search], "Search".to_string()));
+                        }
                         hints.push((vec![Glyph::Back], "Back".to_string()));
                     }
                 }
-                hints
-            }
-            Page::Search => {
-                let mut hints = Vec::new();
-                if !self.search_matches.is_empty() {
-                    hints.push((vec![Glyph::Navigate], "Browse".to_string()));
-                    hints.push((vec![Glyph::Confirm], "Open".to_string()));
-                }
-                hints.push((vec![Glyph::Search], "Search".to_string()));
-                hints.push((vec![Glyph::Back], "Library".to_string()));
                 hints
             }
             Page::Game { id, button, shot } => {
@@ -3808,15 +3827,22 @@ impl App {
                     egui::vec2(0.0, ui::tab_strip_height(ui, m)),
                     egui::Sense::hover(),
                 );
-            } else if self.page.is_library() {
+            } else if matches!(self.page, Page::Library | Page::Search) {
+                let active = (self.page != Page::Search).then_some(self.tab);
                 let downloading = self
                     .downloads
                     .iter()
                     .filter(|d| d.finished_at.is_none())
                     .count();
-                if let Some(tab) =
-                    ui::tab_strip(ui, m, &self.glyphs, self.input_mode, self.tab, downloading)
-                {
+                if let Some(tab) = ui::tab_strip(
+                    ui,
+                    m,
+                    &self.glyphs,
+                    self.input_mode,
+                    active,
+                    downloading,
+                    self.keyboard.is_none(),
+                ) {
                     self.actions.push(Action::SetTab(tab));
                 }
             } else if self.input_mode != InputMode::Gamepad {
@@ -3864,7 +3890,7 @@ impl App {
             });
         });
         // The Downloads toolbar scrolls with its list instead.
-        let toolbar_shown = self.page.is_library()
+        let toolbar_shown = matches!(self.page, Page::Library | Page::Search)
             && match self.tab {
                 Tab::Library => self.owned.get().is_some(),
                 Tab::Collections => self.collections.get().is_some(),
@@ -3874,7 +3900,9 @@ impl App {
             ui.add_space(m.frame(8.0));
             ui.horizontal(|ui| {
                 let (controls, stops) = self.toolbar();
-                let focused = self.toolbar_focus_in(stops.len(), self.rows_empty());
+                let focused = self
+                    .toolbar_focus_in(stops.len(), self.rows_empty())
+                    .filter(|_| self.keyboard.is_none());
                 let response = ui::toolbar(ui, m, &controls, focused);
                 if let Some(index) = response.hovered {
                     self.actions.push(Action::FocusToolbar(index));
@@ -3882,7 +3910,7 @@ impl App {
                 if let Some(index) = response.clicked {
                     self.actions.push(stops[index].action.clone());
                 }
-                if self.tab != Tab::Library || self.handheld {
+                if self.tab != Tab::Library || self.handheld || self.searching {
                     return;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3943,6 +3971,21 @@ impl App {
                     self.search_columns = columns;
                     self.search_rows.set_grid(&self.search_matches, columns);
                 }
+                if self.search_matches.is_empty() {
+                    let query = self.query.trim();
+                    let (title, detail) = if query.is_empty() {
+                        ("Search your games".to_string(), String::new())
+                    } else {
+                        let detail = match self.search_filtered {
+                            0 => String::new(),
+                            1 => "1 game is hidden by the filters".to_string(),
+                            n => format!("{n} games are hidden by the filters"),
+                        };
+                        (format!("No matches for \u{201c}{query}\u{201d}"), detail)
+                    };
+                    ui::search_empty(ui, m, &title, &detail);
+                    return;
+                }
                 ui::search_heading(ui, m, &self.query, &self.search_found);
                 ui.push_id("search", |ui| {
                     ui::library(
@@ -3956,7 +3999,8 @@ impl App {
                             marks: self.cover_marks.then_some(&self.marks),
                             covers: &self.covers,
                             scrollbar: self.input_mode == InputMode::Keyboard,
-                            focused: self.keyboard.is_none(),
+                            focused: self.keyboard.is_none()
+                                && self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
                         },
                         &mut self.search_rows,
                         &mut self.actions,
