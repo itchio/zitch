@@ -3430,7 +3430,9 @@ impl App {
             self.input_mode = InputMode::Gamepad;
         } else if keys {
             self.input_mode = InputMode::Keyboard;
-        } else if touches {
+        } else if touches && !self.handheld {
+            // A handheld's buttons stay in reach of a hand on its screen,
+            // so their hints stay up.
             self.input_mode = InputMode::Touch;
         } else if pad.connected && !self.input_seen {
             // A handheld has a controller before it has a first press.

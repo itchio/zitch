@@ -454,6 +454,16 @@ A home-row tile that starts on one press needs an `[app]` line in
 BananaOS's read-only `rnds/systems.cfg`, so zitch stays in Ports until
 BananaOS has one for it.
 
+The panels are two SDL displays, and zitch uses both: the interface is on
+the bottom one, which has the touchscreen, and the top one shows the logo
+in a window of its own, drawn only when its content changes (`Second` in
+`host_sdl.rs`). zitch lights the bottom panel by removing
+`/run/banana/panel-off` and setting the backlight's `bl_power`; `bananad`
+keeps the panel that file names dark across a wake. A LÖVE or Linux game
+draws on the top panel, and the bottom one is dark while it runs. SDL's
+finger events reach the interface as egui touches, with the first finger
+as the pointer.
+
 ```
 make bananaos-deploy HANDHELD=root@<ip>   # copy the stage, libmodplug, itch.io.sh and its art (media/box) into roms/ports
 make bananaos-shot HANDHELD=root@<ip>     # deploy, launch from the menu, fetch /tmp/zitch-bananaos.png

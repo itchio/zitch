@@ -182,15 +182,10 @@ impl Second {
         egui::ViewportId::from_hash_of("second screen")
     }
 
-    /// Opens it on the second display, on a firmware that has one.
-    fn open(video: &sdl2::VideoSubsystem) -> Option<Self> {
-        if video.num_video_displays().unwrap_or(0) < 2
-            || !crate::handheld::firmware().is_some_and(|f| f.second_screen())
-        {
-            return None;
-        }
+    /// Opens it on a display.
+    fn open(video: &sdl2::VideoSubsystem, display: i32) -> Option<Self> {
         let bounds = video
-            .display_bounds(1)
+            .display_bounds(display)
             .inspect_err(|e| log::warn!("second screen: {e}"))
             .ok()?;
         let mut builder = video.window("zitch", bounds.width(), bounds.height());
@@ -224,6 +219,8 @@ pub fn run(
     shot: Option<Shot>,
     window: Window,
 ) -> Result<()> {
+    // Touches arrive as touches, placed by `Input`, not as SDL's mouse.
+    sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
     let sdl = sdl2::init().map_err(|e| anyhow!("initialising SDL: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     let controllers = sdl
@@ -237,8 +234,19 @@ pub fn run(
         attr.set_double_buffer(true);
         attr.set_depth_size(0);
     }
+    // A handheld with two screens has the interface on the second display,
+    // the one with the touchscreen, and the logo on the first.
+    let touch_display = (window.fullscreen
+        && video.num_video_displays().unwrap_or(0) >= 2
+        && crate::handheld::firmware().is_some_and(|f| f.second_screen()))
+    .then(|| video.display_bounds(1).ok())
+    .flatten();
     let mut builder = video.window("zitch", window.size.0 as u32, window.size.1 as u32);
-    builder.opengl().position_centered();
+    builder.opengl();
+    match touch_display {
+        Some(bounds) => builder.position(bounds.x(), bounds.y()),
+        None => builder.position_centered(),
+    };
     if window.fullscreen {
         builder.fullscreen_desktop();
     }
@@ -274,11 +282,7 @@ pub fn run(
     video.text_input().start();
 
     let ctx = egui::Context::default();
-    let mut second = if window.fullscreen {
-        Second::open(&video)
-    } else {
-        None
-    };
+    let mut second = touch_display.and_then(|_| Second::open(&video, 0));
     // The second screen is a window of its own, not one inside the first.
     ctx.set_embed_viewports(second.is_none());
     if slow_small_triangles(&renderer, &version) {
@@ -380,7 +384,7 @@ pub fn run(
                         let _ = pad_tx.send(action);
                     }
                 }
-                other => input.translate(other, to_points),
+                other => input.translate(other, to_points, egui::vec2(pw as f32, ph as f32) / ppp),
             }
         }
         for direction in pads.repeat() {
@@ -633,17 +637,105 @@ fn slow_small_triangles(renderer: &str, version: &str) -> bool {
         && (mesa.starts_with("25.0.") || mesa.starts_with("25.1."))
 }
 
-/// Keyboard and mouse state between frames, as egui events.
+/// Keyboard, mouse and touch state between frames, as egui events.
 #[derive(Default)]
 struct Input {
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
     pointer: egui::Pos2,
+    /// The finger that is also the pointer.
+    finger: Option<i64>,
 }
 
 impl Input {
-    fn translate(&mut self, event: Event, to_points: f32) {
+    /// A touch, and the pointer events egui's own hosts add for the first
+    /// finger down.
+    fn touch(
+        &mut self,
+        device: i64,
+        finger: i64,
+        phase: egui::TouchPhase,
+        pos: egui::Pos2,
+        force: f32,
+    ) {
+        self.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(device as u64),
+            id: egui::TouchId(finger as u64),
+            phase,
+            pos,
+            force: Some(force),
+        });
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        match phase {
+            egui::TouchPhase::Start if self.finger.is_none() => {
+                self.finger = Some(finger);
+                self.pointer = pos;
+                self.events.push(egui::Event::PointerMoved(pos));
+                self.events.push(button(true));
+            }
+            egui::TouchPhase::Move if self.finger == Some(finger) => {
+                self.pointer = pos;
+                self.events.push(egui::Event::PointerMoved(pos));
+            }
+            egui::TouchPhase::End | egui::TouchPhase::Cancel if self.finger == Some(finger) => {
+                self.finger = None;
+                self.events.push(button(false));
+                self.events.push(egui::Event::PointerGone);
+            }
+            _ => {}
+        }
+    }
+
+    /// `screen` is the window's size in points.
+    fn translate(&mut self, event: Event, to_points: f32, screen: egui::Vec2) {
         match event {
+            Event::FingerDown {
+                touch_id,
+                finger_id,
+                x,
+                y,
+                pressure,
+                ..
+            } => self.touch(
+                touch_id,
+                finger_id,
+                egui::TouchPhase::Start,
+                egui::pos2(x * screen.x, y * screen.y),
+                pressure,
+            ),
+            Event::FingerMotion {
+                touch_id,
+                finger_id,
+                x,
+                y,
+                pressure,
+                ..
+            } => self.touch(
+                touch_id,
+                finger_id,
+                egui::TouchPhase::Move,
+                egui::pos2(x * screen.x, y * screen.y),
+                pressure,
+            ),
+            Event::FingerUp {
+                touch_id,
+                finger_id,
+                x,
+                y,
+                pressure,
+                ..
+            } => self.touch(
+                touch_id,
+                finger_id,
+                egui::TouchPhase::End,
+                egui::pos2(x * screen.x, y * screen.y),
+                pressure,
+            ),
             Event::KeyDown {
                 keycode: Some(keycode),
                 keymod,

@@ -167,6 +167,10 @@ fn set_perf(perf: &str) {
     }
 }
 
+/// The backlight of the panel zitch draws its interface on, once it has
+/// lit it.
+static OWN_PANEL: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 /// The panel `run-port` darkened, lit while a game has the screens (a DS
 /// game draws on both) and dark again after.
 struct OtherPanel(Option<PathBuf>);
@@ -299,8 +303,32 @@ impl Firmware for BananaOs {
     }
     /// The bottom panel. `run-port` lights it again when zitch exits.
     fn second_screen(&self) -> bool {
-        light_other_panel();
+        let backlight = light_other_panel();
+        *OWN_PANEL.lock().unwrap_or_else(|p| p.into_inner()) = backlight;
         true
+    }
+
+    /// A game of ours draws on the top panel alone, so ours goes dark
+    /// under it. bananad keeps the named panel dark across a wake.
+    fn game_started(&self, _pid: u32) {
+        let own = OWN_PANEL.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(backlight) = own.as_ref() else {
+            return;
+        };
+        if let Err(err) = std::fs::write(backlight.join("bl_power"), "4") {
+            log::warn!("darkening {}: {err}", backlight.display());
+        }
+        let _ = std::fs::write(PANEL_OFF, format!("{}\n", backlight.display()));
+    }
+
+    fn game_ended(&self) {
+        if OWN_PANEL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            light_other_panel();
+        }
     }
 
     /// zitch and its games both draw through SDL's KMSDRM driver.
