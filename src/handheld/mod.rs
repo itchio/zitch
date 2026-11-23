@@ -97,6 +97,12 @@ pub trait Firmware: Sync {
     fn hands_over_display(&self) -> bool {
         false
     }
+
+    /// Lights the device's second screen for zitch to draw on. False
+    /// where there is none.
+    fn second_screen(&self) -> bool {
+        false
+    }
 }
 
 /// The firmware this is running on, if any. Each is detected by

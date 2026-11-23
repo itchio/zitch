@@ -55,6 +55,8 @@ struct FrameStats {
     vertices: usize,
     /// The longest drawn frame, start to flip.
     longest: Duration,
+    /// Draws of the second screen.
+    second: u32,
 }
 
 impl FrameStats {
@@ -74,6 +76,7 @@ impl FrameStats {
             meshes: 0,
             vertices: 0,
             longest: Duration::ZERO,
+            second: 0,
         }
     }
 
@@ -89,7 +92,7 @@ impl FrameStats {
             .collect();
         let per = |total: Duration, count: u32| total.as_secs_f32() * 1000.0 / count.max(1) as f32;
         log::info!(
-            "frames: {:.1}/s drawn, {:.1}/s passes, {:.1}/s polls, {} with input; ms each: ui {:.1}, tessellate {:.1}, paint {:.1}, gpu {:.1}, swap {:.1}, longest {:.1}; {} meshes, {} vertices a frame; asked by: {}",
+            "frames: {:.1}/s drawn, {:.1}/s passes, {:.1}/s polls, {} with input; ms each: ui {:.1}, tessellate {:.1}, paint {:.1}, gpu {:.1}, swap {:.1}, longest {:.1}; {} meshes, {} vertices a frame; second screen drawn {}; asked by: {}",
             self.drawn as f32 / secs,
             self.passes as f32 / secs,
             self.polls as f32 / secs,
@@ -102,6 +105,7 @@ impl FrameStats {
             self.longest.as_secs_f32() * 1000.0,
             self.meshes / self.drawn.max(1) as usize,
             self.vertices / self.drawn.max(1) as usize,
+            self.second,
             if causes.is_empty() {
                 "nothing".to_string()
             } else {
@@ -156,6 +160,58 @@ impl Wake {
                 .0;
         }
         std::mem::take(&mut *flag)
+    }
+}
+
+/// A handheld's second screen: its own window, drawn only when its
+/// interface asks.
+struct Second {
+    window: sdl2::video::Window,
+    /// Frames still owed whatever the interface asks.
+    owed: u8,
+    /// When its interface next wants drawing.
+    due: Option<Instant>,
+}
+
+impl Second {
+    /// SDL remakes a window's surface at its first swap and loses that
+    /// frame, so a fresh screen is drawn more than once.
+    const FRESH: u8 = 3;
+
+    fn id() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("second screen")
+    }
+
+    /// Opens it on the second display, on a firmware that has one.
+    fn open(video: &sdl2::VideoSubsystem) -> Option<Self> {
+        if video.num_video_displays().unwrap_or(0) < 2
+            || !crate::handheld::firmware().is_some_and(|f| f.second_screen())
+        {
+            return None;
+        }
+        let bounds = video
+            .display_bounds(1)
+            .inspect_err(|e| log::warn!("second screen: {e}"))
+            .ok()?;
+        let mut builder = video.window("zitch", bounds.width(), bounds.height());
+        builder
+            .opengl()
+            .position(bounds.x(), bounds.y())
+            .fullscreen_desktop();
+        let window = builder
+            .build()
+            .inspect_err(|e| log::warn!("second screen: {e}"))
+            .ok()?;
+        log::info!("second screen: {}x{}", bounds.width(), bounds.height());
+        Some(Self {
+            window,
+            owed: Self::FRESH,
+            due: None,
+        })
+    }
+
+    fn wants_drawing(&self) -> bool {
+        self.owed > 0 || self.due.is_some_and(|due| due <= Instant::now())
     }
 }
 
@@ -218,6 +274,13 @@ pub fn run(
     video.text_input().start();
 
     let ctx = egui::Context::default();
+    let mut second = if window.fullscreen {
+        Second::open(&video)
+    } else {
+        None
+    };
+    // The second screen is a window of its own, not one inside the first.
+    ctx.set_embed_viewports(second.is_none());
     if slow_small_triangles(&renderer, &version) {
         log::info!("{renderer} on {version} is slow with small triangles; edge smoothing is off");
         ctx.tessellation_options_mut(|o| o.feathering = false);
@@ -350,6 +413,14 @@ pub fn run(
         let output = ctx.run_ui(raw, |ui| {
             app.update_logic(ui.ctx());
             app.update_ui(ui);
+            if second.is_some() {
+                // Keeps the second screen's state alive between its draws.
+                ui.ctx().show_viewport_deferred(
+                    Second::id(),
+                    egui::ViewportBuilder::default(),
+                    |_, _| {},
+                );
+            }
         });
         if let Some(stats) = &mut stats {
             stats.ui += frame_started.elapsed();
@@ -397,6 +468,13 @@ pub fn run(
                 }
             }
         }
+        if let Some(second) = &mut second
+            && let Some(out) = viewport_output.get(&Second::id())
+            && let Some(due) = Instant::now().checked_add(out.repaint_delay)
+        {
+            second.due = Some(second.due.map_or(due, |at| at.min(due)));
+            wait = wait.min(out.repaint_delay);
+        }
         for command in platform_output.commands {
             if let egui::OutputCommand::OpenUrl(url) = command
                 && let Err(error) = open::that_detached(&url.url)
@@ -425,6 +503,9 @@ pub fn run(
             stats.tessellate += tessellate_started.elapsed();
         }
         if std::mem::take(&mut scrub) {
+            if let Some(second) = &mut second {
+                second.owed = Second::FRESH;
+            }
             for _ in 0..2 {
                 painter.clear([pw, ph], SCRUB_COLOR);
                 sdl_window.gl_swap_window();
@@ -469,6 +550,66 @@ pub fn run(
             stats.drawn += 1;
             stats.swap += swap_started.elapsed();
             stats.longest = stats.longest.max(frame_started.elapsed());
+        }
+        if let Some(second) = second.as_mut().filter(|s| s.wants_drawing()) {
+            second.owed = second.owed.saturating_sub(1);
+            let (w, h) = second.window.drawable_size();
+            let screen = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w as f32, h as f32) / native_ppp,
+            );
+            let info = |parent| egui::ViewportInfo {
+                parent,
+                native_pixels_per_point: Some(native_ppp),
+                inner_rect: Some(screen),
+                outer_rect: Some(screen),
+                focused: Some(false),
+                fullscreen: Some(true),
+                ..Default::default()
+            };
+            let raw = egui::RawInput {
+                viewport_id: Second::id(),
+                viewports: [
+                    (egui::ViewportId::ROOT, info(None)),
+                    (Second::id(), info(Some(egui::ViewportId::ROOT))),
+                ]
+                .into_iter()
+                .collect(),
+                screen_rect: Some(screen),
+                max_texture_side: Some(painter.max_texture_side()),
+                time: Some(started.elapsed().as_secs_f64()),
+                focused: false,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| app.update_second(ui));
+            second.due = output
+                .viewport_output
+                .get(&Second::id())
+                .and_then(|out| Instant::now().checked_add(out.repaint_delay));
+            let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+            if let Err(error) = second.window.gl_make_current(&gl_context) {
+                log::warn!("second screen: {error}");
+            } else {
+                painter.clear([w, h], [0.0, 0.0, 0.0, 1.0]);
+                painter.paint_and_update_textures(
+                    [w, h],
+                    output.pixels_per_point,
+                    &primitives,
+                    &mut output.textures_delta,
+                );
+                second.window.gl_swap_window();
+                if let Some(stats) = &mut stats {
+                    stats.second += 1;
+                }
+            }
+            if let Err(error) = sdl_window.gl_make_current(&gl_context) {
+                log::warn!("back to the first screen: {error}");
+            }
+            if second.owed > 0 {
+                wait = Duration::ZERO;
+            } else if let Some(due) = second.due {
+                wait = wait.min(due.saturating_duration_since(Instant::now()));
+            }
         }
         if close {
             break;

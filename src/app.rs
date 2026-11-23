@@ -3459,6 +3459,11 @@ impl App {
         self.draw(&mut inner);
     }
 
+    /// Draws the device's second screen.
+    pub fn update_second(&mut self, ui: &mut egui::Ui) {
+        ui::second_screen(ui, &self.glyphs);
+    }
+
     pub fn on_close(&mut self) {
         self.backend.shutdown();
     }

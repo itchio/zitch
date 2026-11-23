@@ -173,18 +173,22 @@ struct OtherPanel(Option<PathBuf>);
 
 impl OtherPanel {
     fn light() -> Self {
-        let backlight = std::fs::read_to_string(PANEL_OFF)
-            .ok()
-            .map(|path| PathBuf::from(path.trim()))
-            .filter(|path| !path.as_os_str().is_empty());
-        if let Some(backlight) = &backlight {
-            let _ = std::fs::remove_file(PANEL_OFF);
-            if let Err(err) = std::fs::write(backlight.join("bl_power"), "0") {
-                log::warn!("lighting {}: {err}", backlight.display());
-            }
-        }
-        OtherPanel(backlight)
+        OtherPanel(light_other_panel())
     }
+}
+
+/// Lights the panel `run-port` darkened and returns its backlight. With
+/// the file gone, bananad leaves the panel lit after a wake.
+fn light_other_panel() -> Option<PathBuf> {
+    let backlight = std::fs::read_to_string(PANEL_OFF)
+        .ok()
+        .map(|path| PathBuf::from(path.trim()))
+        .filter(|path| !path.as_os_str().is_empty())?;
+    let _ = std::fs::remove_file(PANEL_OFF);
+    if let Err(err) = std::fs::write(backlight.join("bl_power"), "0") {
+        log::warn!("lighting {}: {err}", backlight.display());
+    }
+    Some(backlight)
 }
 
 impl Drop for OtherPanel {
@@ -293,6 +297,12 @@ impl Firmware for BananaOs {
     ) -> Result<()> {
         launch_rom(system, rom, env)
     }
+    /// The bottom panel. `run-port` lights it again when zitch exits.
+    fn second_screen(&self) -> bool {
+        light_other_panel();
+        true
+    }
+
     /// zitch and its games both draw through SDL's KMSDRM driver.
     fn hands_over_display(&self) -> bool {
         true
