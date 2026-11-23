@@ -67,6 +67,11 @@ pub struct App {
     second_screen: bool,
     /// How many games the search found, as its row's heading says it.
     search_found: String,
+    /// The search page is open, or under the game opened from it.
+    searching: bool,
+    search_matches: Vec<i64>,
+    search_columns: usize,
+    search_rows: ui::Rows,
     /// The second screen last drew the page, not the logo.
     second_shows_page: bool,
     /// When a button, key or finger was last used.
@@ -433,6 +438,10 @@ impl App {
             keyboard: None,
             second_screen: false,
             search_found: String::new(),
+            searching: false,
+            search_matches: Vec::new(),
+            search_columns: 4,
+            search_rows: ui::Rows::default(),
             second_shows_page: false,
             last_input: Instant::now(),
             screens_off: false,
@@ -652,6 +661,9 @@ impl App {
 
     /// The carousel rows the current tab shows, if it has any.
     fn active_rows(&mut self) -> Option<&mut ui::Rows> {
+        if self.searching {
+            return Some(&mut self.search_rows);
+        }
         match self.tab {
             Tab::Library => Some(&mut self.rows),
             Tab::Collections => Some(&mut self.collection_rows),
@@ -660,6 +672,9 @@ impl App {
     }
 
     fn active_rows_ref(&self) -> Option<&ui::Rows> {
+        if self.searching {
+            return Some(&self.search_rows);
+        }
         match self.tab {
             Tab::Library => Some(&self.rows),
             Tab::Collections => Some(&self.collection_rows),
@@ -707,12 +722,6 @@ impl App {
             Tab::Library => {
                 push(playable.0, playable.1);
                 push(rating.0, rating.1);
-                if self.second_screen {
-                    push(
-                        ui::ToolbarControl::Search(self.query.clone()),
-                        vec![ToolbarStop::new("Search", Action::Search)],
-                    );
-                }
             }
             Tab::Collections => {
                 let installed = self.collections_installed_only;
@@ -951,8 +960,58 @@ impl App {
             _ => {}
         }
         if self.query.len() != before {
-            self.rebuild_sections();
+            self.rebuild_search();
         }
+    }
+
+    /// Opens the search page with the keyboard up, keeping what a search
+    /// already open has typed.
+    fn open_search(&mut self) {
+        if !self.searching {
+            self.searching = true;
+            self.query.clear();
+            self.search_rows = ui::Rows::default();
+        }
+        self.page = Page::Search;
+        self.keyboard = Some(Keyboard::default());
+        self.rebuild_search();
+    }
+
+    fn close_search(&mut self) {
+        self.searching = false;
+        self.query.clear();
+        self.search_matches.clear();
+        self.page = Page::Library;
+        self.rows.follow = true;
+    }
+
+    /// The games whose titles hold what was typed, owned first then
+    /// installed-only, each in its usual order.
+    fn rebuild_search(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        let mut seen = std::collections::HashSet::new();
+        self.search_matches = if query.is_empty() {
+            Vec::new()
+        } else {
+            self.owned_ids()
+                .into_iter()
+                .chain(self.installed_ids())
+                .filter(|id| seen.insert(*id))
+                .filter(|id| {
+                    self.catalog
+                        .get(id)
+                        .is_some_and(|g| self.passes(g) && g.title.to_lowercase().contains(&query))
+                })
+                .collect()
+        };
+        self.search_found = match self.search_matches.len() {
+            _ if query.is_empty() => String::new(),
+            0 => "No matches".to_string(),
+            1 => "1 match".to_string(),
+            n => format!("{n} matches"),
+        };
+        self.search_rows
+            .set_grid(&self.search_matches, self.search_columns);
     }
 
     /// An action while a screenshot fills the screen.
@@ -1250,6 +1309,7 @@ impl App {
         match action {
             Action::MoveFocus(direction) => match self.page {
                 Page::Library => self.move_focus_library(direction),
+                Page::Search => self.search_rows.move_focus(direction),
                 Page::Game { id, button, shot } => {
                     self.move_focus_game(id, button, shot, direction)
                 }
@@ -1312,6 +1372,12 @@ impl App {
                     Some((hint, Press::Offline)) => self.notify_offline(hint),
                     Some((_, Press::Busy)) | None => {}
                 },
+                Page::Search => {
+                    let focused = self.search_rows.focused_game();
+                    if let Some(id) = focused.filter(|id| self.catalog.contains_key(id)) {
+                        self.actions.push(Action::Open(Page::game(id)));
+                    }
+                }
                 Page::Game {
                     shot: Some(index), ..
                 } => self.actions.push(Action::ViewScreenshot(index)),
@@ -1474,12 +1540,13 @@ impl App {
                         self.actions.push(Action::Open(Page::game(next)));
                     }
                 }
-                Page::PlayableTypes { .. } | Page::Settings { .. } => {}
+                Page::Search | Page::PlayableTypes { .. } | Page::Settings { .. } => {}
             },
             Action::Search => match self.page {
                 Page::Library if self.tab == Tab::Library && self.second_screen => {
-                    self.keyboard = Some(Keyboard::default());
+                    self.open_search();
                 }
+                Page::Search => self.open_search(),
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
@@ -1503,7 +1570,7 @@ impl App {
                         }
                     }
                 }
-                Page::Library => {}
+                Page::Library | Page::Search => {}
                 Page::Game { .. } => self.actions.push(Action::ShowQr),
                 Page::PlayableTypes { row } => {
                     if let Some(t) = crate::playable::type_at_row(row) {
@@ -1540,6 +1607,13 @@ impl App {
                 // toolbar button that had focus before typing.
                 self.toolbar_focus[tab_slot(Tab::Library)] = None;
                 self.rows.follow = true;
+                if self.searching {
+                    if self.query.trim().is_empty() {
+                        self.close_search();
+                    } else {
+                        self.search_rows.follow = true;
+                    }
+                }
             }
             Action::ClearSearch => {
                 self.blur_search = true;
@@ -1555,11 +1629,16 @@ impl App {
                 Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library if self.notice.is_some() => self.notice = None,
                 Page::Library => self.actions.push(Action::Menu),
+                Page::Search => self.close_search(),
                 Page::Game { id, .. } => {
                     if let Some(rows) = self.active_rows() {
                         rows.focus_game(id);
                     }
-                    self.page = Page::Library;
+                    self.page = if self.searching {
+                        Page::Search
+                    } else {
+                        Page::Library
+                    };
                 }
                 Page::PlayableTypes { .. } | Page::Settings { .. } => {
                     self.page = self.page_stack.pop().unwrap_or(Page::Library);
@@ -1727,8 +1806,11 @@ impl App {
         if self.owned.get().is_none() {
             return;
         }
+        if self.searching {
+            self.rebuild_search();
+        }
         let query = self.query.trim().to_lowercase();
-        if !query.is_empty() {
+        if !query.is_empty() && !self.searching {
             // Searching narrows the whole screen to one row of matches,
             // owned first then installed-only, each in its usual order.
             let mut seen = std::collections::HashSet::new();
@@ -3205,6 +3287,8 @@ impl App {
         self.tab = Tab::default();
         self.toolbar_focus = [None; Tab::ALL.len()];
         self.query.clear();
+        self.searching = false;
+        self.search_matches.clear();
         self.rows = ui::Rows::default();
         self.collection_rows = ui::Rows::default();
         self.catalog.clear();
@@ -3432,6 +3516,16 @@ impl App {
                         hints.push((vec![Glyph::Back], "Back".to_string()));
                     }
                 }
+                hints
+            }
+            Page::Search => {
+                let mut hints = Vec::new();
+                if !self.search_matches.is_empty() {
+                    hints.push((vec![Glyph::Navigate], "Browse".to_string()));
+                    hints.push((vec![Glyph::Confirm], "Open".to_string()));
+                }
+                hints.push((vec![Glyph::Search], "Search".to_string()));
+                hints.push((vec![Glyph::Back], "Library".to_string()));
                 hints
             }
             Page::Game { id, button, shot } => {
@@ -3730,7 +3824,10 @@ impl App {
                 }
                 let has_url = match self.page {
                     Page::Game { id, .. } => self.game(id).is_some_and(|g| !g.url.is_empty()),
-                    Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => false,
+                    Page::Library
+                    | Page::Search
+                    | Page::PlayableTypes { .. }
+                    | Page::Settings { .. } => false,
                 };
                 if has_url && ui::qr_button(ui, m).clicked() {
                     self.actions.push(Action::ShowQr);
@@ -3837,6 +3934,32 @@ impl App {
             }
             (Loadable::NotLoaded | Loadable::Loading, _) => ui::loading(ui, m, &self.status),
             (Loadable::Failed(message), _) => ui::failed(ui, m, message),
+            (Loadable::Loaded(_), Page::Search) => {
+                let columns = ui::grid_columns(m, ui.available_width());
+                if columns != self.search_columns {
+                    self.search_columns = columns;
+                    self.search_rows.set_grid(&self.search_matches, columns);
+                }
+                ui::search_heading(ui, m, &self.query, &self.search_found);
+                ui.push_id("search", |ui| {
+                    ui::library(
+                        ui,
+                        m,
+                        ui::LibraryView {
+                            games: &self.catalog,
+                            installed: &self.installed,
+                            installs: &self.installs,
+                            updatable: &self.updatable(),
+                            marks: self.cover_marks.then_some(&self.marks),
+                            covers: &self.covers,
+                            scrollbar: self.input_mode == InputMode::Keyboard,
+                            focused: self.keyboard.is_none(),
+                        },
+                        &mut self.search_rows,
+                        &mut self.actions,
+                    )
+                });
+            }
             (Loadable::Loaded(_), Page::Library) => match self.tab {
                 Tab::Library => ui::library(
                     ui,

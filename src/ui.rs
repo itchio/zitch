@@ -564,6 +564,9 @@ pub struct Section {
 pub struct Rows {
     pub sections: Vec<Section>,
     pub row: usize,
+    /// The rows are one list wrapped onto lines: they have no headings
+    /// and focus keeps its column moving between them.
+    pub grid: bool,
     /// Where focus sits in each row, so moving down and back up returns to
     /// the same tile, the way console home screens behave.
     cols: Vec<usize>,
@@ -597,6 +600,23 @@ pub struct Rows {
 }
 
 impl Rows {
+    /// Lays `games` out as a grid `columns` wide.
+    pub fn set_grid(&mut self, games: &[i64], columns: usize) {
+        self.grid = true;
+        self.set_sections(
+            games
+                .chunks(columns.max(1))
+                .map(|line| Section {
+                    title: String::new(),
+                    games: line.to_vec(),
+                    note: None,
+                    more: false,
+                    collection: None,
+                })
+                .collect(),
+        );
+    }
+
     pub fn set_sections(&mut self, sections: Vec<Section>) {
         if sections == self.sections {
             return;
@@ -707,6 +727,7 @@ impl Rows {
         if self.sections.is_empty() {
             return;
         }
+        let (from, col) = (self.row, self.col());
         match direction {
             Direction::Left => self.cols[self.row] = self.col().saturating_sub(1),
             Direction::Right => {
@@ -724,9 +745,39 @@ impl Rows {
                 self.cols[self.row] = self.sections[self.row].games.len().saturating_sub(1)
             }
         }
+        if self.grid && self.row != from {
+            let last = self.sections[self.row].games.len().saturating_sub(1);
+            self.cols[self.row] = col.min(last);
+        }
         self.touched = true;
         self.follow = true;
     }
+}
+
+/// The line above search results: what was typed, and how many matched.
+pub fn search_heading(ui: &mut Ui, m: &Metrics, query: &str, found: &str) {
+    ui.add_space(m.frame(8.0));
+    ui.horizontal(|ui| {
+        let (title, color) = if query.is_empty() {
+            ("Search your games", DIM)
+        } else {
+            (query, TEXT)
+        };
+        ui.label(egui::RichText::new(title).font(bold(m.section)).color(color));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(found)
+                    .font(FontId::proportional(m.body))
+                    .color(DIM),
+            );
+        });
+    });
+    ui.add_space(m.frame(8.0));
+}
+
+/// How many tiles fit side by side in `width`.
+pub fn grid_columns(m: &Metrics, width: f32) -> usize {
+    (((width + m.gap) / (m.tile_width + m.gap)).floor() as usize).max(1)
 }
 
 /// Everything the home screen reads while drawing.
@@ -867,13 +918,15 @@ pub fn library(
             let section = &rows.sections[row];
             let focused_col = rows.cols[row];
             let is_focused_row = view_focused && row == rows.row;
-            ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
-                ui.label(
-                    egui::RichText::new(&section.title)
-                        .font(bold(m.section))
-                        .color(if is_focused_row { TEXT } else { DIM }),
-                );
-            });
+            if !rows.grid {
+                ui.allocate_ui(vec2(ui.available_width(), m.header_height), |ui| {
+                    ui.label(
+                        egui::RichText::new(&section.title)
+                            .font(bold(m.section))
+                            .color(if is_focused_row { TEXT } else { DIM }),
+                    );
+                });
+            }
 
             if section.games.is_empty() && section.more {
                 actions.push(Action::MoreGames { row });
@@ -1035,7 +1088,11 @@ pub fn library(
             }
             rows.hmax[row] = (out.content_size.x - out.inner_rect.width()).max(0.0);
             rows.row_spans[row] = (row_top, ui.cursor().top() - list_top - row_top);
-            ui.add_space(m.section_gap - m.space(6.0));
+            ui.add_space(if rows.grid {
+                (gap - 2.0 * ring).max(0.0)
+            } else {
+                m.section_gap - m.space(6.0)
+            });
         }
         // Room under the last row so it can settle at the top like any
         // other, instead of stopping short with the row above it cut off.
@@ -2728,14 +2785,12 @@ pub enum ToolbarControl {
     },
     /// Joined filter options, each with whether it is on.
     Filters(Vec<(&'static str, bool)>),
-    /// Opens the on-screen keyboard; holds what is being searched for.
-    Search(String),
 }
 
 impl ToolbarControl {
     fn stops(&self) -> usize {
         match self {
-            Self::Button { .. } | Self::Search(_) => 1,
+            Self::Button { .. } => 1,
             Self::Filters(options) => options.len(),
         }
     }
@@ -2774,22 +2829,6 @@ pub fn toolbar(
                         out.hovered = Some(first);
                     }
                     if response.clicked() && !busy && !disabled {
-                        out.clicked = Some(first);
-                    }
-                }
-                ToolbarControl::Search(query) => {
-                    let label = if query.is_empty() {
-                        "Search".to_string()
-                    } else {
-                        format!("Search: {query}")
-                    };
-                    // Lit like a filter while there is something typed.
-                    let options = [(label.as_str(), !query.is_empty())];
-                    let response = filter_group(ui, m, &options, local);
-                    if response.hovered.is_some() {
-                        out.hovered = Some(first);
-                    }
-                    if response.clicked.is_some() {
                         out.clicked = Some(first);
                     }
                 }

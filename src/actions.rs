@@ -7,6 +7,8 @@ use crate::model::RatingFilter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Library,
+    /// The games matching what was typed on the on-screen keyboard.
+    Search,
     /// One game, with one of its buttons focused, or one of its
     /// screenshots while `shot` is set. The button stays for coming back
     /// up from the screenshots.
