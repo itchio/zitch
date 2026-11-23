@@ -58,6 +58,9 @@ pub struct Intro {
     clock: Clock,
     /// Where the header draws the logo.
     home: Option<Rect>,
+    /// A second screen plays the power-on and keeps the logo; this one
+    /// stays dark until the page comes in.
+    split: bool,
 }
 
 impl Intro {
@@ -65,7 +68,22 @@ impl Intro {
         Self {
             clock: Clock::starting_at(if play { 0.0 } else { TOTAL }),
             home: None,
+            split: false,
         }
+    }
+
+    pub fn split(&mut self) {
+        self.split = true;
+    }
+
+    /// The logo is in flight, so the header leaves its place empty.
+    pub fn carries_logo(&self) -> bool {
+        self.running() && !self.split
+    }
+
+    /// The second screen has the picture and this one only the background.
+    pub fn first_screen_dark(&self) -> bool {
+        self.split && self.clock.at < LOGO
     }
 
     pub fn running(&self) -> bool {
@@ -104,6 +122,9 @@ impl Intro {
 
         let cover = 1.0 - span(t, LOGO, 150.0);
         painter.rect_filled(screen, 0.0, crate::ui::BG.gamma_multiply(cover));
+        if self.split {
+            return;
+        }
 
         if let Some(texture) = logo {
             let size = texture.size_vec2();
@@ -119,27 +140,59 @@ impl Intro {
             }
         }
 
-        if t < BEAM {
-            let width = (4.0 + out_cubic(t / BEAM) * 640.0) * unit;
-            let beam = |height: f32| Rect::from_center_size(middle, vec2(width, height * unit));
-            painter.rect_filled(beam(11.0), 0.0, Color32::from_white_alpha(40));
-            painter.rect_filled(beam(3.0), 0.0, Color32::WHITE);
-        } else if t < 300.0 {
-            let k = out_cubic(span(t, BEAM, 190.0));
-            let height = egui::lerp(3.0 * unit..=screen.height(), k);
-            let flash = Rect::from_center_size(middle, vec2(screen.width(), height));
-            painter.rect_filled(flash, 0.0, crate::ui::TEXT.gamma_multiply(0.85 * (1.0 - k)));
-        }
+        power_on(&painter, screen, t);
+    }
 
-        let lines = 0.45 * (1.0 - span(t, 250.0, LOGO - 250.0));
-        if lines > 0.0 {
-            let color = Color32::from_black_alpha((lines * 255.0) as u8);
-            let mut y = screen.top();
-            while y < screen.bottom() {
-                let row = Rect::from_min_size(pos2(screen.left(), y), vec2(screen.width(), unit));
-                painter.rect_filled(row, 0.0, color);
-                y += 3.0 * unit;
-            }
+    /// The power-on over a second screen's logo, which rests at `rest`.
+    /// True while it is playing.
+    pub fn draw_second(
+        &self,
+        ctx: &egui::Context,
+        screen: Rect,
+        logo: Option<&TextureHandle>,
+        rest: Option<Rect>,
+    ) -> bool {
+        if !self.first_screen_dark() {
+            return false;
+        }
+        let t = self.clock.at;
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("intro"));
+        let painter = ctx.layer_painter(layer).with_clip_rect(screen);
+        painter.rect_filled(screen, 0.0, crate::ui::BG);
+        if let (Some(texture), Some(rest)) = (logo, rest)
+            && t >= BEAM
+        {
+            painter.add(split_logo(texture, rest, t, screen.height() / 480.0));
+        }
+        power_on(&painter, screen, t);
+        true
+    }
+}
+
+/// The beam opening into a flash, and the scan lines that fade after it.
+fn power_on(painter: &egui::Painter, screen: Rect, t: f32) {
+    let unit = screen.height() / 480.0;
+    let middle = screen.center();
+    if t < BEAM {
+        let width = (4.0 + out_cubic(t / BEAM) * 640.0) * unit;
+        let beam = |height: f32| Rect::from_center_size(middle, vec2(width, height * unit));
+        painter.rect_filled(beam(11.0), 0.0, Color32::from_white_alpha(40));
+        painter.rect_filled(beam(3.0), 0.0, Color32::WHITE);
+    } else if t < 300.0 {
+        let k = out_cubic(span(t, BEAM, 190.0));
+        let height = egui::lerp(3.0 * unit..=screen.height(), k);
+        let flash = Rect::from_center_size(middle, vec2(screen.width(), height));
+        painter.rect_filled(flash, 0.0, crate::ui::TEXT.gamma_multiply(0.85 * (1.0 - k)));
+    }
+
+    let lines = 0.45 * (1.0 - span(t, 250.0, LOGO - 250.0));
+    if lines > 0.0 {
+        let color = Color32::from_black_alpha((lines * 255.0) as u8);
+        let mut y = screen.top();
+        while y < screen.bottom() {
+            let row = Rect::from_min_size(pos2(screen.left(), y), vec2(screen.width(), unit));
+            painter.rect_filled(row, 0.0, color);
+            y += 3.0 * unit;
         }
     }
 }

@@ -4102,12 +4102,11 @@ pub fn logo(ui: &mut Ui, m: &Metrics, glyphs: &Glyphs, shown: bool) -> Option<Re
 }
 
 /// A handheld's second screen: the logo on the page's background.
-pub fn second_screen(ui: &mut Ui, glyphs: &Glyphs) {
+/// Returns where the logo sits.
+pub fn second_screen(ui: &mut Ui, glyphs: &Glyphs) -> Option<Rect> {
     let screen = ui.max_rect();
     ui.painter().rect_filled(screen, 0.0, BG);
-    let Some(texture) = glyphs.logo() else {
-        return;
-    };
+    let texture = glyphs.logo()?;
     let size = texture.size_vec2();
     let width = (screen.width() * 0.4).round();
     let rect = Rect::from_center_size(screen.center(), vec2(width, width * size.y / size.x));
@@ -4117,6 +4116,7 @@ pub fn second_screen(ui: &mut Ui, glyphs: &Glyphs) {
         Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         Color32::WHITE,
     );
+    Some(rect)
 }
 
 /// The strip's height, for the page that hides it.

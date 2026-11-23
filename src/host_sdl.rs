@@ -285,6 +285,9 @@ pub fn run(
     let mut second = touch_display.and_then(|_| Second::open(&video, 0));
     // The second screen is a window of its own, not one inside the first.
     ctx.set_embed_viewports(second.is_none());
+    // Background frames owed to the first screen while the second has
+    // the intro, enough to fill a fresh window's buffers.
+    let mut dark_owed = Second::FRESH;
     if slow_small_triangles(&renderer, &version) {
         log::info!("{renderer} on {version} is slow with small triangles; edge smoothing is off");
         ctx.tessellation_options_mut(|o| o.feathering = false);
@@ -305,6 +308,9 @@ pub fn run(
     // One screen, one program: a game takes it whole.
     options.handoff = true;
     let mut app = App::new(backend, covers, &ctx, options, shot);
+    if second.is_some() {
+        app.has_second_screen();
+    }
 
     let mut pads = Pads::new();
     let mut event_pump = sdl
@@ -488,72 +494,73 @@ pub fn run(
         }
         // Handed over, the screen is a game's and a flip would fail.
         if (hidden || crate::handheld::handed_over()) && !close {
-            // Nothing is drawn, but egui's textures move on (the font
-            // atlas grows, covers arrive) and the painter has to follow or
-            // the next visible frame draws with stale ones.
-            for (id, deltas) in &textures_delta.set {
-                for delta in deltas {
-                    painter.set_texture(*id, delta);
-                }
-            }
-            for id in &textures_delta.free {
-                painter.free_texture(*id);
-            }
+            keep_textures(&mut painter, &textures_delta);
             continue;
         }
-        let tessellate_started = Instant::now();
-        let primitives = ctx.tessellate(shapes, pixels_per_point);
-        if let Some(stats) = &mut stats {
-            stats.tessellate += tessellate_started.elapsed();
-        }
-        if std::mem::take(&mut scrub) {
-            if let Some(second) = &mut second {
-                second.owed = Second::FRESH;
+        'first: {
+            if app.first_screen_dark() {
+                keep_textures(&mut painter, &textures_delta);
+                if dark_owed > 0 {
+                    dark_owed -= 1;
+                    painter.clear([pw, ph], crate::ui::BG.to_normalized_gamma_f32());
+                    sdl_window.gl_swap_window();
+                }
+                break 'first;
             }
-            for _ in 0..2 {
-                painter.clear([pw, ph], SCRUB_COLOR);
-                sdl_window.gl_swap_window();
+            let tessellate_started = Instant::now();
+            let primitives = ctx.tessellate(shapes, pixels_per_point);
+            if let Some(stats) = &mut stats {
+                stats.tessellate += tessellate_started.elapsed();
             }
-        }
-        let paint_started = Instant::now();
-        painter.clear([pw, ph], [0.0, 0.0, 0.0, 1.0]);
-        painter.paint_and_update_textures(
-            [pw, ph],
-            pixels_per_point,
-            &primitives,
-            &mut textures_delta,
-        );
-        if let Some(stats) = &mut stats {
-            stats.paint += paint_started.elapsed();
-            let gpu_started = Instant::now();
-            unsafe {
-                egui_glow::glow::HasContext::finish(&**painter.gl());
+            if std::mem::take(&mut scrub) {
+                if let Some(second) = &mut second {
+                    second.owed = Second::FRESH;
+                }
+                for _ in 0..2 {
+                    painter.clear([pw, ph], SCRUB_COLOR);
+                    sdl_window.gl_swap_window();
+                }
             }
-            stats.gpu += gpu_started.elapsed();
-            stats.meshes += primitives.len();
-            stats.vertices += primitives
-                .iter()
-                .map(|p| match &p.primitive {
-                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
-                    egui::epaint::Primitive::Callback(_) => 0,
-                })
-                .sum::<usize>();
-        }
-        for data in shots.drain(..) {
-            let image = painter.read_screen_rgba([pw, ph]);
-            input.events.push(egui::Event::Screenshot {
-                viewport_id: egui::ViewportId::ROOT,
-                user_data: data,
-                image: Arc::new(image),
-            });
-            wait = Duration::ZERO;
-        }
-        let swap_started = Instant::now();
-        sdl_window.gl_swap_window();
-        if let Some(stats) = &mut stats {
-            stats.drawn += 1;
-            stats.swap += swap_started.elapsed();
-            stats.longest = stats.longest.max(frame_started.elapsed());
+            let paint_started = Instant::now();
+            painter.clear([pw, ph], [0.0, 0.0, 0.0, 1.0]);
+            painter.paint_and_update_textures(
+                [pw, ph],
+                pixels_per_point,
+                &primitives,
+                &mut textures_delta,
+            );
+            if let Some(stats) = &mut stats {
+                stats.paint += paint_started.elapsed();
+                let gpu_started = Instant::now();
+                unsafe {
+                    egui_glow::glow::HasContext::finish(&**painter.gl());
+                }
+                stats.gpu += gpu_started.elapsed();
+                stats.meshes += primitives.len();
+                stats.vertices += primitives
+                    .iter()
+                    .map(|p| match &p.primitive {
+                        egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                        egui::epaint::Primitive::Callback(_) => 0,
+                    })
+                    .sum::<usize>();
+            }
+            for data in shots.drain(..) {
+                let image = painter.read_screen_rgba([pw, ph]);
+                input.events.push(egui::Event::Screenshot {
+                    viewport_id: egui::ViewportId::ROOT,
+                    user_data: data,
+                    image: Arc::new(image),
+                });
+                wait = Duration::ZERO;
+            }
+            let swap_started = Instant::now();
+            sdl_window.gl_swap_window();
+            if let Some(stats) = &mut stats {
+                stats.drawn += 1;
+                stats.swap += swap_started.elapsed();
+                stats.longest = stats.longest.max(frame_started.elapsed());
+            }
         }
         if let Some(second) = second.as_mut().filter(|s| s.wants_drawing()) {
             second.owed = second.owed.saturating_sub(1);
@@ -622,6 +629,20 @@ pub fn run(
     app.on_close();
     painter.destroy();
     Ok(())
+}
+
+/// Nothing is drawn, but egui's textures move on (the font atlas grows,
+/// covers arrive) and the painter has to follow or the next visible frame
+/// draws with stale ones.
+fn keep_textures(painter: &mut egui_glow::Painter, delta: &egui::TexturesDelta) {
+    for (id, deltas) in &delta.set {
+        for delta in deltas {
+            painter.set_texture(*id, delta);
+        }
+    }
+    for id in &delta.free {
+        painter.free_texture(*id);
+    }
 }
 
 /// Mesa 25.0 and 25.1 sort triangles into bins too big for a Mali with

@@ -3463,7 +3463,25 @@ impl App {
 
     /// Draws the device's second screen.
     pub fn update_second(&mut self, ui: &mut egui::Ui) {
-        ui::second_screen(ui, &self.glyphs);
+        let rest = ui::second_screen(ui, &self.glyphs);
+        let screen = ui.max_rect();
+        if self
+            .intro
+            .draw_second(ui.ctx(), screen, self.glyphs.logo(), rest)
+        {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// A second screen is up, so the intro plays across both.
+    pub fn has_second_screen(&mut self) {
+        self.intro.split();
+    }
+
+    /// The first screen shows only the background while the second has
+    /// the intro.
+    pub fn first_screen_dark(&self) -> bool {
+        self.intro.first_screen_dark()
     }
 
     pub fn on_close(&mut self) {
@@ -3542,7 +3560,7 @@ impl App {
                 let row = egui::vec2(ui.available_width(), ui::tab_strip_height(ui, &m));
                 let centered = egui::Layout::left_to_right(egui::Align::Center);
                 ui.allocate_ui_with_layout(row, centered, |ui| {
-                    let home = ui::logo(ui, &m, &self.glyphs, !self.intro.running());
+                    let home = ui::logo(ui, &m, &self.glyphs, !self.intro.carries_logo());
                     self.intro.set_home(home);
                     if self.login.is_some() {
                         ui.allocate_exact_size(
