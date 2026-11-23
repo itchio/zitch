@@ -507,6 +507,7 @@ pub fn run(
                 }
                 break 'first;
             }
+            dark_owed = 0;
             let tessellate_started = Instant::now();
             let primitives = ctx.tessellate(shapes, pixels_per_point);
             if let Some(stats) = &mut stats {
@@ -561,6 +562,11 @@ pub fn run(
                 stats.swap += swap_started.elapsed();
                 stats.longest = stats.longest.max(frame_started.elapsed());
             }
+        }
+        if let Some(second) = &mut second
+            && app.second_screen_playing()
+        {
+            second.owed = second.owed.max(1);
         }
         if let Some(second) = second.as_mut().filter(|s| s.wants_drawing()) {
             second.owed = second.owed.saturating_sub(1);

@@ -3471,6 +3471,14 @@ impl App {
         {
             ui.ctx().request_repaint();
         }
+        if self.quitting.is_some() {
+            self.power_off.draw_second(ui.ctx(), screen);
+        }
+    }
+
+    /// The second screen is animating and wants every frame.
+    pub fn second_screen_playing(&self) -> bool {
+        self.intro.first_screen_dark() || self.quitting.is_some()
     }
 
     /// A second screen is up, so the intro plays across both.

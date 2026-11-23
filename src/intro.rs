@@ -213,6 +213,11 @@ impl PowerOff {
     /// Draws the next frame. True once the screen is black.
     pub fn draw(&mut self, ctx: &egui::Context, screen: Rect) -> bool {
         self.clock.tick();
+        self.draw_second(ctx, screen)
+    }
+
+    /// The same frame again, for a second screen going off with the first.
+    pub fn draw_second(&self, ctx: &egui::Context, screen: Rect) -> bool {
         let t = self.clock.at;
         let layer = egui::LayerId::new(egui::Order::Debug, egui::Id::new("power-off"));
         let painter = ctx.layer_painter(layer).with_clip_rect(screen);
