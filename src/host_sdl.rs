@@ -332,6 +332,10 @@ pub fn run(
     // tile different from what the GPU remembers.
     let mut scrub = false;
     let mut stats = window.frame_stats.then(FrameStats::new);
+    // The finger that woke blank screens, until it lifts.
+    let mut waking_finger = false;
+    // Idle screens already show black.
+    let mut blank = false;
 
     'frames: loop {
         let deadline = [
@@ -379,6 +383,18 @@ pub fn run(
                 }
                 Event::ControllerDeviceRemoved { which, .. } => pads.close(which),
                 _ if hidden => {}
+                // The press that wakes blank screens does nothing else.
+                Event::ControllerButtonDown { button, .. } if app.screens_off() => {
+                    app.wake_screens();
+                    let _ = pads.press(button);
+                }
+                Event::KeyDown { .. } if app.screens_off() => app.wake_screens(),
+                Event::FingerDown { .. } if app.screens_off() => {
+                    app.wake_screens();
+                    waking_finger = true;
+                }
+                Event::FingerMotion { .. } if waking_finger => {}
+                Event::FingerUp { .. } if waking_finger => waking_finger = false,
                 Event::ControllerButtonDown { button, .. } => {
                     if let Some(action) = pads.press(button) {
                         let _ = pad_tx.send(action);
@@ -387,7 +403,11 @@ pub fn run(
                 Event::ControllerButtonUp { button, .. } => pads.release(button),
                 Event::ControllerAxisMotion { axis, value, .. } => {
                     if let Some(action) = pads.axis(axis, value) {
-                        let _ = pad_tx.send(action);
+                        if app.screens_off() {
+                            app.wake_screens();
+                        } else {
+                            let _ = pad_tx.send(action);
+                        }
                     }
                 }
                 other => input.translate(other, to_points, egui::vec2(pw as f32, ph as f32) / ppp),
@@ -496,6 +516,29 @@ pub fn run(
         if (hidden || crate::handheld::handed_over()) && !close {
             keep_textures(&mut painter, &textures_delta);
             continue;
+        }
+        if app.screens_off() && !close {
+            keep_textures(&mut painter, &textures_delta);
+            if !std::mem::replace(&mut blank, true) {
+                painter.clear([pw, ph], [0.0, 0.0, 0.0, 1.0]);
+                sdl_window.gl_swap_window();
+                if let Some(second) = &second
+                    && second.window.gl_make_current(&gl_context).is_ok()
+                {
+                    let (w, h) = second.window.drawable_size();
+                    painter.clear([w, h], [0.0, 0.0, 0.0, 1.0]);
+                    second.window.gl_swap_window();
+                }
+                if let Err(error) = sdl_window.gl_make_current(&gl_context) {
+                    log::warn!("back to the first screen: {error}");
+                }
+            }
+            continue;
+        }
+        if std::mem::take(&mut blank)
+            && let Some(second) = &mut second
+        {
+            second.owed = Second::FRESH;
         }
         'first: {
             if app.first_screen_dark() {

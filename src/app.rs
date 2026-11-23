@@ -69,6 +69,10 @@ pub struct App {
     search_found: String,
     /// The second screen last drew the page, not the logo.
     second_shows_page: bool,
+    /// When a button, key or finger was last used.
+    last_input: Instant,
+    /// The screens are blank for idleness.
+    screens_off: bool,
     /// Frames of black left to show, once the screen has powered off,
     /// before the window is asked to close. The backend join that follows
     /// the close blocks the last frame on screen, so it must be a black
@@ -321,6 +325,10 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
 }
 
 impl App {
+    /// How long without input before the screens go blank.
+    const SCREENS_OFF_AFTER: Duration = Duration::from_secs(120);
+    /// How often blank screens have their backlights switched off again.
+    const SCREENS_OFF_CHECK: Duration = Duration::from_secs(60);
     /// The longest text the on-screen keyboard types.
     const SEARCH_LENGTH: usize = 40;
     /// Frames the powered-off screen is held before the window closes.
@@ -426,6 +434,8 @@ impl App {
             second_screen: false,
             search_found: String::new(),
             second_shows_page: false,
+            last_input: Instant::now(),
+            screens_off: false,
             quitting: None,
             actions: Vec::new(),
             rows: ui::Rows::default(),
@@ -3540,7 +3550,9 @@ impl App {
         if pad.pressed || keys || touches {
             self.input_seen = true;
             self.intro.skip();
+            self.last_input = Instant::now();
         }
+        self.rest_screens(ctx);
         self.drive_shot(ctx);
         // Before drawing, so the frame that reads a press already shows it.
         self.apply_actions(ctx);
@@ -3592,6 +3604,49 @@ impl App {
             || self.quitting.is_some()
             || self.keyboard.is_some()
             || self.second_shows_page
+    }
+
+    /// Blanks the screens of a handheld left alone. A still picture left
+    /// up for hours marks an LCD.
+    fn rest_screens(&mut self, ctx: &egui::Context) {
+        // A game has the screens and the firmware its own timers.
+        if !self.running.is_empty() || self.quitting.is_some() {
+            self.last_input = Instant::now();
+            return;
+        }
+        let Some(firmware) = crate::handheld::firmware() else {
+            return;
+        };
+        if self.screens_off {
+            // The firmware lights them again after a sleep.
+            firmware.screens_lit(false);
+            ctx.request_repaint_after(Self::SCREENS_OFF_CHECK);
+            return;
+        }
+        let left = Self::SCREENS_OFF_AFTER.saturating_sub(self.last_input.elapsed());
+        if left.is_zero() {
+            log::info!("idle: screens off");
+            self.screens_off = true;
+            firmware.screens_lit(false);
+            ctx.request_repaint_after(Self::SCREENS_OFF_CHECK);
+        } else {
+            ctx.request_repaint_after(left);
+        }
+    }
+
+    /// The screens are blank for idleness: the host draws black, wakes
+    /// them at the next press and keeps that press from doing anything else.
+    pub fn screens_off(&self) -> bool {
+        self.screens_off
+    }
+
+    pub fn wake_screens(&mut self) {
+        self.screens_off = false;
+        self.last_input = Instant::now();
+        if let Some(firmware) = crate::handheld::firmware() {
+            firmware.screens_lit(true);
+        }
+        log::info!("idle: screens on");
     }
 
     /// A second screen is up, so the intro plays across both.

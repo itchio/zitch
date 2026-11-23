@@ -34,6 +34,8 @@ const PORT_PERF: &str = "performance";
 /// on, which bananad keeps off after a wake.
 const PANEL_OFF: &str = "/run/banana/panel-off";
 
+const BACKLIGHTS: &str = "/sys/class/backlight";
+
 /// Where the menu's games have HOME.
 const HOME: &str = "/";
 
@@ -334,6 +336,21 @@ impl Firmware for BananaOs {
     /// zitch and its games both draw through SDL's KMSDRM driver.
     fn hands_over_display(&self) -> bool {
         true
+    }
+
+    /// The menu's idle dimming stops while a port runs, so zitch switches
+    /// both backlights itself.
+    fn screens_lit(&self, lit: bool) {
+        let Ok(backlights) = std::fs::read_dir(BACKLIGHTS) else {
+            return;
+        };
+        let power = if lit { "0" } else { "4" };
+        for backlight in backlights.flatten() {
+            let path = backlight.path().join("bl_power");
+            if let Err(err) = std::fs::write(&path, power) {
+                log::warn!("{}: {err}", path.display());
+            }
+        }
     }
 }
 

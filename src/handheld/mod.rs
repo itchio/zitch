@@ -103,6 +103,10 @@ pub trait Firmware: Sync {
     fn second_screen(&self) -> bool {
         false
     }
+
+    /// Switches the screens' backlights off, or back on, for a device
+    /// left idle, where the firmware leaves that to zitch.
+    fn screens_lit(&self, _lit: bool) {}
 }
 
 /// The firmware this is running on, if any. Each is detected by
