@@ -363,13 +363,127 @@ const MORE_LOOKAHEAD: usize = 12;
 /// Tiles past each end of a row's view whose covers load ahead.
 const PREFETCH_TILES: usize = 2;
 
-/// One finger on the home screen. egui's own drag-to-scroll would give the
-/// gesture to whichever row it started on and drop the vertical part, so
-/// the list decides the axis itself from the first few points of motion.
+/// One finger on a page that scrolls both ways. egui's own drag-to-scroll
+/// would give the gesture to whichever row it started on and drop the
+/// vertical part, so the page decides the axis itself from the first few
+/// points of motion.
+#[derive(Debug)]
 struct Swipe {
     axis: Option<usize>,
     row: Option<usize>,
     travel: egui::Vec2,
+}
+
+/// A page's touch scrolling: the drag in progress and the fling after it.
+#[derive(Debug, Default)]
+struct Touch {
+    swipe: Option<Swipe>,
+    /// Velocity left over from a swipe, in points per second, and the row it
+    /// applies to when horizontal.
+    fling: egui::Vec2,
+    fling_row: Option<usize>,
+}
+
+impl Touch {
+    fn idle(&self) -> bool {
+        self.swipe.is_none() && self.fling == egui::Vec2::ZERO
+    }
+
+    fn stop(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Reads this frame's drag and fling over `rect`. Returns the axis to
+    /// scroll, how far the finger moved along it, and the row the gesture
+    /// began on, which `row_at` names. Sensed before the page's widgets
+    /// are added, so they still receive their clicks.
+    fn step(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        id: &str,
+        row_at: impl FnOnce(egui::Pos2) -> Option<usize>,
+    ) -> Option<(usize, f32, Option<usize>)> {
+        if !CUSTOM_SWIPE {
+            return None;
+        }
+        // Sensed from the start, so the first touch finds it in place.
+        let drag = ui.interact(rect, ui.id().with(id), Sense::drag());
+        if !ui.input(|i| i.has_touch_screen()) {
+            return None;
+        }
+        if drag.drag_started() {
+            self.swipe = Some(Swipe {
+                axis: None,
+                row: drag.interact_pointer_pos().and_then(row_at),
+                travel: egui::Vec2::ZERO,
+            });
+            self.fling = egui::Vec2::ZERO;
+        }
+        let mut moved = None;
+        if drag.dragged()
+            && let Some(swipe) = self.swipe.as_mut()
+        {
+            let delta = drag.drag_delta();
+            if swipe.axis.is_none() {
+                swipe.travel += delta;
+                if swipe.travel.length() > SWIPE_LOCK {
+                    swipe.axis = Some(if swipe.travel.x.abs() > swipe.travel.y.abs() {
+                        0
+                    } else {
+                        1
+                    });
+                }
+            }
+            moved = swipe.axis.map(|axis| (axis, delta[axis], swipe.row));
+        }
+        if drag.drag_stopped()
+            && let Some(swipe) = self.swipe.take()
+        {
+            let velocity = ui.input(|i| i.pointer.velocity());
+            self.fling = match swipe.axis {
+                Some(0) => vec2(velocity.x, 0.0),
+                Some(1) => vec2(0.0, velocity.y),
+                _ => egui::Vec2::ZERO,
+            };
+            self.fling_row = swipe.row;
+        }
+        if self.fling != egui::Vec2::ZERO {
+            let dt = ui.input(|i| i.stable_dt).min(0.1);
+            for axis in 0..2 {
+                let v = &mut self.fling[axis];
+                let friction = FLING_FRICTION * dt;
+                if friction > v.abs() || v.abs() < FLING_STOP {
+                    *v = 0.0;
+                } else {
+                    *v -= friction * v.signum();
+                    moved = Some((axis, *v * dt, self.fling_row));
+                }
+            }
+            ui.ctx().request_repaint();
+        }
+        moved
+    }
+}
+
+/// Moves a scroll `offset` by a finger's travel, stopping at the ends.
+/// Returns whether it stopped short.
+fn drag_scroll(offset: &mut f32, by: f32, max: f32) -> bool {
+    let next = *offset - by;
+    *offset = next.clamp(0.0, max);
+    *offset != next
+}
+
+/// Scroll areas under a [`Touch`] leave the finger to it.
+fn swipe_source() -> egui::scroll_area::ScrollSource {
+    if CUSTOM_SWIPE {
+        egui::scroll_area::ScrollSource {
+            drag: egui::scroll_area::DragScroll::Never,
+            ..Default::default()
+        }
+    } else {
+        egui::scroll_area::ScrollSource::default()
+    }
 }
 
 /// The axis-locked swipe on touch screens. Off, egui's own drag-to-scroll
@@ -455,12 +569,7 @@ pub struct Rows {
     /// The list's visible height, as last laid out.
     view_height: f32,
     last_pointer: Option<egui::Pos2>,
-    /// A touch drag in progress, once it has picked an axis.
-    swipe: Option<Swipe>,
-    /// Velocity left over from a swipe, in points per second, and the row it
-    /// applies to when horizontal.
-    fling: egui::Vec2,
-    fling_row: Option<usize>,
+    touch: Touch,
     /// The focused tile's animated cover, while it has one.
     playing: Option<Playing>,
 }
@@ -473,9 +582,7 @@ impl Rows {
         let focused = self.touched.then(|| self.focused_game()).flatten();
         self.sections = sections;
         // A gesture in flight indexes rows that may no longer exist.
-        self.swipe = None;
-        self.fling = egui::Vec2::ZERO;
-        self.fling_row = None;
+        self.touch.stop();
         self.cols.resize(self.sections.len(), 0);
         self.hscroll.resize(self.sections.len(), 0.0);
         self.hgoal.resize(self.sections.len(), None);
@@ -666,14 +773,7 @@ pub fn library(
     let viewport_height = ui.available_height();
     rows.view_height = viewport_height;
     let list_rect = ui.available_rect_before_wrap();
-    let no_drag = if CUSTOM_SWIPE {
-        egui::scroll_area::ScrollSource {
-            drag: egui::scroll_area::DragScroll::Never,
-            ..Default::default()
-        }
-    } else {
-        egui::scroll_area::ScrollSource::default()
-    };
+    let no_drag = swipe_source();
     let (set_vscroll, set_hscroll) = swipe(ui, rows, list_rect);
     let mut area = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -711,8 +811,7 @@ pub fn library(
     // opens under the cursor does not start focused on whatever is beneath.
     let pointer = ui.input(|input| input.pointer.latest_pos());
     let pointer_moved = matches!((rows.last_pointer, pointer), (Some(a), Some(b)) if a != b)
-        && rows.swipe.is_none()
-        && rows.fling == egui::Vec2::ZERO;
+        && rows.touch.idle();
     rows.last_pointer = pointer;
 
     // Playback follows focus: the focused game's animation, or none.
@@ -936,96 +1035,28 @@ pub fn library(
 /// Reads this frame's touch drag and fling, returning the vertical offset
 /// and the (row, offset) to force on the scroll areas, if any.
 fn swipe(ui: &mut Ui, rows: &mut Rows, list_rect: Rect) -> (Option<f32>, Option<(usize, f32)>) {
-    if !CUSTOM_SWIPE || !ui.input(|i| i.has_touch_screen()) {
-        return (None, None);
-    }
-    let mut set_vscroll = None;
-    let mut set_hscroll = None;
-    // Sensed before the tiles are added so they still receive their clicks.
-    let drag = ui.interact(list_rect, ui.id().with("home-swipe"), Sense::drag());
-    if drag.drag_started() {
-        let row = drag.interact_pointer_pos().and_then(|pos| {
-            let y = pos.y - list_rect.top() + rows.vscroll;
-            rows.row_spans
-                .iter()
-                .position(|&(top, height)| y >= top && y < top + height)
-        });
-        rows.swipe = Some(Swipe {
-            axis: None,
-            row,
-            travel: egui::Vec2::ZERO,
-        });
-        rows.fling = egui::Vec2::ZERO;
-    }
-    if drag.dragged()
-        && let Some(swipe) = rows.swipe.as_mut()
-    {
-        let delta = drag.drag_delta();
-        if swipe.axis.is_none() {
-            swipe.travel += delta;
-            if swipe.travel.length() > SWIPE_LOCK {
-                swipe.axis = Some(if swipe.travel.x.abs() > swipe.travel.y.abs() {
-                    0
-                } else {
-                    1
-                });
+    let (vscroll, spans) = (rows.vscroll, &rows.row_spans);
+    let moved = rows.touch.step(ui, list_rect, "home-swipe", |pos| {
+        let y = pos.y - list_rect.top() + vscroll;
+        spans
+            .iter()
+            .position(|&(top, height)| y >= top && y < top + height)
+    });
+    match moved {
+        Some((1, by, _)) => {
+            if drag_scroll(&mut rows.vscroll, by, rows.vmax) {
+                rows.touch.fling = egui::Vec2::ZERO;
             }
+            (Some(rows.vscroll), None)
         }
-        match (swipe.axis, swipe.row) {
-            (Some(1), _) => {
-                rows.vscroll = (rows.vscroll - delta.y).clamp(0.0, rows.vmax);
-                set_vscroll = Some(rows.vscroll);
+        Some((_, by, Some(row))) => {
+            if drag_scroll(&mut rows.hscroll[row], by, rows.hmax[row]) {
+                rows.touch.fling = egui::Vec2::ZERO;
             }
-            (Some(0), Some(row)) => {
-                rows.hscroll[row] = (rows.hscroll[row] - delta.x).clamp(0.0, rows.hmax[row]);
-                set_hscroll = Some((row, rows.hscroll[row]));
-            }
-            _ => {}
+            (None, Some((row, rows.hscroll[row])))
         }
+        _ => (None, None),
     }
-    if drag.drag_stopped()
-        && let Some(swipe) = rows.swipe.take()
-    {
-        let velocity = ui.input(|i| i.pointer.velocity());
-        rows.fling = match swipe.axis {
-            Some(0) => vec2(velocity.x, 0.0),
-            Some(1) => vec2(0.0, velocity.y),
-            _ => egui::Vec2::ZERO,
-        };
-        rows.fling_row = swipe.row;
-    }
-    if rows.fling != egui::Vec2::ZERO {
-        let dt = ui.input(|i| i.stable_dt).min(0.1);
-        for d in 0..2 {
-            let v = &mut rows.fling[d];
-            let friction = FLING_FRICTION * dt;
-            if friction > v.abs() || v.abs() < FLING_STOP {
-                *v = 0.0;
-            } else {
-                *v -= friction * v.signum();
-            }
-        }
-        if rows.fling.y != 0.0 {
-            let next = rows.vscroll - rows.fling.y * dt;
-            rows.vscroll = next.clamp(0.0, rows.vmax);
-            if rows.vscroll != next {
-                rows.fling.y = 0.0;
-            }
-            set_vscroll = Some(rows.vscroll);
-        }
-        if rows.fling.x != 0.0
-            && let Some(row) = rows.fling_row
-        {
-            let next = rows.hscroll[row] - rows.fling.x * dt;
-            rows.hscroll[row] = next.clamp(0.0, rows.hmax[row]);
-            if rows.hscroll[row] != next {
-                rows.fling.x = 0.0;
-            }
-            set_hscroll = Some((row, rows.hscroll[row]));
-        }
-        ui.ctx().request_repaint();
-    }
-    (set_vscroll, set_hscroll)
 }
 
 struct Tile<'a> {
@@ -1727,8 +1758,12 @@ pub struct PageScroll {
     vgoal: Option<f32>,
     hscroll: f32,
     hgoal: Option<f32>,
-    /// How far the page can scroll, as last laid out.
+    /// How far the page and the screenshots can scroll, as last laid out.
     vmax: f32,
+    hmax: f32,
+    /// Where the screenshots were last drawn on screen.
+    strip: Option<Rect>,
+    touch: Touch,
     /// The Screenshots heading's top and the bottom of the page info,
     /// relative to the page's top, as last laid out.
     heading_top: Option<f32>,
@@ -1772,10 +1807,32 @@ pub fn game_detail(
     if let Some(goal) = goal {
         page.vgoal = Some(goal.clamp(0.0, page.vmax)).filter(|&goal| goal != page.vscroll);
     }
+    let strip = page.strip.take();
+    let page_rect = ui.available_rect_before_wrap();
+    let moved = page.touch.step(ui, page_rect, "game-swipe", |pos| {
+        strip.is_some_and(|strip| strip.contains(pos)).then_some(0)
+    });
+    // A goal already at the offset makes `glide` send it as is.
+    match moved {
+        Some((1, by, _)) => {
+            if drag_scroll(&mut page.vscroll, by, page.vmax) {
+                page.touch.fling = egui::Vec2::ZERO;
+            }
+            page.vgoal = Some(page.vscroll);
+        }
+        Some((_, by, Some(_))) => {
+            if drag_scroll(&mut page.hscroll, by, page.hmax) {
+                page.touch.fling = egui::Vec2::ZERO;
+            }
+            page.hgoal = Some(page.hscroll);
+        }
+        _ => {}
+    }
     let dt = ui.input(|i| i.stable_dt).min(0.1);
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("game", visit))
         .auto_shrink([false, false])
+        .scroll_source(swipe_source())
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     let mut sent = None;
     if glide(&mut page.vscroll, &mut page.vgoal, dt) {
@@ -2242,6 +2299,7 @@ fn screenshot_strip(
     let mut row = egui::ScrollArea::horizontal()
         .id_salt("screenshots")
         .auto_shrink([false, true])
+        .scroll_source(swipe_source())
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     let mut sent = None;
     if glide(&mut page.hscroll, &mut page.hgoal, dt) {
@@ -2298,6 +2356,8 @@ fn screenshot_strip(
     if sent.is_some_and(|sent| (sent - output.state.offset.x).abs() > 0.5) {
         page.hgoal = None;
     }
+    page.hmax = (output.content_size.x - output.inner_rect.width()).max(0.0);
+    page.strip = Some(area);
     // Only the column's own width: the page's layout grows to whatever is
     // allocated, and the ring's room in the margin would shift everything
     // after the strip left.
