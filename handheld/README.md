@@ -1,8 +1,8 @@
 # Handhelds
 
-muOS is the first firmware zitch supports: the RG35XX H, RG40XX H and
-TrimUI Brick Pro, on Jacaranda and Andromeda. Everything below is about
-muOS until the spruceOS section at the end.
+Everything below is about muOS (RG35XX H and RG40XX H, on Jacaranda and
+Andromeda) until the [spruceOS](#spruceos) and [BananaOS](#bananaos)
+sections at the end.
 
 muOS has no X11 or Wayland, so zitch is built with the SDL2 host
 (`--no-default-features --features sdl-host`, `src/host_sdl.rs`) and linked

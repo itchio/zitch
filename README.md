@@ -20,22 +20,13 @@ directory or on PATH.
 
 ## Handhelds
 
-zitch also runs on Linux handhelds through an SDL2 host. For the initial set of
-releases we are specifically targeting [muOS](https://muos.dev/) as it provides
-a good foundation for development, a rich set of built in "cores" for retro
-console emulation, and a framework for installing "apps" into the device
-(muxapp). We hope to support many more custom firmwares. If you have on in mind
-please open an issue here requesting it so we can gauge interest.
+zitch also runs on Linux handhelds through an SDL2 host. Tested firmwares:
 
-[spruceOS](https://github.com/spruceUI/spruceOS) is the second firmware:
-zitch installs there as a spruce app (`handheld/spruce/`) and runs LÖVE
-games and Linux builds.
+* [muOS](https://muos.dev/) (Jacaranda, Andromeda): Anbernic RG35XX H, Anbernic RG40XX H
+* [spruceOS](https://github.com/spruceUI/spruceOS): TrimUI Brick Pro
+* [BananaOS](https://github.com/JorreFog/BananaLinux): Anbernic RG DS Plus
 
-Testing is being done of the following handhelds:
-
-* Anbernic RG35XX H
-* Anbernic RG40XX H
-* TrimUI Brick Pro (muOS and spruceOS)
+If you have another firmware in mind, open an issue requesting it so we can gauge interest.
 
 See [handheld/README.md](handheld/README.md) for building, deploying and
 testing on devices.
