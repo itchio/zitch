@@ -21,10 +21,12 @@ export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
 export ZITCH_INSTALL_DIR="$HOME/games"
 mkdir -p "$HOME"
 
-# The RG DS pad (retrogame_joypad), as SDL_GameControllerDB has it. The
-# device tree puts the A label on BTN_EAST (b1) and B on BTN_SOUTH (b0), so
-# this map already names buttons by their labels, as the prompts do.
-export SDL_GAMECONTROLLERCONFIG="190000004b4800000111000000010000,retrogame_joypad,a:b1,b:b0,back:b8,dpdown:b14,dpleft:b15,dpright:b16,dpup:b13,leftshoulder:b4,leftstick:b11,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b12,righttrigger:b7,rightx:a2,righty:a3,start:b9,x:b2,y:b3,platform:Linux,"
+# The RG DS pad (retrogame_joypad), as SDL_GameControllerDB has it, less
+# its right stick: the handhelds have one stick, and the driver's other
+# two axes follow it. The device tree puts the A label on BTN_EAST (b1)
+# and B on BTN_SOUTH (b0), so this map already names buttons by their
+# labels, as the prompts do.
+export SDL_GAMECONTROLLERCONFIG="190000004b4800000111000000010000,retrogame_joypad,a:b1,b:b0,back:b8,dpdown:b14,dpleft:b15,dpright:b16,dpup:b13,leftshoulder:b4,leftstick:b11,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b12,righttrigger:b7,start:b9,x:b2,y:b3,platform:Linux,"
 
 # Extra flags for development, e.g. a screenshot script; one line, no quotes.
 ARGS=""
