@@ -378,6 +378,9 @@ struct Swipe {
 #[derive(Debug, Default)]
 struct Touch {
     swipe: Option<Swipe>,
+    /// Travel the page has yet to follow. A panel reports on its own
+    /// clock, one or two times a frame, so the travel is spread out.
+    owed: f32,
     /// Velocity left over from a swipe, in points per second, and the row it
     /// applies to when horizontal.
     fling: egui::Vec2,
@@ -419,7 +422,9 @@ impl Touch {
                 travel: egui::Vec2::ZERO,
             });
             self.fling = egui::Vec2::ZERO;
+            self.owed = 0.0;
         }
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
         let mut moved = None;
         if drag.dragged()
             && let Some(swipe) = self.swipe.as_mut()
@@ -435,11 +440,24 @@ impl Touch {
                     });
                 }
             }
-            moved = swipe.axis.map(|axis| (axis, delta[axis], swipe.row));
+            if let Some(axis) = swipe.axis {
+                self.owed += delta[axis];
+                let mut by = self.owed * (1.0 - (-dt * SWIPE_SMOOTHING).exp());
+                if (self.owed - by).abs() < 0.5 {
+                    by = self.owed;
+                } else {
+                    ui.ctx().request_repaint();
+                }
+                self.owed -= by;
+                moved = Some((axis, by, swipe.row));
+            }
         }
         if drag.drag_stopped()
             && let Some(swipe) = self.swipe.take()
         {
+            if let Some(axis) = swipe.axis {
+                moved = Some((axis, std::mem::take(&mut self.owed), swipe.row));
+            }
             let velocity = ui.input(|i| i.pointer.velocity());
             self.fling = match swipe.axis {
                 Some(0) => vec2(velocity.x, 0.0),
@@ -449,7 +467,7 @@ impl Touch {
             self.fling_row = swipe.row;
         }
         if self.fling != egui::Vec2::ZERO {
-            let dt = ui.input(|i| i.stable_dt).min(0.1);
+            let owed = moved.map_or(0.0, |(_, by, _)| by);
             for axis in 0..2 {
                 let v = &mut self.fling[axis];
                 let friction = FLING_FRICTION * dt;
@@ -457,7 +475,7 @@ impl Touch {
                     *v = 0.0;
                 } else {
                     *v -= friction * v.signum();
-                    moved = Some((axis, *v * dt, self.fling_row));
+                    moved = Some((axis, owed + *v * dt, self.fling_row));
                 }
             }
             ui.ctx().request_repaint();
@@ -492,6 +510,9 @@ const CUSTOM_SWIPE: bool = true;
 const SWIPE_LOCK: f32 = 8.0;
 const FLING_FRICTION: f32 = 1000.0;
 const FLING_STOP: f32 = 20.0;
+/// How fast the page closes on a dragging finger, eased the way
+/// [`FOLLOW_SPEED`] is. About half the gap each frame.
+const SWIPE_SMOOTHING: f32 = 40.0;
 /// How fast a follow-scroll closes on its goal, as the fraction of the
 /// remaining distance covered per second (exponential ease-out).
 const FOLLOW_SPEED: f32 = 14.0;
