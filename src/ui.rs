@@ -2786,15 +2786,20 @@ fn over(ctx: &egui::Context, dim: &egui::Response, overlay: &egui::Response) {
 /// A card centered in `page`, the part above the footer, over a dimmed
 /// `screen`. `body` draws inside it and is told how tall the card may
 /// grow, so what it draws under its heading can scroll within that.
+/// A click on the dim goes back, as the Back button does.
 fn modal(
     ctx: &egui::Context,
     m: &Metrics,
     screen: Rect,
     page: Rect,
     id: &str,
-    body: impl FnOnce(&mut Ui, f32),
+    actions: &mut Vec<Action>,
+    body: impl FnOnce(&mut Ui, &mut Vec<Action>, f32),
 ) {
     let dim = backdrop(ctx, &format!("{id}-dim"), screen, DIM_ALPHA);
+    if dim.clicked() {
+        actions.push(Action::Back);
+    }
     let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
     let margin = m.space(24.0);
     let shown = egui::Area::new(egui::Id::new(id))
@@ -2811,7 +2816,7 @@ fn modal(
                 .inner_margin(margin)
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    body(ui, page.height() * 0.9 - 2.0 * margin);
+                    body(ui, actions, page.height() * 0.9 - 2.0 * margin);
                 });
         });
     over(ctx, &dim, &shown.response);
@@ -2870,7 +2875,7 @@ pub fn prompt(
     prompt: &Prompt,
     actions: &mut Vec<Action>,
 ) {
-    modal(ctx, m, screen, page, "prompt", |ui, budget| {
+    modal(ctx, m, screen, page, "prompt", actions, |ui, actions, budget| {
         // The dialog never outgrows the screen: under the title, the body
         // and the choices scroll together inside what is left of it.
         let top = ui.cursor().top();
@@ -3098,7 +3103,7 @@ pub fn report(
     view: &ReportView,
     actions: &mut Vec<Action>,
 ) {
-    modal(ctx, m, screen, page, "report", |ui, budget| {
+    modal(ctx, m, screen, page, "report", actions, |ui, actions, budget| {
         let top = ui.cursor().top();
         let title = if view.picked {
             view.draft.rating.label()
