@@ -2777,6 +2777,12 @@ fn backdrop(ctx: &egui::Context, id: &str, screen: Rect, alpha: u8) -> egui::Res
         .inner
 }
 
+/// Keeps an overlay's layer above its dim. A press on the dim raises it,
+/// and egui remembers the order.
+fn over(ctx: &egui::Context, dim: &egui::Response, overlay: &egui::Response) {
+    ctx.set_sublayer(dim.layer_id, overlay.layer_id);
+}
+
 /// A card centered in `page`, the part above the footer, over a dimmed
 /// `screen`. `body` draws inside it and is told how tall the card may
 /// grow, so what it draws under its heading can scroll within that.
@@ -2788,7 +2794,7 @@ fn modal(
     id: &str,
     body: impl FnOnce(&mut Ui, f32),
 ) {
-    backdrop(ctx, &format!("{id}-dim"), screen, DIM_ALPHA);
+    let dim = backdrop(ctx, &format!("{id}-dim"), screen, DIM_ALPHA);
     let width = (page.width() * 0.6).clamp(m.space(320.0), m.space(560.0));
     let margin = m.space(24.0);
     let shown = egui::Area::new(egui::Id::new(id))
@@ -2808,6 +2814,7 @@ fn modal(
                     body(ui, page.height() * 0.9 - 2.0 * margin);
                 });
         });
+    over(ctx, &dim, &shown.response);
     // A centered area and a shrinking list settle over a few frames. A host
     // that redraws only on input would show the first frame's layout, so
     // ask for frames until the dialog holds still.
@@ -3605,7 +3612,7 @@ pub fn drawer(
         egui::pos2(screen.min.x - width * (1.0 - open), screen.min.y),
         vec2(width, screen.height()),
     );
-    egui::Area::new(egui::Id::new("drawer"))
+    let shown = egui::Area::new(egui::Id::new("drawer"))
         .order(egui::Order::Foreground)
         .fixed_pos(panel.min)
         .show(ctx, |ui| {
@@ -3689,6 +3696,7 @@ pub fn drawer(
                 concat!("zitch ", env!("ZITCH_VERSION")).to_string(),
             ));
         });
+    over(ctx, &dim, &shown.response);
 }
 
 /// Covers everything with one line while the app hands the screen to a
