@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::actions::{Action, Direction, Page, Tab, wrap_step};
-use crate::backend::{Backend, Command, Event};
+use crate::backend::{Backend, Command, Event, SEARCH_LIMIT};
 use crate::battery::Battery;
 use crate::gamepad::Gamepad;
 use crate::glyphs::{Glyph, Glyphs, InputMode};
@@ -71,6 +71,13 @@ pub struct App {
     searching: bool,
     /// The tab the search was opened from, and goes back to.
     search_from: Tab,
+    /// What butler found for the last search answered, best first.
+    search_results: Vec<i64>,
+    /// The latest search asked of butler.
+    search_asks: u64,
+    /// What was typed for the results on screen.
+    search_answered: String,
+    /// The results that pass the filters.
     search_matches: Vec<i64>,
     /// Games that match but for the filters.
     search_filtered: usize,
@@ -444,6 +451,9 @@ impl App {
             search_found: String::new(),
             searching: false,
             search_from: Tab::default(),
+            search_results: Vec::new(),
+            search_asks: 0,
+            search_answered: String::new(),
             search_matches: Vec::new(),
             search_filtered: 0,
             search_columns: 4,
@@ -969,7 +979,7 @@ impl App {
             _ => {}
         }
         if self.query.len() != before {
-            self.rebuild_search();
+            self.ask_search();
         }
     }
 
@@ -991,9 +1001,29 @@ impl App {
         self.rebuild_search();
     }
 
+    /// Asks butler for the games matching what is typed. What the last
+    /// answer found stays up until this one arrives.
+    fn ask_search(&mut self) {
+        self.search_asks += 1;
+        let query = self.query.trim().to_string();
+        if query.is_empty() {
+            self.search_answered.clear();
+            self.search_results.clear();
+            self.rebuild_search();
+            return;
+        }
+        self.backend.send(Command::Search {
+            query,
+            ask: self.search_asks,
+        });
+    }
+
     fn close_search(&mut self) {
         self.searching = false;
         self.query.clear();
+        self.search_asks += 1;
+        self.search_answered.clear();
+        self.search_results.clear();
         self.search_matches.clear();
         self.page = Page::Library;
         self.tab = self.search_from;
@@ -1001,34 +1031,20 @@ impl App {
         self.follow_rows();
     }
 
-    /// The games whose titles hold what was typed, owned first then
-    /// installed-only, each in its usual order.
+    /// The search results that pass the filters, in butler's order.
     fn rebuild_search(&mut self) {
-        let query = self.query.trim().to_lowercase();
-        let mut seen = std::collections::HashSet::new();
-        let titled: Vec<i64> = if query.is_empty() {
-            Vec::new()
-        } else {
-            self.owned_ids()
-                .into_iter()
-                .chain(self.installed_ids())
-                .filter(|id| seen.insert(*id))
-                .filter(|id| {
-                    self.catalog
-                        .get(id)
-                        .is_some_and(|g| g.title.to_lowercase().contains(&query))
-                })
-                .collect()
-        };
-        self.search_matches = titled
+        self.search_matches = self
+            .search_results
             .iter()
             .copied()
             .filter(|id| self.catalog.get(id).is_some_and(|g| self.passes(g)))
             .collect();
-        self.search_filtered = titled.len() - self.search_matches.len();
+        self.search_filtered = self.search_results.len() - self.search_matches.len();
+        // Butler stopped at its limit, so there may be more.
+        let more = self.search_results.len() >= SEARCH_LIMIT;
         self.search_found = match self.search_matches.len() {
-            _ if query.is_empty() => String::new(),
-            0 => "No matches".to_string(),
+            0 => String::new(),
+            n if more => format!("{n}+ matches"),
             1 => "1 match".to_string(),
             n => format!("{n} matches"),
         };
@@ -2291,6 +2307,9 @@ impl App {
                 Step::Act(action) => self.actions.push(action),
                 Step::Search(text) => {
                     self.query = text;
+                    if self.searching {
+                        self.ask_search();
+                    }
                     self.rebuild_sections();
                 }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
@@ -2485,6 +2504,19 @@ impl App {
                     {
                         filtered.failed.extend(failed);
                         self.rebuild_collection_sections();
+                    }
+                }
+                Event::SearchResults { ask, query, games } => {
+                    if ask == self.search_asks {
+                        self.search_answered = query;
+                        self.catalog_add(Source::Search, &games);
+                        self.search_results = games.iter().map(|g| g.id).collect();
+                        self.rebuild_search();
+                    }
+                }
+                Event::SearchFailed { ask } => {
+                    if ask == self.search_asks {
+                        self.notify("Couldn't search".to_string());
                     }
                 }
                 Event::Caves(caves) => {
@@ -3310,6 +3342,9 @@ impl App {
         self.toolbar_focus = [None; Tab::ALL.len()];
         self.query.clear();
         self.searching = false;
+        self.search_asks += 1;
+        self.search_answered.clear();
+        self.search_results.clear();
         self.search_matches.clear();
         self.rows = ui::Rows::default();
         self.collection_rows = ui::Rows::default();
@@ -3972,7 +4007,7 @@ impl App {
                     self.search_rows.set_grid(&self.search_matches, columns);
                 }
                 if self.search_matches.is_empty() {
-                    let query = self.query.trim();
+                    let query = &self.search_answered;
                     let (title, detail) = if query.is_empty() {
                         ("Search your games".to_string(), String::new())
                     } else {
@@ -3986,7 +4021,7 @@ impl App {
                     ui::search_empty(ui, m, &title, &detail);
                     return;
                 }
-                ui::search_heading(ui, m, &self.query, &self.search_found);
+                ui::search_heading(ui, m, &self.search_answered, &self.search_found);
                 ui.push_id("search", |ui| {
                     ui::library(
                         ui,
@@ -4524,6 +4559,7 @@ struct Filtered {
 /// profile's own view of the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Source {
+    Search,
     Collection,
     Install,
     Owned,

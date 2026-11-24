@@ -254,16 +254,33 @@ pub struct SearchUsersResult {
     pub users: Vec<User>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SearchLocalKind {
+    #[serde(rename = "games")]
+    Games,
+    #[serde(rename = "bundles")]
+    Bundles,
+    #[serde(rename = "collections")]
+    Collections,
+    /// Any value not listed above.
+    #[default]
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
 /// Result for Search.Local
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchLocalResult {
-    /// Games in the profile's library matching the query
+    /// Games in the profile's library matching the query. Empty when
+    /// games were not searched for.
     #[serde(rename = "games", default, deserialize_with = "null_default")]
     pub games: Vec<Game>,
-    /// Bundles owned by the profile matching the query
+    /// Bundles owned by the profile matching the query. Empty when
+    /// bundles were not searched for.
     #[serde(rename = "bundles", default, deserialize_with = "null_default")]
     pub bundles: Vec<Bundle>,
-    /// Collections in the profile's collection list matching the query
+    /// Collections in the profile's collection list matching the query.
+    /// Empty when collections were not searched for.
     #[serde(rename = "collections", default, deserialize_with = "null_default")]
     pub collections: Vec<Collection>,
 }
@@ -2282,6 +2299,13 @@ pub struct Candidate {
     /// MacosInfo contains information specific to native macOS candidates
     #[serde(rename = "macosInfo", default, skip_serializing_if = "Option::is_none")]
     pub macos_info: Option<MacosInfo>,
+    /// AndroidInfo contains information specific to Android packages
+    #[serde(
+        rename = "androidInfo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub android_info: Option<AndroidInfo>,
     /// LoveInfo contains information specific to Love2D bundles (`.love` files)
     #[serde(rename = "loveInfo", default, skip_serializing_if = "Option::is_none")]
     pub love_info: Option<LoveInfo>,
@@ -2307,7 +2331,8 @@ pub struct Candidate {
     /// "renpy" for its python and zsync, "electron" or "nwjs" for crashpad
     /// and sandbox processes, "dotnet" for createdump, "java" for a bundled
     /// JRE, "node" for anything under node_modules, "unity" and "unreal"
-    /// for their crash handlers. Filter drops helpers.
+    /// for their crash handlers, "android" for a split package, which only
+    /// installs along with its base. Filter drops helpers.
     #[serde(rename = "helper", default, skip_serializing_if = "Option::is_none")]
     pub helper: Option<String>,
 }
@@ -2399,6 +2424,9 @@ pub enum Flavor {
     /// Playdate game bundle: the folder holding pdxinfo
     #[serde(rename = "playdate-pdx")]
     PlaydatePdx,
+    /// Android application package (.apk)
+    #[serde(rename = "android")]
+    Android,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -2493,9 +2521,28 @@ pub enum WindowsInstallerType {
     /// NSIS installers
     #[serde(rename = "nsis")]
     Nullsoft,
-    /// Self-extracting installers that 7-zip knows how to extract
+    /// Any other self-extracting archive spellbook recognizes (Info-Zip,
+    /// WinZip, InstallShield, WISE, ...)
     #[serde(rename = "archive")]
     Archive,
+    /// 7-Zip SFX module with a 7z archive appended
+    #[serde(rename = "7zip")]
+    SevenZip,
+    /// WinRAR SFX module with a RAR or zip archive appended
+    #[serde(rename = "winrar")]
+    WinRAR,
+    /// Stub with a cabinet appended, such as RPG Maker XP/VX/VX Ace
+    /// "compress game data" exports
+    #[serde(rename = "cab")]
+    Cab,
+    /// IExpress (wextract) package, cabinet stored as a resource. GameMaker
+    /// Studio 1.x "single runtime executable" exports are these: they
+    /// extract to a temporary folder and run the game from there.
+    #[serde(rename = "iexpress")]
+    IExpress,
+    /// Clickteam Install Creator
+    #[serde(rename = "clickteam")]
+    Clickteam,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -2515,6 +2562,139 @@ pub struct MacosInfo {
     pub architectures: Option<Vec<Arch>>,
 }
 
+/// Contains information specific to Android packages. Compatibility fields are
+/// what the package declares, not what was tested: an app that never mentions a
+/// gamepad may still work with one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AndroidInfo {
+    /// Application id, stable across versions of the same app
+    #[serde(rename = "package", default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// Name of this split when the package is one part of an app
+    #[serde(rename = "split", default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<String>,
+    /// True when the app can't be installed without further split packages
+    #[serde(
+        rename = "splitRequired",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub split_required: Option<bool>,
+    /// Internal version. The system refuses to update to a lower one.
+    #[serde(
+        rename = "versionCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub version_code: Option<i64>,
+    /// Version shown to users. Empty when it is a resource reference.
+    #[serde(
+        rename = "versionName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub version_name: Option<String>,
+    /// Lowest API level the package installs on. Zero when undeclared.
+    #[serde(rename = "minSdk", default, skip_serializing_if = "Option::is_none")]
+    pub min_sdk: Option<i64>,
+    /// API level the package was built for
+    #[serde(rename = "targetSdk", default, skip_serializing_if = "Option::is_none")]
+    pub target_sdk: Option<i64>,
+    /// Directories under lib/, such as arm64-v8a. Empty means no native code,
+    /// which runs on any architecture.
+    #[serde(rename = "abis", default, skip_serializing_if = "Option::is_none")]
+    pub abis: Option<Vec<String>>,
+    /// Lowest OpenGL ES version the package requires, such as "3.0"
+    #[serde(
+        rename = "glesVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gles_version: Option<String>,
+    /// Device features the package requires to install
+    #[serde(
+        rename = "requiredFeatures",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_features: Option<Vec<String>>,
+    /// Device features the package can use but does not need
+    #[serde(
+        rename = "optionalFeatures",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub optional_features: Option<Vec<String>>,
+    /// Fully qualified component to start
+    #[serde(
+        rename = "launcherActivity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launcher_activity: Option<String>,
+    /// Launcher surfaces the package declares across its activities
+    #[serde(
+        rename = "launcherCategories",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launcher_categories: Option<Vec<String>>,
+    /// Screen orientation of the launcher activity, in manifest notation
+    #[serde(
+        rename = "orientation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub orientation: Option<String>,
+    /// Permissions the package requests
+    #[serde(
+        rename = "permissions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub permissions: Option<Vec<String>>,
+    /// True for a debuggable build
+    #[serde(
+        rename = "debuggable",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub debuggable: Option<bool>,
+    /// True when the package links Google Play services, which some handhelds
+    /// lack. It may still run without them.
+    #[serde(
+        rename = "playServices",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub play_services: Option<bool>,
+    /// Who signed the package. The system only updates an installed app from
+    /// a package with the same signer.
+    #[serde(rename = "signer", default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<AndroidSigner>,
+}
+
+/// AndroidSigner identifies the certificate that signed an Android package
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AndroidSigner {
+    /// SHA-256 of the DER certificate, in hex. Empty when no certificate could
+    /// be read. Nothing here checks the signature, and certificates are
+    /// public, so a forged package can claim any signer. A mismatch means
+    /// something, a match proves nothing: only the system's check at install
+    /// time does.
+    #[serde(rename = "sha256", default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Certificate subject
+    #[serde(rename = "subject", default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Signature schemes present: "v1", "v2", "v3", "v3.1"
+    #[serde(rename = "schemes", default, deserialize_with = "null_default")]
+    pub schemes: Vec<String>,
+    /// True for the certificate build tools generate per machine
+    #[serde(rename = "debug", default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+}
+
 /// Contains information specific to native Linux executables
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LinuxInfo {
@@ -2531,6 +2711,12 @@ pub struct LinuxInfo {
     /// build) or "eabi" (soft-float). Empty for other architectures.
     #[serde(rename = "abi", default, skip_serializing_if = "Option::is_none")]
     pub abi: Option<String>,
+    /// True when the executable is an AppImage: a runtime stub with the
+    /// application packed behind it. The rest of this record describes
+    /// the stub, not the application. Running it needs FUSE unless the
+    /// image is unpacked first.
+    #[serde(rename = "appImage", default, skip_serializing_if = "Option::is_none")]
+    pub app_image: Option<bool>,
     /// Program interpreter (PT_INTERP), such as /lib/ld-linux-armhf.so.3
     /// or /lib/ld-musl-aarch64.so.1. Names the C library and ABI the
     /// executable was linked against. Only filled when DeepProbe is set.
@@ -2576,6 +2762,15 @@ pub struct LinuxInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub sdl_dynamic_api: Option<bool>,
+    /// True when the SDL the executable imports ships with it, as a
+    /// library next to it or in a lib directory. Display then includes
+    /// that library's backends. Only filled when DeepProbe is set.
+    #[serde(
+        rename = "sdlShipped",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sdl_shipped: Option<bool>,
     /// Windowing and graphics libraries the executable, or the SDL it
     /// bundles, can load: "x11", "wayland", "kmsdrm", "glfw", "egl", "gl",
     /// "gles", "vulkan". From DT_NEEDED and the library names it carries
@@ -2682,6 +2877,10 @@ pub enum Engine {
     LibGDX,
     #[serde(rename = "lwjgl")]
     LWJGL,
+    #[serde(rename = "flutter")]
+    Flutter,
+    #[serde(rename = "cordova")]
+    Cordova,
     /// Any value not listed above.
     #[default]
     #[serde(other, skip_serializing)]
@@ -3763,6 +3962,8 @@ pub enum Platform {
     Windows,
     #[serde(rename = "linux")]
     Linux,
+    #[serde(rename = "android")]
+    Android,
     #[serde(rename = "unknown")]
     Unknown,
     /// Any value not listed above.
@@ -4122,6 +4323,13 @@ pub struct SearchLocalParams {
     pub profile_id: i64,
     #[serde(rename = "query", default, deserialize_with = "null_default")]
     pub query: String,
+    /// What to search for. Everything, when empty or not specified.
+    #[serde(rename = "types", default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<SearchLocalKind>>,
+    /// Maximum number of results for each of the types searched, at most
+    /// 100. When not specified: 4 games, 3 bundles and 3 collections.
+    #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 impl Request for SearchLocalParams {

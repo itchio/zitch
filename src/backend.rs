@@ -29,8 +29,9 @@ use crate::butlerd::types::{
     ProfileForgetParams, ProfileListParams, ProfileLoginWithAPIKeyParams,
     ProfileLoginWithDeviceCancelParams, ProfileLoginWithDeviceParams,
     ProfileLoginWithDeviceRequestDeviceInfoResult, ProfileLoginWithDeviceResult,
-    ProfileUseSavedLoginParams, RuntimeLaunchResult, ShellLaunchResult, URLLaunchResult,
-    UninstallPerformParams, Upload, VersionGetParams, VersionGetResult,
+    ProfileUseSavedLoginParams, RuntimeLaunchResult, SearchLocalKind, SearchLocalParams,
+    ShellLaunchResult, URLLaunchResult, UninstallPerformParams, Upload, VersionGetParams,
+    VersionGetResult,
 };
 use crate::butlerd::{Cancel, Client, Daemon, Incoming, is_offline, rpc_code};
 use crate::model::{
@@ -66,6 +67,9 @@ pub struct Config {
     pub simulate_offline: bool,
 }
 
+/// The most games a search returns, butler's own maximum.
+pub const SEARCH_LIMIT: usize = 100;
+
 pub enum Command {
     Install {
         game: Box<Game>,
@@ -90,6 +94,12 @@ pub enum Command {
     /// The collections on screen, refetched first while a sync is
     /// refreshing collections.
     CollectionsWanted(Vec<i64>),
+    /// The library's games whose titles match `query`, best first, up to
+    /// [`SEARCH_LIMIT`]. Answered with `ask`.
+    Search {
+        query: String,
+        ask: u64,
+    },
     /// Discard a queued, running, or failed download. With `confirm`, the
     /// game's title, the user is asked first and [`Event::Discarding`] says
     /// they agreed.
@@ -189,6 +199,14 @@ pub enum Event {
         filter: CollectionFilter,
         ask: u64,
         collection_ids: Vec<i64>,
+    },
+    SearchResults {
+        ask: u64,
+        query: String,
+        games: Vec<Arc<Game>>,
+    },
+    SearchFailed {
+        ask: u64,
     },
     /// Every installed game known to this database.
     Caves(Vec<Cave>),
@@ -651,6 +669,7 @@ impl Session<'_> {
                 ask,
                 collection_ids,
             } => self.collections_filtered(filter, ask, collection_ids),
+            Command::Search { query, ask } => self.search(query, ask),
             Command::Discard {
                 download_id,
                 confirm: None,
@@ -762,6 +781,31 @@ impl Session<'_> {
                         }
                     }
                 }
+                Ok(())
+            },
+        );
+    }
+
+    fn search(&self, query: String, ask: u64) {
+        let profile_id = self.profile.id;
+        self.op(
+            "search".into(),
+            move |error| {
+                log::warn!("searching: {error:#}");
+                Event::SearchFailed { ask }
+            },
+            move |client, emit| {
+                let found = client.call(SearchLocalParams {
+                    profile_id,
+                    query: query.clone(),
+                    types: Some(vec![SearchLocalKind::Games]),
+                    limit: Some(SEARCH_LIMIT as i64),
+                })?;
+                emit.send(Event::SearchResults {
+                    ask,
+                    query,
+                    games: found.games.into_iter().map(Arc::new).collect(),
+                });
                 Ok(())
             },
         );
