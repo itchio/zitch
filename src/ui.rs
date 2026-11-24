@@ -3519,8 +3519,8 @@ pub fn qr(
 
 /// The pointer's way to the QR code, beside the back button.
 pub fn qr_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
-    let size = m.space(40.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let (rect, response) = header_button(ui, m);
+    let size = rect.width();
     let (fill, edge) = if response.hovered() {
         (SURFACE_HOVER, BORDER_HOVER)
     } else {
@@ -4037,10 +4037,21 @@ fn footer_hints(
     });
 }
 
-/// A round back button with a painted chevron, sized for a fingertip.
+/// The place of a round button in the header: as tall as the tab strip,
+/// so the header keeps its height, and pressed from a little around it,
+/// for a fingertip.
+fn header_button(ui: &mut Ui, m: &Metrics) -> (Rect, egui::Response) {
+    let size = tab_strip_height(ui, m);
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let id = ui.next_auto_id();
+    ui.skip_ahead_auto_ids(1);
+    let response = ui.interact(rect.expand(m.space(4.0)), id, Sense::click());
+    (rect, response)
+}
+
+/// A round back button with a painted chevron.
 pub fn back_button(ui: &mut Ui, m: &Metrics) -> egui::Response {
-    let size = m.space(40.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let (rect, response) = header_button(ui, m);
     round_chevron(ui, m, rect, response.hovered(), -1.0);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

@@ -3928,6 +3928,7 @@ impl App {
             } else if self.input_mode != InputMode::Gamepad {
                 // A pointer has no Back key; the strip's slot holds
                 // the way back. The pad's footer hint covers it.
+                ui.spacing_mut().item_spacing.x = m.space(8.0);
                 if ui::back_button(ui, m).clicked() {
                     self.actions.push(Action::Back);
                 }
