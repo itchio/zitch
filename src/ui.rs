@@ -777,13 +777,7 @@ pub fn search_empty(ui: &mut Ui, m: &Metrics, title: &str, detail: &str) {
     let center = ui.available_rect_before_wrap().center();
     let size = m.space(56.0);
     let icon = Rect::from_center_size(center - vec2(0.0, m.space(60.0)), vec2(size, size));
-    let stroke = Stroke::new(m.space(5.0), DIM);
-    let radius = size * 0.34;
-    let lens = icon.min + vec2(radius, radius) + vec2(stroke.width, stroke.width) / 2.0;
-    let reach = std::f32::consts::FRAC_1_SQRT_2;
-    ui.painter().circle_stroke(lens, radius, stroke);
-    ui.painter()
-        .line_segment([lens + vec2(reach, reach) * radius, icon.max], stroke);
+    magnifier_icon(ui, icon, Stroke::new(m.space(5.0), DIM));
     ui.painter().text(
         center,
         egui::Align2::CENTER_CENTER,
@@ -798,6 +792,67 @@ pub fn search_empty(ui: &mut Ui, m: &Metrics, title: &str, detail: &str) {
         FontId::proportional(m.body),
         DIM,
     );
+}
+
+fn magnifier_icon(ui: &Ui, rect: Rect, stroke: Stroke) {
+    let radius = rect.width() * 0.34;
+    let lens = rect.min + vec2(radius, radius) + vec2(stroke.width, stroke.width) / 2.0;
+    let reach = std::f32::consts::FRAC_1_SQRT_2;
+    ui.painter().circle_stroke(lens, radius, stroke);
+    ui.painter()
+        .line_segment([lens + vec2(reach, reach) * radius, rect.max], stroke);
+}
+
+/// The Library's text box for searching with a real keyboard, as tall as
+/// the filters beside it.
+pub fn search_box(ui: &mut Ui, m: &Metrics, id: egui::Id, query: &mut String) -> egui::Response {
+    let font = FontId::proportional(m.label);
+    let pad = vec2(m.label, m.label * 0.5);
+    let icon = m.icon(12.0);
+    let line = ui
+        .painter()
+        .layout_no_wrap("Search".to_string(), font.clone(), DIM)
+        .size()
+        .y;
+    let size = vec2(m.space(260.0), pad.y * 2.0 + line);
+    let (rect, frame) = ui.allocate_exact_size(size, Sense::click());
+    let focused = ui.memory(|memory| memory.has_focus(id));
+    ui.painter().rect(
+        rect,
+        m.space(12.0),
+        SURFACE,
+        Stroke::new(
+            m.space(1.25).max(1.0),
+            if focused { ACCENT } else { BORDER_HOVER },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let icon_rect = Rect::from_min_size(
+        pos2(rect.left() + pad.x, rect.center().y - icon / 2.0),
+        vec2(icon, icon),
+    );
+    magnifier_icon(
+        ui,
+        icon_rect,
+        Stroke::new(m.space(1.75).max(1.0), if focused { TEXT } else { DIM }),
+    );
+    let inner = Rect::from_min_max(
+        pos2(icon_rect.right() + m.label * 0.5, rect.top() + pad.y),
+        pos2(rect.right() - pad.x, rect.bottom() - pad.y),
+    );
+    let edit = ui.put(
+        inner,
+        egui::TextEdit::singleline(query)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .hint_text(egui::RichText::new("Search").font(font.clone()).color(DISABLED))
+            .desired_width(inner.width())
+            .font(font),
+    );
+    if frame.clicked() {
+        edit.request_focus();
+    }
+    edit
 }
 
 /// How many tiles fit side by side in `width`.

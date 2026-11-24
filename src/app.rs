@@ -3953,16 +3953,7 @@ impl App {
                     if std::mem::take(&mut self.blur_search) {
                         ui.memory_mut(|m| m.surrender_focus(id));
                     }
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.query)
-                            .id(id)
-                            .hint_text(
-                                egui::RichText::new("Search")
-                                    .font(egui::FontId::proportional(m.label)),
-                            )
-                            .desired_width(m.space(200.0))
-                            .font(egui::FontId::proportional(m.label)),
-                    );
+                    let edit = ui::search_box(ui, m, id, &mut self.query);
                     if std::mem::take(&mut self.focus_search) {
                         edit.request_focus();
                     }
