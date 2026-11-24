@@ -172,6 +172,9 @@ pub struct App {
     query: String,
     /// Move keyboard focus into the search box on the next frame.
     focus_search: bool,
+    focus_search_next: bool,
+    /// The search text box has the keyboard, so nothing else shows focus.
+    typing: bool,
     /// Take keyboard focus out of the search box on the next frame.
     blur_search: bool,
     page: Page,
@@ -430,6 +433,8 @@ impl App {
             rating_filter: RatingFilter::Any,
             query: String::new(),
             focus_search: false,
+            focus_search_next: false,
+            typing: false,
             blur_search: false,
             page: Page::Library,
             login: None,
@@ -493,7 +498,21 @@ impl App {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         let typing = ctx.memory(|m| m.has_focus(Self::search_id()));
+        self.typing = typing;
+        // Left from the start of the text leaves for the filters.
+        let at_start = typing
+            && egui::TextEdit::load_state(ctx, Self::search_id())
+                .and_then(|state| state.cursor.char_range())
+                .is_none_or(|range| range.primary.index.0 == 0 && range.secondary.index.0 == 0);
+        let last_stop = self.toolbar().1.len().checked_sub(1);
         ctx.input_mut(|input| {
+            if let Some(last) = last_stop
+                && at_start
+                && input.consume_key(Modifiers::NONE, Key::ArrowLeft)
+            {
+                self.blur_search = true;
+                self.actions.push(Action::FocusToolbar(last));
+            }
             let mut key = |modifiers: Modifiers, key: Key, action: Action| {
                 if input.consume_key(modifiers, key) {
                     self.actions.push(action);
@@ -1167,11 +1186,24 @@ impl App {
         }
     }
 
+    /// The Library has its text box for searching with a real keyboard.
+    fn search_box_shown(&self) -> bool {
+        self.page == Page::Library && self.tab == Tab::Library && !self.handheld && !self.searching
+    }
+
     /// Focus moving on the Library page: among the toolbar stops, down
     /// into the rows and within them.
     fn move_focus_library(&mut self, direction: Direction) {
         let stops = self.toolbar().1.len();
         let rows_empty = self.rows_empty();
+        // The search box is the stop after the last filter.
+        if direction == Direction::Right
+            && self.search_box_shown()
+            && self.toolbar_focus_in(stops, rows_empty) == Some(stops.saturating_sub(1))
+        {
+            self.focus_search_next = true;
+            return;
+        }
         let at_first_row = match self.tab {
             _ if self.searching => self.search_rows.row == 0,
             Tab::Library => self.rows.row == 0,
@@ -1640,6 +1672,10 @@ impl App {
             // Only the keyboard has keys to press.
             Action::KeyboardKey { .. } => {}
             Action::SearchDone => {
+                // Nothing below to move to.
+                if self.typing && self.rows_empty() {
+                    return;
+                }
                 self.blur_search = true;
                 // Search hands control to its results, not back to the
                 // toolbar button that had focus before typing.
@@ -3448,6 +3484,15 @@ impl App {
             .map(|(glyph, label)| (vec![glyph], label.to_string()))
             .to_vec();
         }
+        if self.typing && self.prompt.is_none() && self.menu.is_none() {
+            let mut hints = Vec::new();
+            if !self.rows_empty() {
+                hints.push((vec![Glyph::Confirm], "Results".to_string()));
+            }
+            let back = if self.query.is_empty() { "Back" } else { "Clear" };
+            hints.push((vec![Glyph::Back], back.to_string()));
+            return hints;
+        }
         if let Some(focus) = self.menu {
             let items = self.menu_items();
             let mut hints = Vec::new();
@@ -3937,7 +3982,7 @@ impl App {
                 let (controls, stops) = self.toolbar();
                 let focused = self
                     .toolbar_focus_in(stops.len(), self.rows_empty())
-                    .filter(|_| self.keyboard.is_none());
+                    .filter(|_| self.keyboard.is_none() && !self.typing);
                 let response = ui::toolbar(ui, m, &controls, focused);
                 if let Some(index) = response.hovered {
                     self.actions.push(Action::FocusToolbar(index));
@@ -3945,7 +3990,7 @@ impl App {
                 if let Some(index) = response.clicked {
                     self.actions.push(stops[index].action.clone());
                 }
-                if self.tab != Tab::Library || self.handheld || self.searching {
+                if !self.search_box_shown() {
                     return;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3956,6 +4001,12 @@ impl App {
                     let edit = ui::search_box(ui, m, id, &mut self.query);
                     if std::mem::take(&mut self.focus_search) {
                         edit.request_focus();
+                    }
+                    // A frame later, once egui is done with the arrow
+                    // press that asked: it moves focus on with it.
+                    if std::mem::take(&mut self.focus_search_next) {
+                        self.focus_search = true;
+                        ui.ctx().request_repaint();
                     }
                     if edit.changed() {
                         self.rebuild_sections();
@@ -4045,7 +4096,8 @@ impl App {
                         marks: self.cover_marks.then_some(&self.marks),
                         covers: &self.covers,
                         scrollbar: self.input_mode == InputMode::Keyboard,
-                        focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
+                        focused: self.toolbar_focus[tab_slot(Tab::Library)].is_none()
+                            && !self.typing,
                     },
                     &mut self.rows,
                     &mut self.actions,
