@@ -194,8 +194,7 @@ pub enum Action {
     /// Y on a pad: in and out of the filters on the library, the QR code
     /// on a game's page.
     Secondary,
-    /// X on a pad, Slash on a keyboard: search on the library, the QR
-    /// code on a game's page.
+    /// X on a pad, Slash on a keyboard: search.
     Search,
     /// Show the open game's page as a QR code.
     ShowQr,

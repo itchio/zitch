@@ -170,13 +170,10 @@ pub struct App {
     /// for browsing, and starts at Any.
     rating_filter: RatingFilter,
     query: String,
-    /// Move keyboard focus into the search box on the next frame.
-    focus_search: bool,
-    focus_search_next: bool,
+    /// Where keyboard focus should go, for the search box to act on.
+    search_focus: SearchFocus,
     /// The search text box has the keyboard, so nothing else shows focus.
     typing: bool,
-    /// Take keyboard focus out of the search box on the next frame.
-    blur_search: bool,
     page: Page,
     /// The sign-in code, while there is nothing to sign in with.
     login: Option<LoginView>,
@@ -432,10 +429,8 @@ impl App {
             cover_marks: settings.cover_marks,
             rating_filter: RatingFilter::Any,
             query: String::new(),
-            focus_search: false,
-            focus_search_next: false,
+            search_focus: SearchFocus::Keep,
             typing: false,
-            blur_search: false,
             page: Page::Library,
             login: None,
             qr: None,
@@ -505,12 +500,18 @@ impl App {
                 .and_then(|state| state.cursor.char_range())
                 .is_none_or(|range| range.primary.index.0 == 0 && range.secondary.index.0 == 0);
         let last_stop = self.toolbar().1.len().checked_sub(1);
+        // Slash is the pad's X where there is a search, its Y elsewhere.
+        let slash = if matches!(self.page, Page::Library | Page::Search) {
+            Action::Search
+        } else {
+            Action::Secondary
+        };
         ctx.input_mut(|input| {
             if let Some(last) = last_stop
                 && at_start
                 && input.consume_key(Modifiers::NONE, Key::ArrowLeft)
             {
-                self.blur_search = true;
+                self.search_focus = SearchFocus::Leave;
                 self.actions.push(Action::FocusToolbar(last));
             }
             let mut key = |modifiers: Modifiers, key: Key, action: Action| {
@@ -564,7 +565,7 @@ impl App {
             );
             key(Modifiers::NONE, Key::Enter, Action::Activate);
             key(Modifiers::NONE, Key::Escape, Action::Back);
-            key(Modifiers::NONE, Key::Slash, Action::Search);
+            key(Modifiers::NONE, Key::Slash, slash);
             key(Modifiers::NONE, Key::Q, Action::CycleTab(-1));
             key(Modifiers::NONE, Key::E, Action::CycleTab(1));
         });
@@ -1228,7 +1229,7 @@ impl App {
             && self.search_box_shown()
             && self.toolbar_focus_in(stops, rows_empty) == Some(stops.saturating_sub(1))
         {
-            self.focus_search_next = true;
+            self.search_focus = SearchFocus::EnterNextFrame;
             return;
         }
         let at_first_row = match self.tab {
@@ -1619,7 +1620,7 @@ impl App {
                 }
                 if self.page.is_library() {
                     self.tab = tab;
-                    self.blur_search = true;
+                    self.search_focus = SearchFocus::Leave;
                     self.follow_rows();
                 }
             }
@@ -1644,12 +1645,14 @@ impl App {
             Action::Search => match self.page {
                 Page::Library if self.keyboard_search() => self.open_search(),
                 Page::Search if self.keyboard_search() => self.open_search(),
-                Page::Search => self.focus_search = true,
+                Page::Search => self.search_focus = SearchFocus::Enter,
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
-                    self.focus_search = true;
+                    self.search_focus = SearchFocus::Enter;
                 }
-                Page::Library | Page::PlayableTypes { .. } | Page::Settings { .. } => {}
-                Page::Game { .. } => self.actions.push(Action::ShowQr),
+                Page::Library
+                | Page::Game { .. }
+                | Page::PlayableTypes { .. }
+                | Page::Settings { .. } => {}
             },
             Action::Secondary => match self.page {
                 Page::Library | Page::Search if self.tab != Tab::Downloads => {
@@ -1704,7 +1707,7 @@ impl App {
                 if self.typing && self.rows_empty() {
                     return;
                 }
-                self.blur_search = true;
+                self.search_focus = SearchFocus::Leave;
                 // Search hands control to its results, not back to the
                 // toolbar button that had focus before typing.
                 self.toolbar_focus[tab_slot(Tab::Library)] = None;
@@ -1718,7 +1721,7 @@ impl App {
                 }
             }
             Action::ClearSearch => {
-                self.blur_search = true;
+                self.search_focus = SearchFocus::Leave;
                 if self.searching {
                     self.close_search();
                 }
@@ -3992,18 +3995,18 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let id = Self::search_id();
-                    if std::mem::take(&mut self.blur_search) {
+                    let focus = std::mem::replace(&mut self.search_focus, SearchFocus::Keep);
+                    if focus == SearchFocus::Leave {
                         ui.memory_mut(|m| m.surrender_focus(id));
                     }
                     let edit = ui::search_box(ui, m, id, &mut self.query);
-                    if std::mem::take(&mut self.focus_search) {
-                        edit.request_focus();
-                    }
-                    // A frame later, once egui is done with the arrow
-                    // press that asked: it moves focus on with it.
-                    if std::mem::take(&mut self.focus_search_next) {
-                        self.focus_search = true;
-                        ui.ctx().request_repaint();
+                    match focus {
+                        SearchFocus::Enter => edit.request_focus(),
+                        SearchFocus::EnterNextFrame => {
+                            self.search_focus = SearchFocus::Enter;
+                            ui.ctx().request_repaint();
+                        }
+                        SearchFocus::Leave | SearchFocus::Keep => {}
                     }
                     if edit.changed() {
                         self.search_typed();
@@ -4593,6 +4596,17 @@ struct Filtered {
     asked: std::collections::HashMap<i64, u64>,
     /// Collections whose query failed, asked again after the next sync.
     failed: std::collections::HashSet<i64>,
+}
+
+/// A change of keyboard focus for the search box to make as it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchFocus {
+    Keep,
+    Enter,
+    /// After an arrow press: egui moves focus on with the press in the
+    /// frame it arrives.
+    EnterNextFrame,
+    Leave,
 }
 
 /// Where a catalog entry came from. A later variant's copy of a game
