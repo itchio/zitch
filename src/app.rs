@@ -1006,18 +1006,38 @@ impl App {
     /// already open has typed.
     fn open_search(&mut self) {
         if !self.searching {
+            self.query.clear();
+        }
+        self.show_search();
+        self.keyboard = Some(Keyboard::default());
+    }
+
+    /// Shows the search page for what is typed.
+    fn show_search(&mut self) {
+        if !self.searching {
             self.searching = true;
             // The search has the Library's filters, whichever tab it
             // was opened from.
             self.search_from = self.tab;
             self.tab = Tab::Library;
-            self.query.clear();
             self.search_rows = ui::Rows::default();
         }
         self.page = Page::Search;
         self.toolbar_focus[tab_slot(Tab::Library)] = None;
-        self.keyboard = Some(Keyboard::default());
         self.rebuild_search();
+    }
+
+    /// The text box's text changed: the search page follows it, and
+    /// closes when the box is emptied.
+    fn search_typed(&mut self) {
+        if self.query.trim().is_empty() {
+            if self.searching {
+                self.close_search();
+            }
+            return;
+        }
+        self.show_search();
+        self.ask_search();
     }
 
     /// Asks butler for the games matching what is typed. What the last
@@ -1193,7 +1213,9 @@ impl App {
 
     /// The Library has its text box for searching with a real keyboard.
     fn search_box_shown(&self) -> bool {
-        self.page == Page::Library && self.tab == Tab::Library && !self.handheld && !self.searching
+        matches!(self.page, Page::Library | Page::Search)
+            && self.tab == Tab::Library
+            && !self.handheld
     }
 
     /// Focus moving on the Library page: among the toolbar stops, down
@@ -1621,7 +1643,8 @@ impl App {
             },
             Action::Search => match self.page {
                 Page::Library if self.keyboard_search() => self.open_search(),
-                Page::Search => self.open_search(),
+                Page::Search if self.keyboard_search() => self.open_search(),
+                Page::Search => self.focus_search = true,
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
                 }
@@ -1696,16 +1719,14 @@ impl App {
             }
             Action::ClearSearch => {
                 self.blur_search = true;
-                if !self.query.is_empty() {
-                    self.query.clear();
-                    self.rebuild_sections();
+                if self.searching {
+                    self.close_search();
                 }
             }
             Action::Back => match self.page {
                 Page::Library if self.tab != Tab::Library => {
                     self.actions.push(Action::SetTab(Tab::Library))
                 }
-                Page::Library if !self.query.is_empty() => self.actions.push(Action::ClearSearch),
                 Page::Library if self.notice.is_some() => self.notice = None,
                 Page::Library => self.actions.push(Action::Menu),
                 Page::Search => self.close_search(),
@@ -1887,37 +1908,6 @@ impl App {
         }
         if self.searching {
             self.rebuild_search();
-        }
-        let query = self.query.trim().to_lowercase();
-        if !query.is_empty() && !self.searching {
-            // Searching narrows the whole screen to one row of matches,
-            // owned first then installed-only, each in its usual order.
-            let mut seen = std::collections::HashSet::new();
-            let matches: Vec<i64> = self
-                .owned_ids()
-                .into_iter()
-                .chain(self.installed_ids())
-                .filter(|id| seen.insert(*id))
-                .filter(|id| {
-                    self.catalog
-                        .get(id)
-                        .is_some_and(|g| self.passes(g) && g.title.to_lowercase().contains(&query))
-                })
-                .collect();
-            let title = match matches.len() {
-                0 => "No matches".to_string(),
-                1 => "1 match".to_string(),
-                n => format!("{n} matches"),
-            };
-            self.search_found.clone_from(&title);
-            self.rows.set_sections(vec![ui::Section {
-                title,
-                games: matches,
-                note: None,
-                more: false,
-                collection: None,
-            }]);
-            return;
         }
         let mut sections = Vec::new();
 
@@ -2348,10 +2338,11 @@ impl App {
                 Step::Act(action) => self.actions.push(action),
                 Step::Search(text) => {
                     self.query = text;
-                    if self.searching {
+                    if self.keyboard.is_some() {
                         self.ask_search();
+                    } else {
+                        self.search_typed();
                     }
-                    self.rebuild_sections();
                 }
                 Step::Wait(duration) => shot.wait_until = Some(now + duration),
                 Step::Report => self.report = Some(sample::report()),
@@ -4015,7 +4006,7 @@ impl App {
                         ui.ctx().request_repaint();
                     }
                     if edit.changed() {
-                        self.rebuild_sections();
+                        self.search_typed();
                     }
                 });
             });
@@ -4083,6 +4074,7 @@ impl App {
                             covers: &self.covers,
                             scrollbar: self.input_mode == InputMode::Keyboard,
                             focused: self.keyboard.is_none()
+                                && !self.typing
                                 && self.toolbar_focus[tab_slot(Tab::Library)].is_none(),
                         },
                         &mut self.search_rows,
