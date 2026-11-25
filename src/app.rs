@@ -1186,6 +1186,11 @@ impl App {
         }
     }
 
+    /// Search is typed on the on-screen keyboard.
+    fn keyboard_search(&self) -> bool {
+        self.handheld || self.second_screen
+    }
+
     /// The Library has its text box for searching with a real keyboard.
     fn search_box_shown(&self) -> bool {
         self.page == Page::Library && self.tab == Tab::Library && !self.handheld && !self.searching
@@ -1615,7 +1620,7 @@ impl App {
                 Page::PlayableTypes { .. } | Page::Settings { .. } => {}
             },
             Action::Search => match self.page {
-                Page::Library if self.second_screen => self.open_search(),
+                Page::Library if self.keyboard_search() => self.open_search(),
                 Page::Search => self.open_search(),
                 Page::Library if self.tab == Tab::Library && !self.handheld => {
                     self.focus_search = true;
@@ -3613,13 +3618,13 @@ impl App {
                         if self.input_mode != InputMode::Gamepad && !self.handheld {
                             hints.push((vec![Glyph::Secondary], "Search".to_string()));
                         }
-                        if self.second_screen {
+                        if self.keyboard_search() {
                             hints.push((vec![Glyph::Search], "Search".to_string()));
                         }
                         hints.push((vec![Glyph::Menu], "Menu".to_string()));
                     }
                     Tab::Collections | Tab::Downloads => {
-                        if self.second_screen {
+                        if self.keyboard_search() {
                             hints.push((vec![Glyph::Search], "Search".to_string()));
                         }
                         hints.push((vec![Glyph::Back], "Back".to_string()));
